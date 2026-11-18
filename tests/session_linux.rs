@@ -1309,9 +1309,17 @@ fn idle_stops_both_sleeping_roots_in_role_order() {
 #[test]
 fn ten_thousand_exchanges_do_not_wake_the_coordinator_per_chunk_or_fire_idle() {
     test(async {
-        let mut spec = spec(&["pingpong:10000"], &["pong:10000"]);
-        // Long enough that host scheduling stalls cannot fire it; the run
-        // itself lasts longer than this, so a per-chunk restart is required.
+        // Nine pauses force at least 900 ms of dialogue even on fast hosts.
+        // Only the initiator sleeps; the responder stays alive waiting for
+        // the next batch. Each 100 ms gap is well below the idle window.
+        let mut solution = Vec::new();
+        for batch in 0..10 {
+            if batch != 0 {
+                solution.push("sleep:100");
+            }
+            solution.push("pingpong:1000");
+        }
+        let mut spec = spec(&solution, &["pong:10000"]);
         spec.idle = Some(Duration::from_millis(500));
         let outcome = run_session(spec).await;
         trace(&outcome);

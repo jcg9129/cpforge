@@ -7,13 +7,21 @@ The crate is unpublished and is a dev-dependency of the root package.
 crate's integration test references `env!("CARGO_BIN_EXE_cpf-fixture")`, which
 instructs Cargo to build the ordinary binary as well as its test target.
 `cpf_fixture::harness::fixture_path()` is the helper for root-package tests too.
-It uses `CPF_FIXTURE_BIN` when set, otherwise the current test executable's
-profile directory: a test at `target/debug/deps/test-HASH` finds
-`target/debug/cpf-fixture` (`.exe` on Windows). Custom target directories,
-release profiles, and target-triple subdirectories work the same way.
+It uses `CPF_FIXTURE_BIN` when set. Otherwise it searches for
+`cpf-fixture` (`.exe` on Windows) in the absolute directories on Cargo's runtime
+dynamic library path: `PATH` on Windows, `DYLD_FALLBACK_LIBRARY_PATH` on macOS,
+or `LD_LIBRARY_PATH` on other Unix systems (`LIBPATH` on AIX). The first file
+found is used. Cargo [documents that this path includes the base output
+directory](https://doc.rust-lang.org/cargo/reference/environment-variables.html#dynamic-library-paths),
+such as `target/debug`. This works with Rust 1.85 and newer Cargo layouts,
+custom target directories, profiles, target triples, and a separate
+`build.build-dir`, without assuming where Cargo stores test executables.
 For a root-only test invocation on a clean checkout, first run
-`cargo build -p cpf-fixture --bin cpf-fixture`; alternatively set
-`CPF_FIXTURE_BIN` to an explicitly built binary's absolute path. No recursive
+`cargo build -p cpf-fixture --bin cpf-fixture` with the same target directory,
+profile, and target triple. Discovery panics with setup instructions if no
+binary is found. When running tests directly or with a runner that does not
+preserve Cargo's runtime search path (including with a separate build directory),
+set `CPF_FIXTURE_BIN` to an explicitly built binary's absolute path. No recursive
 Cargo invocation or build-script side effects are needed.
 
 ```rust,no_run

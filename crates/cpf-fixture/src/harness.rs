@@ -11,23 +11,44 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Locate the binary using `CPF_FIXTURE_BIN`, or beside the current test's
-/// `deps/` directory (`target/<profile>/cpf-fixture[.exe]`). This also supports
-/// target triples and custom target directories. Run `cargo test --workspace`
-/// to build it, or `cargo build -p cpf-fixture --bin cpf-fixture` before running
-/// only root-package tests. See the crate README for an explicit-path helper.
+/// Locate the binary using `CPF_FIXTURE_BIN`, or search Cargo's runtime dynamic
+/// library path for `cpf-fixture[.exe]`. Cargo includes the profile's output
+/// directory there, independently of its internal test executable layout. This
+/// supports custom target/build directories, profiles, and target triples.
+/// Run `cargo test --workspace` to build it, or build the fixture first for
+/// root-only tests. Outside Cargo, set `CPF_FIXTURE_BIN` to an explicit path.
+/// Panics with setup instructions if discovery fails. See the crate README.
 pub fn fixture_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CPF_FIXTURE_BIN") {
         return path.into();
     }
-    let exe = std::env::current_exe().expect("locate current test executable");
-    let directory = exe.parent().expect("test executable has a parent");
-    let profile = if directory.file_name().is_some_and(|name| name == "deps") {
-        directory.parent().expect("deps has a profile parent")
+    // Cargo documents the base output directory in this path:
+    // https://doc.rust-lang.org/cargo/reference/environment-variables.html#dynamic-library-paths
+    let variable = if cfg!(windows) {
+        "PATH"
+    } else if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else if cfg!(target_os = "aix") {
+        "LIBPATH"
     } else {
-        directory
+        "LD_LIBRARY_PATH"
     };
-    profile.join(format!("cpf-fixture{}", std::env::consts::EXE_SUFFIX))
+    if let Some(paths) = std::env::var_os(variable) {
+        let binary = format!("cpf-fixture{}", std::env::consts::EXE_SUFFIX);
+        for directory in std::env::split_paths(&paths).filter(|path| path.is_absolute()) {
+            let candidate = directory.join(&binary);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    panic!(
+        "cannot locate cpf-fixture in Cargo's {variable}; run cargo test --workspace \
+         or build it with cargo build -p cpf-fixture --bin cpf-fixture using the same \
+         target directory, profile, and target triple; if the Cargo runtime search \
+         path is unavailable (including a custom build.build-dir), set CPF_FIXTURE_BIN \
+         to the fixture binary's absolute path"
+    );
 }
 
 /// Spawn configuration. Standard streams are always piped; tests take the
