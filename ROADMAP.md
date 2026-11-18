@@ -25,9 +25,9 @@ Implemented and exercised on Linux:
   watchdog, direct pipes, execution facts and a latency benchmark. These
   mechanics do not derive interactive judging verdicts.
 
-CI configuration covers Linux, macOS and Windows, plus Rust 1.85 separately
-from current stable. It has not yet run. Fixture and pipe work on macOS and
-Windows has not established runtime support there.
+CI runs on Linux, macOS and Windows with current stable Rust, plus Rust 1.85
+on Linux. On macOS and Windows it exercises the test fixture and pipe layer
+only, which does not establish supervisor runtime support there.
 
 ## Process supervisor milestone
 

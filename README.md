@@ -14,8 +14,9 @@ measurements and connected runs have implementations and tests. The CLI is
 mostly a skeleton; the workflows described in the design documents are not
 yet available as commands.
 
-CI is configured for Linux, macOS and Windows, but has not yet run. macOS and
-Windows runtime support remains unverified. The supervisor runs the user's
+CI runs on Linux, macOS and Windows. On macOS and Windows it currently covers
+the test fixture and pipe layer only; the process supervisor is Linux-only so
+far, so runtime support there is not yet established. The supervisor runs the user's
 own programs; it is not a security sandbox. See the [roadmap](ROADMAP.md) for
 completed work, planned milestones and known caveats.
 
