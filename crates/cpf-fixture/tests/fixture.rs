@@ -215,7 +215,10 @@ fn killed_root_is_gone_before_it_is_reaped() {
         if result == 0 {
             break;
         }
-        assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            io::Error::last_os_error().kind(),
+            io::ErrorKind::Interrupted
+        );
     }
     // SAFETY: signal zero only probes our unreaped child without sending a signal.
     assert_eq!(unsafe { libc::kill(fixture.id() as i32, 0) }, 0);
