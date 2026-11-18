@@ -1,0 +1,567 @@
+# Storage contract
+
+Status: v3. Normative for the `workspace` module and the storage side of
+`jobs`. Initial scope: manual problems and tests, job directories, retention.
+Fetch, generation-based publication and archives are planned for later
+versions; the initial implementation reaches tests only through the
+test-store interface (§8).
+
+**Managed-workspace amendment (v4): draft, not yet implemented.** The
+single-workspace rows of `../design-workspace.md` §9 cover admission sequence,
+source capture, run facts, adopt / clean / fsck / gitignore transactions.
+Amended content is marked *(draft)* below and remains under design review.
+References labelled *workspace design* point to `../design-workspace.md`.
+
+Related: design §4 and `execution.md`.
+
+## 1. Assumptions and guarantee levels
+
+- **Threat model:** cooperating local users and their ordinary tools
+  (editors, compilers, the user's own programs); no adversary racing `cpf`.
+- **Stable structural ancestors**: while an operation runs, the
+  directories it walks through (workspace root, `.cpforge/`, `problems/`,
+  `problems/<p>/`, `runs/`, a job directory) are not renamed, replaced or
+  turned into links by anyone else. Ordinary edits and replacement of user
+  *files* are expected and handled.
+- **Supported filesystems**: ext4, xfs, btrfs, tmpfs (Linux), APFS
+  (macOS), NTFS (Windows). Others are unverified; network and cloud-synced
+  workspaces are outside every guarantee.
+- **Three levels**: (1) *concurrent visibility*: readers see the old
+  or the new complete file; (2) *`cpf` process crash*: guaranteed per §10;
+  (3) *OS crash / power loss*: best effort (§4), never tested or promised.
+
+## 2. Paths
+
+- The workspace root is the nearest ancestor of the current directory
+  containing `cpforge.toml` (`--workspace` overrides); it may be reached
+  through a link and is canonicalised once.
+- Tool-written paths come from the root and sanitised identifiers (portable-name validation). Each
+  component below the root is checked with `symlink_metadata` at use; a
+  symlink, junction or other reparse point is `LinkInPath`. Under §1 this
+  suffices; it is no defence against component swapping.
+- **Disposable trees** (job directories, `cwd/`, build directories) are
+  assumed to contain **no mount points** (creating a mount visible to `cpf`
+  requires privilege in its mount namespace; a mount the user creates there
+  is outside the contract, stated in the user documentation).
+  Measurement and deletion use one **own no-follow walker** (not
+  `remove_dir_all`): it opens directories without following links
+  (`O_NOFOLLOW | O_DIRECTORY` relative to the parent handle on Unix, reparse
+  points not followed on Windows), removes links as entries, and stops at an
+  entry whose device id differs from the tree root's or, on Linux, that
+  `/proc/self/mountinfo` lists as a mount point (bind mounts on the same
+  filesystem). Such an entry is skipped, left in place and reported; the
+  containing directory is then not removed.
+- Files the tool only reads may be links; test data must resolve to regular
+  files (FIFOs, devices, sockets refused).
+- Collision detection uses the portable-name key against existing names, under the
+  workspace lock.
+- **File-I/O names** declared by a problem (configuration contract) are one relative portable
+  component: no separators, `..`, drive or root prefix, `:`, reserved device
+  names, trailing dots or spaces.
+- **Shared `cwd`** (configuration contract §4.1, any configured `cwd` other than the run's own)
+  is a distinct capability: `cpf` never measures, clears or deletes
+  anything in it; the record marks `shared_cwd`; file-based I/O problems with
+  a shared `cwd` are rejected in the CLI foundation.
+
+## 3. Ownership
+
+| Path | Owner | How the tool writes it |
+|---|---|---|
+| `cpforge.toml` | user | created once by `cpf init`; never rewritten |
+| `problems/<p>/problem.toml`, `tests.toml`, `contests/<c>/contest.toml` | shared | edit transaction (§4.4), only the command's fields |
+| `problems/<p>/tests/*`, solution sources | user once created | created no-clobber; **never modified or deleted** |
+| `problems/<p>/notes.md` | user | never written (CLI foundation) |
+| `.cpforge/state.toml` | tool | atomic replace under the lock |
+| `.cpforge/runs/<job>/` | tool, disposable | by its job (§6) |
+| `.cpforge/staging/` | tool | only while holding the workspace lock |
+| `.cpforge/lock` | tool | lock only; never unlinked or replaced |
+| `.cpforge/job-seq` *(draft)* | tool | atomic replace under the workspace lock (§6.2) |
+| `.cpforge/facts/<problem>/<target>.toml` *(draft)* | tool | atomic replace under the workspace lock (§6.5) |
+| `problems/<p>/problem.toml` `[files] user` *(draft)* | user field | edit transaction by `cpf adopt` (§5.4) |
+| `problems/<p>/problem.toml` `[files] created` *(draft)* | tool field | edit transaction by the creating command |
+| `<root>/.gitignore` cpf block *(draft)* | tool block in a user file | only on `cpf gitignore --write` (§5.5) |
+
+Tool fields (`id`, `url`, `kind`, published limits, `schema`) and user fields
+(tags, status, language, comparator, comments, unknown keys) share a TOML
+file. A command changes only its own fields; untouched items survive as a
+`toml_edit` round-trip. Permanent user files (sources, tests, notes) are
+outside every retention budget.
+
+**Reserved trees** *(draft)*: `.cpforge/runs/`, `.cpforge/cache/`,
+`.cpforge/staging/`, `.cpforge/facts/` and the files `.cpforge/state.toml`,
+`lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
+Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
+(initial feature release) are disposable. No path under `problems/` or `contests/` is
+disposable; outside the reserved trees nothing is deleted automatically.
+Provenance and visibility of problem files are defined in workspace design §2.2.
+
+## 4. Primitives
+
+### 4.1 Publication result
+
+Every publishing primitive returns
+
+```rust
+pub struct Published { pub committed: bool, pub durability: Durability, pub cleanup: Cleanup }
+pub enum Durability { Ok, Uncertain(io::Error) }     // a flush or directory sync failed after commit
+pub enum Cleanup { Done, Pending(PathBuf) }          // a temp name could not be removed
+```
+
+or an error with `committed = false` semantics (target unchanged; a temp file
+whose removal failed is reported as `Cleanup::Pending` in the error). Callers
+**continue their transaction after `committed`** and report the other two
+fields as warnings; a committed publication is never reported as a
+retryable failure.
+
+**Metadata:** Unix mode of a replaced file is copied to the temp file.
+Ownership, ACLs, extended attributes, Windows security descriptors and Windows
+file attributes (read-only, hidden, …) are **not** preserved: the new file gets
+what its directory gives new files. A read-only target on Windows makes the
+replace fail with the old file intact (reported). Documented for users.
+
+### 4.2 Atomic replace (files)
+
+1. Create `.<name>.cpf-tmp-<pid>-<random>` in the target's directory
+   (`create_new`), write, `sync_all` (macOS also `F_FULLFSYNC`, best effort;
+   Windows `FlushFileBuffers`); copy the Unix mode.
+2. Unix `rename`; Windows `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING |
+   MOVEFILE_WRITE_THROUGH)`, never the copy flag.
+3. Windows sharing violation / access denied: retry with backoff, monotonic,
+   ≤ 2 s total, revalidating before each attempt for edit transactions
+   (§4.4); then fail, old file untouched, temp removed. Never
+   delete-then-rename, never truncate in place.
+4. Unix: `fsync` the parent directory (failure → `Durability::Uncertain`).
+
+### 4.3 No-clobber publication
+
+- **Files** (`publish_file_noclobber`): temp as §4.2 step 1, then Linux
+  `renameat2(RENAME_NOREPLACE)` (filesystem refuses it → `link` + `unlink`,
+  a failed unlink → `Cleanup::Pending`), macOS `renamex_np(RENAME_EXCL)`,
+  Windows `MoveFileExW` without replace. Existing target → `Exists`.
+- **Directories** (`publish_dir_noclobber`): Linux `renameat2(RENAME_NOREPLACE)`
+  and macOS `renamex_np(RENAME_EXCL)` are **required** (no fallback:
+  `Unsupported{op, filesystem}`); Windows `MoveFileExW` without replace or
+  copy flags. The actual result decides: `EXDEV` / `ERROR_NOT_SAME_DEVICE`
+  → staging removed, `CrossFilesystem` (a device-id precheck is only a hint).
+- **Pre-commit vs post-commit**: a failure before the publishing
+  call (temp write, `sync_all`, staged-directory sync) is an error with
+  `committed = false`, nothing published; a flush or sync failure after it is
+  `Durability::Uncertain`. Before a directory publish: staged files
+  `sync_all`, staged directories synced bottom-up. After any publish (file or
+  directory), Unix syncs the target's parent, the source parent when it
+  differs, and every ancestor directory the operation newly created **together with
+  that ancestor's own parent**, bottom-up (best effort,
+  `Durability::Uncertain` on failure).
+
+### 4.4 Edit transaction (shared TOML files)
+
+Runs with a borrowed workspace guard (§4.5).
+
+1. Read the target's bytes; record length, SHA-256, file identity. Refuse a
+   link, a non-regular file, or more than one hard link.
+2. Parse (`toml_edit`), check the schema (§9), apply the command's
+   **semantic operations** to this freshly read document.
+3. Write the temp file (§4.2 step 1).
+4. **Validate before each publish attempt** (also every Windows retry):
+   re-read; different bytes, length or identity, disappearance or type
+   change → temp removed, `Conflict`. The command may restart once from 1.
+5. Publish (§4.2 steps 2–4).
+
+**Guarantee, stated exactly:** *The tool aborts when the final validation
+observes bytes different from its baseline. This is not compare-and-swap;
+concurrent edits during validation or before successful replacement may be
+overwritten.* Between cooperating `cpf` processes there is no lost update.
+An editor saving an older buffer after the tool overwrites the tool's change.
+
+### 4.5 Locks
+
+- **Workspace lock:** process-local mutex, then an exclusive OS lock on
+  `.cpforge/lock`, opened once per process, non-inheritable. Unix `flock`;
+  Windows `LockFileEx` on byte range `[0, 1)` of that dedicated file (a
+  mandatory range lock; the file is never read or written). Non-blocking
+  attempts with monotonic backoff up to 10 s, then `Busy{op}`.
+- **Composition:** each public operation acquires the lock once and passes
+  `&WorkspaceGuard` to its internal steps (edit transactions, publications,
+  staging); internal steps require the guard and never acquire. The guard is
+  not reentrant.
+- **Leftover recovery** runs once at outer-operation entry, right after
+  acquiring the lock and before the operation creates anything: staging
+  directories and `*.cpf-tmp-*` files are only ever created under the lock,
+  so any found then belong to a dead or finished operation and are removed.
+- Held only around metadata mutations, staging, job admission and pruning
+  decisions; never while building, running, checking, during hooks or
+  commands.
+- **Leases** (§6.2) are separate lock files. A job takes its lease under the
+  workspace lock and keeps it; it may take the workspace lock later.
+  Pruning probes leases **non-blockingly** with **independently opened**
+  probe handles, so the orders cannot deadlock and a probe never clones an
+  owner's handle. Windows: lease and owned handles are opened with
+  `FILE_SHARE_DELETE` so a job directory can be renamed while a lease file in
+  it is open.
+
+## 5. Command transactions
+
+### 5.1 `cpf init`
+
+Creates missing `.cpforge/`, `runs/`, `staging/` and the lock file (refusing
+links) even when `cpforge.toml` exists; then creates `cpforge.toml`
+no-clobber if missing. An existing `cpforge.toml` is never changed.
+
+*(draft)* If `cpforge.toml` was **absent when this `init` started**, it creates
+`.cpforge/job-seq` (fresh random 128-bit epoch, `next = 0`) no-clobber
+**before** publishing `cpforge.toml`; an existing `job-seq` (from an
+interrupted initial `init`) is kept. A rerun **on an existing workspace**
+never creates or repairs `job-seq`; recovery is only by `cpf fsck --apply`
+(§5.6). When the root is inside a git work tree, `init` mentions `cpf
+gitignore` and writes nothing else.
+
+### 5.2 `cpf add <problem>`
+
+1. Lock. Check identity and portable name; same identity existing →
+   `Exists` (with `--contest`: verify its `problem.toml` identity, go to 4).
+2. Stage `.cpforge/staging/<txid>/` (problem files, solution from template).
+3. `publish_dir_noclobber` to `problems/<name>`; not committed → staging
+   removed, error.
+4. Contest membership: edit transaction on `contest.toml` (created no-clobber
+   when new), entry added only if absent.
+5. Step 4 failing after 3 committed → "problem created; contest membership
+   failed: <reason>", partial-failure exit code (report transport); rerunning
+   `cpf add --contest` completes it.
+
+### 5.3 `cpf test add`
+
+1. Lock. Next `n` with neither `custom-<n>.in` nor `custom-<n>.ans` present.
+2. `publish_file_noclobber` the `.in`, then the `.ans` if any.
+3. Edit transaction on `tests.toml` adding the entry with its hashes.
+4. **Published files are never deleted.** If the `.ans` publish fails
+   (`Exists` from a concurrent creator, I/O error) or step 3 fails, the
+   published files stay, discovery shows them as *unregistered*, and the
+   command reports the partial result. A retry may choose a new `n`.
+
+### 5.4 `cpf adopt <path>` *(draft)*
+
+Lock. Validate the path (relative to the problem directory, no `..`, no link
+component, an existing regular file, not in a reserved tree); edit
+transaction on `problem.toml` adding it to `[files] user` if absent.
+
+**`[files] created`** (workspace design §2.2 as amended): only files a
+command creates that no other record names. In the CLI foundation that is the template solution of `cpf add`, whose
+entry is written into the **staged** `problem.toml` (§5.2 step 2), so it is
+published atomically with the problem directory: no partial state. Tests
+added by `cpf test add` need no entry: their `tests.toml` registration
+already gives provenance `registered` (precedence, workspace design §2.2), and a test
+published but not registered (§5.3 step 4) has provenance `unknown` and is
+kept. **Both lists** are validated like `adopt` paths when read; invalid or
+hand-edited entries that fail validation are reported by `status`/`fsck`
+and ignored, never acted on.
+
+### 5.5 `cpf gitignore [--write]` *(draft)*
+
+Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
+`.cpforge/staging/`, then the comment `# optional: .cpforge/facts/`.
+`--write` is a **text edit transaction**, §4.4 with these differences:
+lock; read `<root>/.gitignore` (absent → publish no-clobber a file holding
+only the block, §4.3); refuse a link, a non-regular file or more than one
+hard link; locate the block: exactly one line `# >>> cpforge` and one later
+line `# <<< cpforge` → replace the lines between them; no marker → append
+the block (preceded by a newline if the file does not end with one); any
+other marker arrangement (one marker, duplicates, reversed) → refuse,
+nothing written. Validate before each publish attempt (also every Windows
+retry) exactly as §4.4 step 4, then atomic replace (§4.2). Same stated
+guarantee as §4.4: validation is not compare-and-swap.
+
+### 5.6 `cpf fsck [--apply]` *(draft)*
+
+Lock (with the usual §4.5 leftover recovery, as for every locked
+operation). Reports: dangling contest references, problem directories
+without `problem.toml`, schema problems (§9), provenance overlaps and invalid
+`[files]` entries (workspace design §2.2), facts for deleted problems, facts for unknown
+targets, unexpected entries in reserved trees, and the state of `job-seq`:
+`missing`, `malformed` (unreadable, unparsable, invalid fields) or
+`schema_too_new`.
+
+`--apply` repairs **only cpf records**:
+
+- dangling contest references: removed by edit transaction;
+- facts of **deleted problems**: fact files removed. Facts for unknown
+  targets are reported only;
+- `job-seq` `missing` or `malformed`: **only if no job may be live**: every
+  directory in `runs/` (including newer-schema and `.reclaim-*` ones) is
+  probed as in §6.3 step 2; a held lease **or a lease that cannot be
+  opened** → refuse and list those jobs. Otherwise publish `{ schema, fresh
+  epoch, next = 0 }` by atomic replace (§4.2). `schema_too_new` is never
+  repaired (§9: no mutation); the user needs a newer cpf.
+
+Never user files, never `.cpforge/lock`, never lock abandonment inferred
+from age or PIDs.
+
+## 6. Job directories, leases, pruning
+
+### 6.1 Layout
+
+```
+.cpforge/runs/<job-id>/            time-ordered + random id, never reused
+    lease                          lock file held by the job owner
+    job.toml                       (draft) schema, (epoch, n) admission sequence
+    report.json
+    inputs/<test-id>.in|.ans       frozen copies (§7)
+    inputs/src/...                 (draft) captured solution-target sources (§7)
+    builds/<build-id>/             fresh output directory per build (build planning)
+    <run-id>/  spec.json record.json cleanup.log  out/stdout out/stderr  cwd/
+.cpforge/runs/.reclaim-<job-id>/   being deleted
+```
+
+Builds live inside their job (every test rebuilds, design §6.6), so nothing
+is shared between jobs.
+
+### 6.2 Admission and lifetime
+
+The workspace lock is held **continuously** from step 1 to step 5:
+
+1. Lock; leftover recovery (§4.5).
+2. Prune steps 1–2 (§6.3): select and rename candidates to `.reclaim-*`.
+2a. *(draft)* Allocate the admission sequence: read `job-seq`; `missing` or
+   `malformed` → admission fails closed ("run `cpf fsck --apply`");
+   `schema_too_new` → fails closed ("needs a newer cpf"); `next = u64::MAX`
+   → refused. Otherwise atomically replace it with `next + 1` (§4.2); the
+   job's sequence is `(epoch, next)`.
+3. Create `runs/<job-id>/` (`create_dir`, fresh id).
+3a. *(draft)* Publish `job.toml` no-clobber with the sequence.
+4. Create `lease` and lock it non-blockingly (new file: must succeed).
+5. Release the workspace lock.
+6. Prune step 3: delete the renamed `.reclaim-*` directories, outside the lock.
+
+The **job owner** is one shared handle holding the lease; runs, the cleanup
+service's transferred runs (execution contract §3.3) and the report writer hold clones. The
+lease is released when the last clone drops.
+
+**Inactive** = no cooperating owner holds the lease (the job finished or its
+`cpf` died). A job directory **without a `lease` file** is an interrupted
+admission and inactive; a lease that exists but cannot be opened
+(permission, I/O error) leaves the directory in place and is reported.
+
+**Limitation:** after an abrupt `cpf` death, Unix descendants outside
+containment (execution contract `setsid` limitation) can keep writing. Pruning removes the
+names, but storage held by open files is released only when those writers
+exit, and such writes are invisible to measurement. On Windows, kill-on-close
+ends job members with the `cpf` process (execution contract §4.3).
+
+### 6.3 Pruning
+
+Runs inside job admission (§6.2, which keeps the lock across steps 1–2 and
+its own directory creation) and in `cpf clean` (steps 1–3 directly). *(draft)*
+`cpf clean` plans by default and with `--apply` prunes with a **zero**
+retention budget (`keep_jobs = 0`, `workspace_bytes = 0`): every inactive
+job directory is a candidate except newer-schema ones (§9, reported);
+active ones are skipped by the lease probe. In the initial feature release it also deletes
+`.cpforge/cache/`. The plan mode takes the lock and so performs the
+universal §4.5 leftover recovery, but selects and renames nothing.
+It never touches anything else.
+
+1. Under the workspace lock, measure (§6.4) and list inactive job
+   directories oldest first. Candidates: beyond the newest `keep_jobs`
+   (*default* 20) inactive jobs; then, using **projected** usage (measured
+   usage minus the measured size of candidates already selected), further
+   oldest inactive jobs while projected usage exceeds `workspace_bytes`
+   (*default* 4 GiB). Measurement is `known bytes + incomplete: bool`; an
+   incomplete measurement selects by `keep_jobs` only and is reported.
+2. For each candidate: try-lock its lease with a probe handle (held → skip;
+   absent → interrupted admission, proceed); rename the directory to
+   `runs/.reclaim-<job-id>` while holding the probe lock. A failed rename
+   leaves the directory in place (reported, retried next time).
+3. Release probe locks and the workspace lock; delete each `.reclaim-*` with
+   the no-follow walker (§2). Leftovers stay as `.reclaim-*` and are retried by the
+   next prune.
+
+### 6.4 Retention
+
+- **Per job** (`job_bytes`, *default* 1 GiB): exact, in-process, for bytes
+  `cpf` itself writes for the job (captures, frozen inputs, specs, records,
+  reports, logs), through the execution contract's reservation interface (execution contract §5.4).
+- **Workspace** (`workspace_bytes`): a **soft pruning target**, not a
+  ceiling. No cross-process reservations; admission is never refused for
+  workspace usage. Usage is measured by no-follow traversal (§2) of `runs/`
+  (logical lengths; hard links and reflinks at full length); entries that
+  cannot be measured are reported, not counted as zero and not blocking.
+- Usage can exceed the target, and **there is no convergence guarantee**:
+  running jobs, compiler and child output, escaped descendants, files held
+  open after deletion (§6.2), failed deletions, protected newer-schema
+  directories and incomplete measurements can all keep it above the target
+  until a later prune succeeds.
+- **Per-job accounting definition:** outstanding logical bytes of files `cpf`
+  creates for the job, admitted through the execution contract §5.4 reservation **before**
+  each allocation (captures, frozen input copies and clones, file-I/O copies
+  into `cwd/`, specs, records, reports, logs, and their temp files during
+  replacement), with checked arithmetic; released when the file is removed or
+  when the job's owner is released. Reflinks count at full logical length.
+- **Child output:** after each run, `cwd/` beyond `cwd_bytes` (*default*
+  256 MiB) is cleared and `CwdOverflow{bytes}` recorded (diagnostic, not a
+  verdict). After each build, output beyond the build cap (configuration contract) →
+  `BuildOutputTooLarge`, the build directory is removed (a failed removal is
+  reported) and nothing runs from it.
+
+### 6.5 Run facts *(draft)*
+
+- One fact per (problem, solution target): `.cpforge/facts/<problem>/
+  <target>.toml` (`schema`, `epoch`, `n`, job id, finish time, verdict
+  summary, `source` and `tests` fingerprints, workspace design §3.2 encoding).
+- **Publication** at job finalization of a job that **completed** (not
+  cancelled, not failed before its report), **before** the lease is
+  released: lock; read `job-seq`, then the existing fact; decide by the
+  first matching row; release the lock.
+
+  | Condition | Outcome |
+  |---|---|
+  | `job-seq` missing, malformed or `schema_too_new` | `NotPublished{SequenceUnavailable}` |
+  | `job-seq` epoch ≠ job epoch | `NotPublished{EpochChanged}` |
+  | existing fact `schema_too_new` | `NotPublished{FactTooNew}` (§9: no mutation) |
+  | existing fact of the same epoch with `n` ≥ job `n` | `Superseded` (no change) |
+  | otherwise (no fact, malformed fact, other epoch, lower `n`) | atomic replace (§4.2) → `Published`, or `NotPublished{Io(e)}` if not committed |
+
+- The replace is the **commit point**. Post-commit `Durability::Uncertain`
+  or `Cleanup::Pending` (§4.1) are warnings on a `Published` outcome.
+- **Read and lock failures**: the workspace lock not acquired
+  (`Busy`, §4.5) → `NotPublished{LockBusy}`; an existing fact that cannot be
+  **read** (I/O error, permission, not a regular file) →
+  `NotPublished{FactUnreadable(e)}`, the file is left as it is (only a fact
+  that was read and failed to parse counts as malformed and is replaced).
+- Every outcome is recorded in the job report; `NotPublished` and warnings
+  are **warnings** of the job, never a verdict change; they do not change
+  the job's exit code (report transport). A job cancelled or interrupted before the
+  commit leaves the previous fact unchanged; `status` calls it the last
+  completed run. Nothing is recovered from interrupted jobs.
+
+## 7. Frozen inputs and execution directories
+
+- **Freeze at job start:** the job resolves its test list once, copies every
+  input and answer it will use into `inputs/` (reflink where supported, else
+  byte copy; regular files only), hashes each copy and completes a **frozen
+  manifest** (test ids, answer absent / empty / present, hashes, resolved
+  per-test settings) before the first run. A freeze failure starts no run.
+- The result is an **immutable collection of captured bytes**, with no claim
+  that the files existed in that combination at one instant: a file edited
+  while being copied can be captured mixed, and an input and its answer can
+  come from different moments. Every run reads only these copies; edits after
+  the freeze affect the next job only.
+- Each run gets a new empty `cwd/`; build artefacts are referenced by
+  absolute path; for file-I/O problems the frozen input is copied into `cwd/`
+  under its validated name (counted in the job's budget) and the declared
+  output is read from there.
+- `TestStore::freeze_into` writes only into an admitted job's `inputs/`
+  through the `JobInputs` capability from admission.
+- *(draft)* **Source capture**. A job's **admission is complete
+  only after its freeze**: the §6.2 workspace-lock section (steps 1–5) ends
+  with the lease held and the lock released; the freeze then runs outside
+  the lock: tests (above), then the selected solution target's source files
+  (build planning target resolution) copied into `inputs/src/` with their
+  problem-relative paths (same copy rules, regular files only, counted in
+  the job budget). No build starts before the freeze is complete; a capture
+  failure starts no build.
+- **Fingerprint**: the `source` fingerprint is computed with the
+  exact byte encoding of workspace design §3.2, streaming the **copied bytes as written**
+  into it (not per-file digests); `status` uses the same encoding over the
+  current files.
+- **Builds read only the copy**: in a build stage, `{sources}` and
+  `{source}` (configuration contract §5.2) expand to the `inputs/src/` paths, and the plan
+  **rejects** (phase-3 error, configuration contract §3) a build stage that uses
+  `{problem_dir}`, `{workspace}`, a `cwd` selector `problem` or `workspace`,
+  or a `cwd` path resolving inside the workspace. Helper headers a solution
+  needs are declared as sources of its target, so they are captured.
+  Literal paths in a build command that point outside the workspace
+  (compilers, system headers, libraries) are external inputs, like the
+  toolchain, and are not covered by any fingerprint.
+
+## 8. Test-store interface
+
+```rust
+pub trait TestStore {
+    fn list(&self) -> Result<Vec<TestEntry>, StorageError>;   // tests.toml + discovery
+    fn add(&mut self, g: &WorkspaceGuard, input: &[u8], answer: Option<&[u8]>, origin: Origin) -> Result<AddOutcome, StorageError>;
+    fn set_enabled(&mut self, g: &WorkspaceGuard, id: &TestId, enabled: bool) -> Result<(), StorageError>;
+    fn freeze_into(&self, ids: &[TestId], job: &JobInputs) -> Result<FrozenManifest, StorageError>;
+}
+```
+
+`TestEntry` distinguishes answer absent / present-empty / present and
+registered / unregistered; `AddOutcome` reports partial results (§5.3).
+The CLI foundation implements it over `tests.toml` + `tests/`; the initial feature release may use
+generations behind it. Lock-free readers of metadata tolerate absence,
+replacement between reads and malformed hand edits (reported with location);
+captures, logs and build outputs are running artefacts until their job
+finalizes them (execution contract §6.2).
+
+## 9. Schema versions
+
+- Governed formats: `cpforge.toml`, `problem.toml`, `tests.toml`,
+  `contest.toml` (user-editable); `state.toml`, `spec.json`, `record.json`,
+  `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
+- Missing `schema`: user-editable → 1; tool-only → `SchemaMissing`.
+- Newer than supported: raw display only; no semantic use, mutation or
+  execution based on it. A job directory with newer-schema metadata is
+  never pruned (reported).
+- Errors: `SchemaMissing`, `SchemaMalformed`, `SchemaTooNew`, `SchemaTooOld`.
+
+## 10. Allowed states and tests
+
+| Commit point | Crash before it | Crash after it |
+|---|---|---|
+| atomic replace | old content; temp may remain (recovered §4.5) | new content complete |
+| file no-clobber publish | target absent; temp may remain | target complete (link fallback: temp may remain) |
+| dir publish (`add`) | no `problems/<name>`; staging may remain | complete problem; membership may be missing (§5.2 step 5) |
+| `test add` | files absent, or published but unregistered | entry registered |
+| job admission (lease locked) | no dir; dir without lease; or dir with a lease file not yet locked (both interrupted, inactive, reclaimable) | job dir with lease: inactive orphan once `cpf` is dead, reclaimable |
+| prune rename | job dir intact | `.reclaim-*`, deleted by a later prune |
+| *(draft)* `job-seq` replace (admission 2a) | old counter | counter advanced; no job dir yet = an unused number (gap) |
+| *(draft)* `job.toml` publish (3a) | job dir without `job.toml`: interrupted admission | job dir with sequence, lease not yet locked: interrupted, reclaimable |
+| *(draft)* fact replace (§6.5) | previous fact | new fact, even if the lease was never released |
+| *(draft)* fact publication with another epoch or unavailable `job-seq` | previous fact, `NotPublished` reported | — (no commit) |
+| *(draft)* `init` `job-seq` (§5.1) | no `job-seq`, no `cpforge.toml`: rerun is initial | `job-seq` without `cpforge.toml`: rerun keeps it |
+| *(draft)* `fsck` new epoch | `job-seq` missing or malformed, admission refused | new epoch; jobs of old epochs publish no fact |
+| *(draft)* adopt / gitignore | old content | new content |
+
+Reruns: `init`, `add --contest` complete the operation; `test add` may
+create a new number and leave the earlier files unregistered.
+
+**Tests:**
+
+- Kill a real `cpf` subprocess at every commit point (test-only env var);
+  assert the allowed states and the rerun behaviour.
+- Injected failures: link + failed unlink; rename + failed directory sync
+  (`Durability::Uncertain`, caller continues); directory `RENAME_NOREPLACE`
+  unsupported; `EXDEV` on publish; existing empty destination directory;
+  disk full; permission denied; temp removal failure before commit.
+- Edit transaction: in-place edit, atomic editor save, deletion, type change
+  and malformed TOML between steps; Windows sharing retries with a save
+  between attempts; two `cpf` processes on one file; hard link refused; mode
+  preserved; untouched-item round-trip.
+- Composition: nested operations never re-acquire the lock; leftover recovery
+  runs before the current transaction creates files.
+- `test add`: `.ans` `Exists` after `.in` published, and an editor modifying
+  the `.in` before that: the `.in` is kept, reported unregistered.
+- Leases and pruning: held lease never pruned; killed job becomes prunable;
+  directory without lease reclaimed; unreadable lease left and reported;
+  rename refused (Windows open handle without share-delete, injected
+  elsewhere) leaves the directory; `.reclaim-*` leftovers retried; Windows
+  rename with an open lease; `keep_jobs` and byte-target triggers;
+  newer-schema job metadata never pruned.
+- Retention: per-job budget refusal (execution contract); `CwdOverflow`;
+  `BuildOutputTooLarge` removes the build directory; a mount point inside a
+  job directory is skipped by measuring and deletion.
+- Shared `cwd`: never measured or cleared; file-I/O problem with shared `cwd`
+  rejected.
+- Freeze: edits between tests and between repeat iterations do not change
+  later runs; an edit and an injected interruption **during** freezing (the
+  run does not start; the manifest is never partial); freeze failure starts
+  no run; FIFO refused.
+- Admission: a second `cpf` pruning concurrently never selects a job being
+  admitted (lock held through lease creation); `cpf clean` racing admission.
+- Mount boundaries: a bind mount of the same filesystem inside a job
+  directory (Linux, privileged CI step) is skipped by measurement and
+  deletion.
+- Per-job accounting: reservation before each copy, replacement temp counted,
+  release on removal, overflow of checked arithmetic refused.
+- Links in tool-written paths refused; root via a link works.
+- Schema refusal per format; answer absent vs present-empty.
+- Real runs on Linux, macOS and Windows on the supported filesystems;
+  power-loss behaviour is not tested. Platform floor and toolchain as in
+  [README](../../README.md) (platform floor).

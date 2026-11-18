@@ -1,0 +1,41 @@
+[workspace]
+members = [".", "crates/cpf-fixture"]
+resolver = "3"
+
+[package]
+license = "MIT OR Apache-2.0"
+name = "cpforge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "A command-line workspace for competitive programming"
+
+[[bin]]
+name = "cpf"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "net", "time", "sync", "macros"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+cpf-fixture = { path = "crates/cpf-fixture" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[lints]
+workspace = true
