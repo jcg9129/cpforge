@@ -276,21 +276,24 @@ Lock (with the usual §4.5 leftover recovery, as for every locked
 operation). Reports: dangling contest references, problem directories
 without `problem.toml`, schema problems (§9), provenance overlaps and invalid
 `[files]` entries (workspace design §2.2), facts for deleted problems, facts for unknown
-targets, unexpected entries in reserved trees, and the state of `job-seq`:
-`missing`, `malformed` (unreadable, unparsable, invalid fields) or
-`schema_too_new`.
+targets, unexpected entries in reserved trees, and the state of `job-seq`
+(§9 record classification).
 
 `--apply` repairs **only cpf records**:
 
 - dangling contest references: removed by edit transaction;
-- facts of **deleted problems**: fact files removed. Facts for unknown
-  targets are reported only;
+- facts of **deleted problems**: fact files removed, but only those
+  classified (§9) `valid` or `malformed`; a `too_new` fact is reported
+  and kept (no mutation), and an `unreadable` one is reported and kept. Facts for unknown targets are reported only;
 - `job-seq` `missing` or `malformed`: **only if no job may be live**: every
   directory in `runs/` (including newer-schema and `.reclaim-*` ones) is
   probed as in §6.3 step 2; a held lease **or a lease that cannot be
   opened** → refuse and list those jobs. Otherwise publish `{ schema, fresh
-  epoch, next = 0 }` by atomic replace (§4.2). `schema_too_new` is never
-  repaired (§9: no mutation); the user needs a newer cpf.
+  epoch, next = 0 }` by atomic replace (§4.2). `too_new` is never
+  repaired (§9: no mutation); the user needs a newer cpf. `unreadable` is
+  never repaired either (it may be a transient access problem): reported
+  with the I/O error; the user fixes access, or removes the file, after
+  which it is `missing`.
 
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
@@ -320,10 +323,12 @@ The workspace lock is held **continuously** from step 1 to step 5:
 
 1. Lock; leftover recovery (§4.5).
 2. Prune steps 1–2 (§6.3): select and rename candidates to `.reclaim-*`.
-2a. *(draft)* Allocate the admission sequence: read `job-seq`; `missing` or
-   `malformed` → admission fails closed ("run `cpf fsck --apply`");
-   `schema_too_new` → fails closed ("needs a newer cpf"); `next = u64::MAX`
-   → refused. Otherwise atomically replace it with `next + 1` (§4.2); the
+2a. *(draft)* Allocate the admission sequence: classify `job-seq` (§9);
+   `missing` or `malformed` → admission fails closed ("run `cpf fsck
+   --apply`"); `unreadable` → fails closed naming the I/O error ("fix access
+   to `.cpforge/job-seq`, or remove it and run `cpf fsck --apply`");
+   `too_new` → fails closed ("needs a newer cpf"); `next = u64::MAX` →
+   refused (`SequenceExhausted`). Otherwise atomically replace it with `next + 1` (§4.2); the
    job's sequence is `(epoch, next)`.
 3. Create `runs/<job-id>/` (`create_dir`, fresh id).
 3a. *(draft)* Publish `job.toml` no-clobber with the sequence.
@@ -404,7 +409,13 @@ It never touches anything else.
 
 - One fact per (problem, solution target): `.cpforge/facts/<problem>/
   <target>.toml` (`schema`, `epoch`, `n`, job id, finish time, verdict
-  summary, `source` and `tests` fingerprints, workspace design §3.2 encoding).
+  summary, `source` and `tests` fingerprints, workspace design §3.2 encoding,
+  and the job's capture check, §7).
+- An existing fact and `job-seq` are classified by §9's **record
+  classification** (`missing`, `unreadable`, `malformed`, `too_new`,
+  `valid`). Fact fields validated for `valid`: `epoch` (§9 encoding), `n`
+  (§9 encoding), job id, finish time, verdict summary, both fingerprints
+  (64 lowercase hex characters) and the capture check.
 - **Publication** at job finalization of a job that **completed** (not
   cancelled, not failed before its report), **before** the lease is
   released: lock; read `job-seq`, then the existing fact; decide by the
@@ -412,19 +423,18 @@ It never touches anything else.
 
   | Condition | Outcome |
   |---|---|
-  | `job-seq` missing, malformed or `schema_too_new` | `NotPublished{SequenceUnavailable}` |
+  | `job-seq` not `valid` (`missing`, `unreadable`, `malformed`, `too_new`) | `NotPublished{SequenceUnavailable}` |
   | `job-seq` epoch ≠ job epoch | `NotPublished{EpochChanged}` |
-  | existing fact `schema_too_new` | `NotPublished{FactTooNew}` (§9: no mutation) |
-  | existing fact of the same epoch with `n` ≥ job `n` | `Superseded` (no change) |
-  | otherwise (no fact, malformed fact, other epoch, lower `n`) | atomic replace (§4.2) → `Published`, or `NotPublished{Io(e)}` if not committed |
+  | existing fact `too_new` | `NotPublished{FactTooNew}` (§9: no mutation) |
+  | existing fact `unreadable` | `NotPublished{FactUnreadable(e)}`, file left as it is |
+  | existing fact classified `valid`, of the same epoch, with `n` ≥ job `n` | `Superseded` (no change) |
+  | otherwise (fact `missing` or `malformed`; `valid` of another epoch or with lower `n`) | atomic replace (§4.2) → `Published`, or `NotPublished{Io(e)}` if not committed |
 
 - The replace is the **commit point**. Post-commit `Durability::Uncertain`
   or `Cleanup::Pending` (§4.1) are warnings on a `Published` outcome.
-- **Read and lock failures**: the workspace lock not acquired
-  (`Busy`, §4.5) → `NotPublished{LockBusy}`; an existing fact that cannot be
-  **read** (I/O error, permission, not a regular file) →
-  `NotPublished{FactUnreadable(e)}`, the file is left as it is (only a fact
-  that was read and failed to parse counts as malformed and is replaced).
+- **Lock failure**: the workspace lock not acquired (`Busy`, §4.5) →
+  `NotPublished{LockBusy}`. Replacement eligibility follows the decision
+  table above; `unreadable` and `too_new` facts are always preserved.
 - Every outcome is recorded in the job report; `NotPublished` and warnings
   are **warnings** of the job, never a verdict change; they do not change
   the job's exit code (report transport). A job cancelled or interrupted before the
@@ -455,21 +465,64 @@ It never touches anything else.
   the lock: tests (above), then the selected solution target's source files
   (build planning target resolution) copied into `inputs/src/` with their
   problem-relative paths (same copy rules, regular files only, counted in
-  the job budget). No build starts before the freeze is complete; a capture
-  failure starts no build.
+  the job budget). Each destination file is created **exclusively**
+  (`create_new`); an existing destination (a filesystem alias the plan's
+  same-file check missed, e.g. after a rename between plan and capture) →
+  capture error `SourceCollision{path}`, nothing overwritten. No build or
+  run starts before the freeze is complete; a capture failure starts
+  none.
 - **Fingerprint**: the `source` fingerprint is computed with the
   exact byte encoding of workspace design §3.2, streaming the **copied bytes as written**
   into it (not per-file digests); `status` uses the same encoding over the
   current files.
-- **Builds read only the copy**: in a build stage, `{sources}` and
-  `{source}` (configuration contract §5.2) expand to the `inputs/src/` paths, and the plan
-  **rejects** (phase-3 error, configuration contract §3) a build stage that uses
-  `{problem_dir}`, `{workspace}`, a `cwd` selector `problem` or `workspace`,
-  or a `cwd` path resolving inside the workspace. Helper headers a solution
-  needs are declared as sources of its target, so they are captured.
-  Literal paths in a build command that point outside the workspace
-  (compilers, system headers, libraries) are external inputs, like the
-  toolchain, and are not covered by any fingerprint.
+- **Sources come from the copy**: in **every** stage of the job (build,
+  run, command with `needs_build`), `{sources}` and `{source}`
+  (configuration contract §5.2) expand to the `inputs/src/` paths, in the
+  configured order. The **source-consuming stage** is the build stage, or
+  the run stage of a build-free target (e.g. Python). Helper files a
+  solution needs (headers, modules) are declared as sources of its target,
+  so they are captured.
+- **Accident guard** (phase-3 error, configuration contract §3), applied to
+  the source-consuming stage only:
+  1. It must not use `{problem_dir}` or `{workspace}`, a `cwd` selector
+     `problem` or `workspace`, or a `cwd` path that resolves into the
+     workspace outside the job directory.
+  2. **Operands.** Each expanded `argv` element, and each expanded shell
+     `args` element, yields candidate operands: the element itself; if it
+     contains `=`, the text after the first `=`; if it starts with a single
+     `-` (on Windows also `/`) and is longer than two characters, the text
+     after its first two characters (`-I…`, `-L…`, `-o…`, MSVC `/I…`). A candidate is a **path operand**
+     when it is absolute or contains a path separator (`/`; also `\` on
+     Windows). Each path operand is resolved **lexically** against the
+     stage's `cwd` (absolute operands as they are; `.` removed, `..`
+     applied; no link following) and compared **component-wise** with the
+     workspace root as `cpf` located it (ASCII case-insensitive on Windows
+     and macOS). A path operand inside the workspace but outside the job's
+     own directory is rejected. Paths inside the job directory (its
+     `inputs/src/`, build output root, `cwd`) and paths outside the
+     workspace are accepted. **Every** candidate of an element is checked
+     and one rejected candidate rejects the element. This is deliberately
+     conservative: the whole-element candidate of `-I../../../../../ext`
+     or `-Wl,-rpath,../../../../lib` can resolve into the workspace even
+     when the intended path does not; such an argument is rejected and is
+     rewritten (an absolute path outside the workspace) or moved into a
+     shell stage.
+  3. Elements are not split further: comma or `PATH`-style lists inside
+     one element yield no extra candidates (the whole element is still a
+     candidate under rule 2). Paths reached through another spelling of the
+     workspace (a link or alias to it) and the text of a shell **script**
+     are not inspected.
+- **Capture check** (decided by the plan; recorded in the job report and the fact,
+  §6.5): `checked` when the source-consuming stage is an `argv` stage that
+  passed the guard; `unchecked{shell_stage}` when it is a shell stage
+  (its args are guarded, its script is not inspected). `checked` means only
+  that the guard passed: the build is not sandboxed, and reads through
+  includes inside sources, environment variables or wrapper programs are
+  not detected (workspace design §3.2). `cpf config` and `cpf doctor` show
+  the capture check each target's stages would get.
+- Literal paths in a command that point outside the workspace (compilers,
+  system headers, libraries) are external inputs, like the toolchain, and
+  are not covered by any fingerprint.
 
 ## 8. Test-store interface
 
@@ -500,6 +553,25 @@ finalizes them (execution contract §6.2).
   execution based on it. A job directory with newer-schema metadata is
   never pruned (reported).
 - Errors: `SchemaMissing`, `SchemaMalformed`, `SchemaTooNew`, `SchemaTooOld`.
+- *(draft)* **Record classification** of the tool-only records `job-seq`
+  and `facts/*.toml`, one enum used everywhere: `missing` (no file);
+  `unreadable` (the bytes cannot be read: I/O error, permission, not a
+  regular file); `malformed` (not TOML; `schema` absent or not an integer;
+  `SchemaTooOld`, none exists yet; or a supported schema with a missing or
+  invalid field); `too_new` (`schema` newer than supported: nothing else is
+  decoded); `valid`. Steps in order: read bytes; parse TOML; read `schema`
+  alone; only for the supported schema decode and validate the fields. A
+  file is never decoded as the current schema before its `schema` is
+  checked.
+- *(draft)* **Encodings** in these records and in `job.toml`: `epoch` is a
+  string of exactly 32 lowercase hex digits (128 bits); `n` and `next` are
+  **decimal strings** (TOML integers are signed 64-bit, so a `u64` is not
+  stored as one): ASCII digits only, no sign, no leading zero except `"0"`,
+  value ≤ `u64::MAX`. Anything else is `malformed`. Tests: `"0"`,
+  `"9223372036854775807"`, `"9223372036854775808"`,
+  `"18446744073709551614"`, `"18446744073709551615"` (valid; admission then
+  refuses with `SequenceExhausted`), `"18446744073709551616"`, `"-1"`,
+  `"01"`, `"+1"`, an integer `5` (all `malformed`).
 
 ## 10. Allowed states and tests
 
@@ -517,6 +589,8 @@ finalizes them (execution contract §6.2).
 | *(draft)* fact publication with another epoch or unavailable `job-seq` | previous fact, `NotPublished` reported | — (no commit) |
 | *(draft)* `init` `job-seq` (§5.1) | no `job-seq`, no `cpforge.toml`: rerun is initial | `job-seq` without `cpforge.toml`: rerun keeps it |
 | *(draft)* `fsck` new epoch | `job-seq` missing or malformed, admission refused | new epoch; jobs of old epochs publish no fact |
+| *(draft)* `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
+| *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
 | *(draft)* adopt / gitignore | old content | new content |
 
 Reruns: `init`, `add --contest` complete the operation; `test add` may

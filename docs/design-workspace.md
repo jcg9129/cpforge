@@ -109,16 +109,31 @@ workspace arrive with the registry (§6.1).
   (which S §5.1 writes last). A rerun of `init` on an existing workspace
   never creates `job-seq`. An `init` interrupted before `cpforge.toml`
   exists is simply rerun as an initial creation; a `job-seq` it already
-  wrote is kept (no-clobber). If it is missing or unreadable in an existing
-  workspace, admission **fails closed** with an instruction to run `cpf fsck
-  --apply`, which starts a **new epoch** (`next = 0`) **only while no job
-  lease is held** (probed as in S §6.3; otherwise it refuses and says
-  which jobs are live). A sequence is never rebuilt from surviving records,
+  wrote is kept (no-clobber). In an existing workspace admission **fails
+  closed** unless `job-seq` is `valid` (S §9 classification; S §6.2 step
+  2a): `missing` or `malformed` → run `cpf fsck --apply`, which starts a
+  **new epoch** (`next = 0`) **only when no job lease is held or
+  unopenable** (probed as in S §6.3; otherwise it refuses and lists those
+  jobs); `unreadable` → the I/O error is reported and the file is
+  preserved until access is fixed (same epoch) or the user removes it
+  (then `missing`); `too_new` → preserved, a newer cpf is needed
+  (S §5.6). A sequence is never rebuilt from surviving records,
   so `(epoch, n)` is never reused.
 - **Source capture:** at admission the job copies the solution target's
-  files into its job directory (`inputs/src/`, like frozen tests, S §7) and
-  builds **only from that copy**, so the fingerprint names exactly what was
-  compiled.
+  source files into its job directory (`inputs/src/`, like frozen tests,
+  S §7), and every expansion of `{sources}` / `{source}` in that job, in any
+  stage, names the copy. The `source` fingerprint therefore names the bytes
+  **cpf handed to the job**. cpf does not sandbox builds: a build that reads
+  original workspace files by other means (a path inside a shell script, an
+  absolute `#include` inside a source, `CPATH` or similar environment
+  variables, a wrapper program) is not detected. The plan rejects argument
+  operands that point into the workspace outside the job (S §7) as a guard
+  against accidents, not as enforcement. Each job records a **capture
+  check**: `checked` when its source-consuming stage is an `argv` stage
+  whose operands passed that guard, otherwise `unchecked{reasons}` (a shell
+  stage, whose script text is not inspected). The job report, the fact and
+  `status` carry it, so an `unchanged` from an unchecked capture is shown
+  as such.
 - **Fingerprints**: SHA-256 over a byte string built with
   conventions like E §2's canonical encoding, fully restated here: every integer `u64` little-endian; every
   byte string length-prefixed (`u64` length, then bytes); paths relative to
@@ -132,9 +147,19 @@ workspace arrive with the registry (§6.1).
     `stdout_cap`, `stderr_cap`, `limits` and the inherited environment.
     `unchanged` therefore means **equality of these recorded inputs**, not
     equivalent build output or execution behaviour. Encoded:
+    first the target's **source list in configured order** (C §6.2: count,
+    each problem-relative path as a byte string), since it fixes the order
+    in which `{sources}` expands; then
     one tag byte `0` = build-free target (nothing follows) or `1` = build
-    stage, followed by: the command as a tag byte `0` = `argv` (count, each
-    argument as a byte string) or `1` = `shell` (the command string, C §5.3);
+    stage, followed by the stage **as merged and validated but not
+    expanded**: placeholders stay as their literal text (`{sources}`,
+    `{artifact}`), so job-specific paths never enter the fingerprint and
+    `status` can recompute it from configuration alone; program resolution
+    (C §4.4) is not included (like the toolchain). The command is a tag byte
+    `0` = `argv` (count, each argument as a byte string) or `1` = `shell`
+    (C §5.3), followed by the interpreter (count, each element as a byte
+    string, as configured), the script (byte string) and the args (count,
+    each as a byte string);
     the `cwd` as a tag byte `0` = selector, followed by one byte `0` =
     `run` (also the default when unset), `1` = `problem`, `2` =
     `workspace`; or `1` = path, followed by the config-relative path as
@@ -172,7 +197,15 @@ workspace arrive with the registry (§6.1).
 - `status` compares current files with the fact by recomputing both
   fingerprints: `source changed`, `tests changed`, `unchanged`, or `unknown`
   (no fact; target not fingerprintable; schema mismatch). The claim is
-  scoped to recorded inputs.
+  scoped to recorded inputs, and `status` shows the fact's capture check
+  next to it (`unchanged (capture unchecked: shell stage)`).
+- **Golden vectors** (per OS) fix the encoding, at least: the same files
+  and settings admitted in two different job directories give the same
+  `source` fingerprint, equal to what `status` recomputes; reordering the
+  configured source list changes it; changing a shell stage's interpreter,
+  script or one of its args changes it; an edit to an original file after
+  capture does not change the job's fingerprint but makes `status` report
+  `source changed`.
 
 ### 3.3 Commands
 
@@ -280,7 +313,7 @@ None beyond the contract amendments in §9.
 | S §3 / S §9 schemas | `job-seq` and `job.toml` (schema-versioned, tool-owned); ownership rows for both | single-workspace features |
 | S §6, S §10 allowed states | admission: counter replaced but no job directory (gap); finalization: before/after the fact commit; publication with a non-current epoch (no fact); new epoch only without live leases | single-workspace features |
 | S §5.1 `cpf init` | creates `.cpforge/job-seq` (fresh epoch, no-clobber) only when `cpforge.toml` was absent at start, before publishing `cpforge.toml`; a rerun **on an existing workspace** never creates it; an interrupted initial `init` keeps an existing `job-seq`; recovery only via `fsck` without live leases | single-workspace features |
-| S §7 frozen inputs | solution-target sources copied to `inputs/src/` at admission; builds read only that copy | single-workspace features |
+| S §7 frozen inputs | solution-target sources copied to `inputs/src/` at admission; every `{sources}`/`{source}` expansion names the copy; accident guard and capture check (§3.2), no sandbox | single-workspace features |
 | S §6 finalization | run-fact publication before lease release; failure rule of §3.2 | single-workspace features |
 | S §3 / facts schema | fact file format, ordering by `(epoch, n)`, fingerprint encoding of §3.2 | single-workspace features |
 | C (workspace config) | `[workspace] ignore = [globs]` with the glob subset and matching rules | single-workspace features |

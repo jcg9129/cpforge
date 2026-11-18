@@ -249,9 +249,25 @@ and limits.
 - Language: problem `[config] language`, else `default_language` (layers
   1–2), else an error.
 - `sources`: an explicit, ordered array of problem-relative paths, no
-  globbing; duplicates are an error; default: the language's `sources`. A
-  missing file is a phase-3 error. Sources are read **in place** by the
-  build; only test data is frozen (storage contract §7).
+  globbing; default: the language's `sources`. Each path is validated in
+  phase 1: non-empty, relative, components separated by `/` only (a `\` is
+  an error on Windows), no empty, `.` or `..` component, no NUL. Duplicates
+  are an error, compared component-wise with the same case rule as §7.4
+  (ASCII case-insensitive on Windows and macOS), so `a.cpp` / `A.cpp` on
+  those platforms are duplicates. In phase 3 each path must name an
+  existing regular file reached without a link component and outside the
+  reserved trees (storage contract §5.4 path rules); otherwise a phase-3
+  error, and so are two sources that name the **same file** (same device
+  and inode on Unix, same volume serial number and file ID on Windows),
+  which catches filesystem aliases the textual comparison misses (APFS
+  normalisation variants, case variants). The capture destination is
+  `inputs/src/` joined with the same components, so it stays inside the
+  capture root; destinations are created exclusively (storage contract
+  §7), so a remaining alias fails capture and never overwrites a copy.
+- *(draft)* In a managed workspace, sources are **captured** into the job
+  (storage contract §7) and every `{sources}` / `{source}` expansion names
+  the copy; outside the amendment they are read in place. Test data is
+  always frozen.
 - `multi-file` is a problem kind (§9), unrelated to several source files.
 
 ### 6.3 Artifacts
@@ -554,6 +570,52 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     launchable; if nothing else matches, the error lists it.
   - `argv = ["./{problem_id}/tool"]` → load error (placeholder not at the
     start); `argv = ["{workspace}/{problem_id}/tool"]` → valid, not rebased.
+- *(draft)* **Ignore patterns (§7.4), exact results:**
+  - `*.o` matches `a.o` and `x/y/a.o`; `x/*.o` matches `x/a.o`, not
+    `x/y/a.o` or `y/x/a.o`; `**` matches every file at any depth;
+    `x/**/a.o` matches `x/a.o` and `x/p/q/a.o`; `a[b]`, `!a`, `a\b`,
+    `""`, `/a`, `a/../b` → phase-1 error.
+  - `?.txt` matches `é.txt` (one scalar value, two UTF-8 bytes); `??.txt`
+    does not.
+  - Linux component bytes `61 FF 2E 6F` (`a`, invalid byte, `.o`): `a?.o` and
+    `*.o` match; the pattern `aÿ.o` (U+00FF written as UTF-8) does not.
+  - Windows name UTF-16 `0061 D800 002E 006F` (lone high surrogate): `a?.o`
+    and `*.o` match; `a??.o` does not; no literal pattern text matches the
+    surrogate unit.
+  - Windows and macOS: `*.O` matches `a.o`, `É.txt` does not match `é.txt`
+    (ASCII-only folding); Linux: `*.O` does not match `a.o`.
+  - Composed vs decomposed `é` (U+00E9 vs `e` U+0301): no match on any
+    platform (no normalisation); `?.txt` matches only the composed form.
+- *(draft)* **Source capture accident guard (storage contract §7)**, workspace
+  `/abs/ws`, job directory `/abs/ws/.cpforge/runs/J`:
+  - `argv = ["g++", "{sources}", "-o", "{artifact}"]` → valid (expansions
+    are inside the job directory), capture check `checked`.
+  - `argv = ["g++", "{problem_dir}/a.cpp"]` → phase-3 error (rule 1).
+  - `"-I/abs/ws/lib"` → error (operand `/abs/ws/lib` after the first two
+    characters); `"--include-dir=/abs/ws/lib"` → error (text after `=`);
+    `"-I../../../lib"` from `cwd` `/abs/ws/.cpforge/runs/J/cwd` → error
+    (resolves to `/abs/ws/.cpforge/lib`, outside the job directory).
+  - `"/backup/abs/ws/a.cpp"` → valid (not inside `/abs/ws`);
+    `"/abs/ws/../ext/a.cpp"` → valid (normalises to `/abs/ext/a.cpp`);
+    `"/abs/wsx/a.cpp"` → valid; `"-I/usr/include"` → valid, external.
+  - `"-Wl,-rpath,/abs/ws/lib"` → valid: not split (rule 3), and the whole
+    element, a relative path, resolves inside the job directory; the
+    workspace path inside it is not detected.
+  - From `cwd` `/abs/ws/.cpforge/runs/J/cwd`: `"-Wl,-rpath,../../../../lib"`
+    → error (whole element resolves to `/abs/ws/.cpforge/runs/lib`);
+    `"-I../../../../../ext"` → error (whole element resolves to
+    `/abs/ws/.cpforge/ext`, although `-I`'s operand resolves to `/abs/ext`):
+    conservative by rule 2.
+  - Windows, workspace `C:\Ws`: `"/IC:\ws\lib"` → error (operand
+    `C:\ws\lib` after `/I`, inside the workspace under ASCII case folding).
+  - A shell build stage with `args = ["{sources}"]` and `cwd` selector
+    `run` → valid, capture check `unchecked{shell_stage}`; the same stage
+    with `cwd` selector `workspace` → phase-3 error (rule 1).
+  - `sources = ["e\u0301.cpp", "\u00E9.cpp"]` on macOS APFS (one file,
+    two spellings) → phase-3 error (same file); `["a.cpp", "A.cpp"]` →
+    phase-1 duplicate on Windows and macOS; on Linux two files → valid.
+  - Python (build-free): run stage `argv = ["python3", "{source}"]` →
+    `{source}` names `inputs/src/<file>`; capture check `checked`.
   - A raw `[languages.cpp.windows.run]` table with both `argv` and `shell`
     → phase-1 error even though no other table defines either.
   - `CwdOverflow` on one run of `cpf cmd` → recorded, exit 0 if all runs
