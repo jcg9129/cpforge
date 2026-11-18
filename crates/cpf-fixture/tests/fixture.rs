@@ -189,6 +189,43 @@ fn nested_spawn_and_repeated_ready_do_not_steal_acks() {
 
 #[cfg(unix)]
 #[test]
+fn killed_root_is_gone_before_it_is_reaped() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut fixture = spawn(&["ready", "hold"]);
+    let identities = fixture.await_ready(1);
+    assert!(identities[0].is_live());
+    let mut changed_identity = identities[0].clone();
+    changed_identity.start_id += 1;
+    assert!(!changed_identity.is_live());
+    fixture.kill_tree().unwrap();
+
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+    loop {
+        // SAFETY: info is correctly sized writable storage and the PID names
+        // our child. WNOWAIT observes its exit without reaping the zombie.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                fixture.id(),
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::Interrupted);
+    }
+    // SAFETY: signal zero only probes our unreaped child without sending a signal.
+    assert_eq!(unsafe { libc::kill(fixture.id() as i32, 0) }, 0);
+    assert_all_gone(&identities, Duration::from_secs(2));
+    assert_eq!(fixture.wait().unwrap().signal(), Some(libc::SIGKILL));
+    assert!(!identities[0].is_live());
+}
+
+#[cfg(unix)]
+#[test]
 fn escaped_child_survives_group_kill_and_is_cleaned_up_explicitly() {
     struct KillPid(u32);
     impl Drop for KillPid {

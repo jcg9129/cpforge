@@ -179,6 +179,9 @@ impl Process {
         }
         match process_identity(pid) {
             Ok((current, zombie)) => current == start_id && !zombie,
+            // macOS proc_pidinfo with arg=0 excludes zombies and returns ESRCH,
+            // even though kill(pid, 0) succeeds. ESRCH is not ErrorKind::NotFound.
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => false,
             // An inaccessible identity is conservatively still live.
             Err(error) => error.kind() != io::ErrorKind::NotFound,
         }
