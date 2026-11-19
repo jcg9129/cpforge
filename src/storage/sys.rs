@@ -247,21 +247,12 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 }
 
 pub(super) fn replace(source: &Path, target: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        fs::rename(source, target)
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Storage::FileSystem::{
-            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-        move_file(
-            source,
-            target,
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
+    // Unix `rename`. On Windows, std renames through the source handle with
+    // `FileRenameInfoEx` and `FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+    // FILE_RENAME_FLAG_POSIX_SEMANTICS` (falling back to `FileRenameInfo`
+    // before Windows 10 1607), so a destination held open with delete sharing
+    // is replaced while existing readers keep the old file. It never copies.
+    fs::rename(source, target)
 }
 
 pub(super) fn rename_exclusive(source: &Path, target: &Path) -> io::Result<()> {

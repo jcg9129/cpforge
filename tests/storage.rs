@@ -571,7 +571,9 @@ fn handle_child() {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::{
             Foundation::HANDLE,
-            Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
+            Storage::FileSystem::{
+                BY_HANDLE_FILE_INFORMATION, FILE_TYPE_DISK, GetFileInformationByHandle, GetFileType,
+            },
         };
         let file = File::open(root.join(".cpforge/lock")).unwrap();
         let mut expected = BY_HANDLE_FILE_INFORMATION::default();
@@ -584,7 +586,10 @@ fn handle_child() {
         // identities avoid mistaking unrelated runtime handles for this lock.
         for value in (4..65536).step_by(4) {
             let handle = value as HANDLE;
-            if handle == file.as_raw_handle() {
+            // Only disk files can be the lock. Querying a synchronous pipe or
+            // character device whose file object has a pending read blocks.
+            // SAFETY: GetFileType only inspects the handle value.
+            if handle == file.as_raw_handle() || unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
                 continue;
             }
             let mut info = BY_HANDLE_FILE_INFORMATION::default();

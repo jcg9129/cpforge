@@ -254,8 +254,11 @@ replace fail with the old file intact (reported). Documented for users.
    mode before writing bytes, then restore it after writing (which may clear
    special bits) and sync it with the content. New files use the default
    `0666 & !umask` mode.
-2. Unix `rename`; Windows `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING |
-   MOVEFILE_WRITE_THROUGH)`, never the copy flag.
+2. Unix `rename`; Windows handle-based rename with `FileRenameInfoEx`
+   (`FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS`,
+   falling back to `FileRenameInfo` before Windows 10 1607), as Rust's
+   `std::fs::rename` does, so a destination open with delete sharing is
+   replaced; never a copy.
 3. Windows sharing violation / access denied: retry with backoff, monotonic,
    ≤ 2 s total, revalidating before each attempt for edit transactions
    (§4.4); then fail, old file untouched, temp removed. Never
