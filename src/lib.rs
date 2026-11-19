@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod error;
 pub mod exit;
+pub mod names;
 pub mod supervisor;
 
 use clap::{CommandFactory, error::ErrorKind};
