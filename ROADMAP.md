@@ -74,9 +74,9 @@ Planned:
 The [managed-workspace design](docs/design-workspace.md) adds source capture,
 admission sequences, run facts and fingerprints, `cpf status`, `cpf adopt`,
 `cpf ignore`, plan-first `cpf clean`, offered `.gitignore` updates and
-`cpf fsck`. Its storage and configuration amendments are **draft, not yet
-implemented**; their invariants and crash/conflict fixtures must be settled
-before implementation.
+`cpf fsck`. Its storage and configuration amendments are **settled, not yet
+implemented**; their crash and conflict fixtures are part of the
+implementation work.
 
 ## Initial feature release
 

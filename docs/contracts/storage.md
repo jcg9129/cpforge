@@ -6,10 +6,10 @@ Fetch, generation-based publication and archives are planned for later
 versions; the initial implementation reaches tests only through the
 test-store interface (§8).
 
-**Managed-workspace amendment (v4): draft, not yet implemented.** The
+**Managed-workspace amendment (v5): settled, not yet implemented.** The
 single-workspace rows of `../design-workspace.md` §9 cover admission sequence,
 source capture, run facts, adopt / clean / fsck / gitignore transactions.
-Amended content is marked *(draft)* below and remains under design review.
+Amended content is marked *(draft)* below; it is settled but not yet implemented.
 References labelled *workspace design* point to `../design-workspace.md`.
 
 Related: design §4 and `execution.md`.
@@ -63,6 +63,128 @@ Related: design §4 and `execution.md`.
   anything in it; the record marks `shared_cwd`; file-based I/O problems with
   a shared `cwd` are rejected in the CLI foundation.
 
+### 2.1 Portable names and identity
+
+One module of pure functions (no filesystem access) defines a **lexical
+policy**. It keeps names that are plainly unportable out of a workspace and
+flags spelling collisions; it does not promise that every accepted name can
+be created on every filesystem, nor that it finds every alias a filesystem
+has. The filesystem itself is the final check: names are created
+exclusively (§4.3), and a native refusal or collision is reported with the
+native error, never treated as success.
+
+- **Identifier**: problem names, contest ids, solution-target names, custom
+  command names. 1–64 ASCII characters from `[A-Za-z0-9._-]`; first a
+  letter or digit; last not `.`; no `..` substring; not a reserved device
+  name (below). Used verbatim as a path component (`problems/<name>`); there
+  is no sanitising step, an invalid name is an error naming the rule.
+- **Portable component**: any other single component cpf creates or
+  validates from user input (file-I/O names, source and test path
+  components, `adopt` paths). Valid Unicode (`String`); 1–255 bytes in
+  UTF-8, measured on the name as spelled (this also bounds UTF-16 length);
+  not `.` or `..`; none of `/ \ : < > " | ? *`; no U+0000–U+001F (Windows)
+  and no U+007F (cpf policy); not ending in `.` or U+0020; not a reserved
+  device name.
+- **Reserved device names** (Windows, applied on every platform):
+  (a) **legacy devices** `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+  `LPT1`–`LPT9`, and `COM`/`LPT` followed by superscript `¹`, `²` or `³`:
+  matched ASCII case-insensitively against the part before the first `.`,
+  after removing trailing U+0020 from that part, so `con`, `Nul.txt`,
+  `CON .txt`, `nul.tar.gz`, `COM¹.txt` are reserved; (b) **console names**
+  `CONIN$`, `CONOUT$`: matched ASCII case-insensitively, only as the whole
+  component (so
+  `CONIN$.txt` is accepted). Not reserved: `COM0`, `LPT0`, `COM10`,
+  `COM4x`, `COM⁴`, and `CON` + U+00A0 + `.txt`.
+- **Reserved prefix**: names starting with `.cpf-` (ASCII
+  case-insensitive) are cpf's own temporary and staging names (§4.2,
+  §4.5) and are rejected as identifiers and portable components.
+- **Collision key**: Unicode canonical caseless matching,
+  `NFD(CaseFold(NFD(name)))` with default full case folding; identifiers
+  use the same key (for ASCII it equals ASCII lowercase). The Unicode
+  version is the one of the pinned dependencies, recorded as a constant in
+  the module and in `cpf doctor`; a dependency upgrade can flag a pair that
+  was accepted before, which `fsck` reports and nothing renames. Two names
+  with equal keys are a **spelling collision**. The key over-flags pairs a
+  given filesystem distinguishes (acceptable: it only ever causes a
+  refusal, never reuse of an entry) and may miss pairs a filesystem's own
+  table equates (NTFS upcase tables, APFS repertoire changes); Windows 8.3
+  short names (`LONGFI~1.TXT`) are not modelled. Those cases are left to
+  exclusive creation on the current host.
+- **Collision check**: under the workspace lock, a new name is compared
+  with the entries of the target directory by key. An entry that is not
+  valid Unicode (Unix bytes, Windows lone surrogates) is compared with the
+  new name by exact native spelling only, without lossy conversion.
+- **Path length**: no total-length check before use. cpf's own file
+  operations use the platform's long-path support (Rust's standard library
+  on Windows); an OS refusal for length maps to `PathTooLong{path}`.
+  Compilers and solutions started by cpf have their own limits; their
+  failures are reported as their errors.
+- **Problem identity** (`problem.toml` `[problem] id`): a string
+  `<site>:<native>`, split at the first `:`. In the CLI foundation `site`
+  must be exactly `local` and `<native>` must be an Identifier (so `local:`,
+  `local:a:b`, `Local:a`, `:a` are invalid identities); the general site
+  grammar (1–32 characters from `[a-z0-9-]`, starting with a letter) and
+  remote native syntax arrive with fetch. The identity is **bound to the
+  directory**: `problems/<name>/problem.toml` must have `id =
+  "local:<name>"` with the same spelling; any other value is
+  `IdentityMismatch`, reported by `fsck` and `status`, and such a directory
+  is not a problem for lookup. Remote sites arrive with fetch.
+- **Resolution for `cpf add <name>`** (§5.2 step 1), over the entries of
+  `problems/` read under the lock. The first matching rule decides:
+  1. No entry with the key of `<name>` → create.
+  2. More than one such entry → `NameCollision{reason: SeveralEntries,
+     entries}` listing all of them.
+  3. The one entry is spelled differently (`Foo` for `foo`) →
+     `DifferentSpelling`.
+  4. The entry is a link (symlink, junction, other reparse point) →
+     `LinkInPath` (§2); not a directory → `NotADirectory`.
+  5. Classify its `problem.toml` (§9, user-editable records): `missing` →
+     `MetadataMissing`, `unreadable` → `MetadataUnreadable`, `malformed` →
+     `MetadataMalformed`, `too_new` → `MetadataTooNew` (nothing after the
+     schema is decoded).
+  6. Its valid `id` differs from `local:<name>` → `IdentityMismatch`.
+  7. Otherwise → `Exists`.
+  Each `NameCollision` names the entry (or entries) and the reason. A
+  no-clobber publication that returns `Exists` although rule 1 applied
+  (concurrent creation outside cpf, or an alias the key missed) is
+  `NameCollision{reason: NativeExists}`, never `Exists`.
+- **Tests.** Pure unit tests:
+  - every rule above with accepted and rejected examples;
+  - reserved names: the accepted/rejected lists above, any case, trailing
+    U+0020 before the dot, U+00A0 not trimmed;
+  - lengths: 64/65-character identifiers; `é`×127 + `a` (255 bytes)
+    accepted, `é`×128 (256 bytes) rejected; 127 × U+0390 (254 bytes)
+    accepted although its key is longer;
+  - keys: `ABC`/`abc`, `é`/`e`+U+0301, `ß`/`ss`, `ǅ`/`ǆ`, `ΐ`
+    (U+03CA U+0301) / `Ϊ́` (U+03AA U+0301), combining marks in different
+    canonical orders (`a` U+0301 U+0323 / `a` U+0323 U+0301 equal), marks of
+    equal combining class keep their order (`a` U+0301 U+0300 / `a` U+0300
+    U+0301 differ), ypogegrammeni (U+1F80 / U+1F00 U+0345 equal; U+03B1
+    U+0345 U+0301 / U+03B1 U+0301 U+0345 equal, which needs the initial
+    NFD); identifier `K` against the component `"\u212A"` (Kelvin sign)
+    equal; `①` / `1` differ (no compatibility folding); key idempotence as
+    a property test over generated strings;
+  - portable components `.cpf-x`, `.CPF-tmp` rejected, `.cpfx` accepted
+    (all three are invalid identifiers by the first-character rule);
+  - identity parsing: `local:a` accepted; `Local:a`, `:a`, `local:`,
+    `local:a:b` rejected;
+  - every resolution outcome of `cpf add` (with an in-memory listing);
+  - non-UTF-8 Unix entry and Windows lone-surrogate entry compared by
+    native spelling.
+
+  Integration tests: publishing a 255-byte destination component by
+  atomic replace and by no-clobber publication; a workspace root whose path
+  exceeds 260 UTF-16 units on Windows (cpf's own operations succeed);
+  recovery removes an exact `.cpf-tmp-` name and keeps `.cpf-tmp-` + 31 hex,
+  + 32 uppercase hex, and a directory of the exact name; recovery failures
+  (an undeletable leftover, an unreadable location) are reported and the
+  operation continues.
+
+  Native probes on CI (one per OS, recording the filesystem): creating
+  `a.txt` then `A.txt`, and `é` then `e`+U+0301, with exclusive creation;
+  the test asserts that cpf's key flags both pairs and records whether the
+  host filesystem refused the second name.
+
 ## 3. Ownership
 
 | Path | Owner | How the tool writes it |
@@ -92,7 +214,10 @@ outside every retention budget.
 `lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
 (initial feature release) are disposable. No path under `problems/` or `contests/` is
-disposable; outside the reserved trees nothing is deleted automatically.
+disposable; outside the reserved trees nothing is deleted automatically,
+with one exception: leftover recovery (§4.5) removes regular files named
+exactly `.cpf-tmp-` + 32 lowercase hex digits in its metadata recovery
+locations (a reserved name, §2.1).
 Provenance and visibility of problem files are defined in workspace design §2.2.
 
 ## 4. Primitives
@@ -121,8 +246,10 @@ replace fail with the old file intact (reported). Documented for users.
 
 ### 4.2 Atomic replace (files)
 
-1. Create `.<name>.cpf-tmp-<pid>-<random>` in the target's directory
-   (`create_new`), write, `sync_all` (macOS also `F_FULLFSYNC`, best effort;
+1. Create `.cpf-tmp-<random>` in the target's directory, `<random>` 32
+   lowercase hex digits (128 random bits), independent of the target name so
+   its length is bounded (`create_new`; an existing name is retried with new
+   bits), write, `sync_all` (macOS also `F_FULLFSYNC`, best effort;
    Windows `FlushFileBuffers`); copy the Unix mode.
 2. Unix `rename`; Windows `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING |
    MOVEFILE_WRITE_THROUGH)`, never the copy flag.
@@ -186,8 +313,24 @@ An editor saving an older buffer after the tool overwrites the tool's change.
   not reentrant.
 - **Leftover recovery** runs once at outer-operation entry, right after
   acquiring the lock and before the operation creates anything: staging
-  directories and `*.cpf-tmp-*` files are only ever created under the lock,
-  so any found then belong to a dead or finished operation and are removed.
+  directories and temporary files are only ever created under the lock, so
+  any found then belong to a dead or finished operation and are removed.
+  The scan is exact, not a glob: every entry of `.cpforge/staging/`
+  (removed with the no-follow walker, §2, whatever its type), and in the
+  **metadata recovery locations** (the workspace root, `.cpforge/`, each
+  `problems/<p>/` and `problems/<p>/tests/`, each `contests/<c>/`, and
+  *(draft)* each `.cpforge/facts/<p>/`), non-recursively, only regular files
+  named exactly `.cpf-tmp-` + 32 lowercase hex digits. The `.cpf-` prefix is
+  reserved (§2.1), so no name cpf validates can match; a matching file
+  created outside cpf is removed (documented, §3). Temporary files inside a
+  job directory (e.g. from publishing `job.toml`, §6.2) are not recovered
+  here: they go with the job directory when it is pruned (§6.3).
+- **Recovery outcome**: a missing location is skipped; a location that
+  cannot be enumerated, or a leftover that cannot be removed, is kept and
+  reported as the warning `RecoveryIncomplete{paths, errors}` of the
+  operation, which continues (temporary files use exclusive creation,
+  retrying with new random bits if the chosen name already exists, §4.2).
+  Recovery never fails an operation by itself.
 - Held only around metadata mutations, staging, job admission and pruning
   decisions; never while building, running, checking, during hooks or
   commands.
@@ -553,6 +696,16 @@ finalizes them (execution contract §6.2).
   execution based on it. A job directory with newer-schema metadata is
   never pruned (reported).
 - Errors: `SchemaMissing`, `SchemaMalformed`, `SchemaTooNew`, `SchemaTooOld`.
+- **User-editable record classification** (`problem.toml`, and the other
+  user-editable formats when a command reads them): `missing` (no file);
+  `unreadable` (bytes cannot be read, or not a regular file); `malformed`
+  (not TOML; `schema` present but not an integer; `SchemaTooOld`; a supported
+  schema with a missing or invalid field, e.g. a `problem.toml` without a
+  string `[problem] id` that is a valid identity, §2.1); `too_new`
+  (`schema` newer than supported: nothing else is decoded); `valid`. An
+  absent `schema` means 1. Steps in order: read bytes; parse TOML; read
+  `schema` alone; decode and validate fields. Directory binding of a valid
+  identity (§2.1) is checked after classification and is not part of it.
 - *(draft)* **Record classification** of the tool-only records `job-seq`
   and `facts/*.toml`, one enum used everywhere: `missing` (no file);
   `unreadable` (the bytes cannot be read: I/O error, permission, not a
@@ -577,7 +730,7 @@ finalizes them (execution contract §6.2).
 
 | Commit point | Crash before it | Crash after it |
 |---|---|---|
-| atomic replace | old content; temp may remain (recovered §4.5) | new content complete |
+| atomic replace | old content; temp may remain (recovered §4.5 in metadata recovery locations; inside a job directory, pruned with it) | new content complete |
 | file no-clobber publish | target absent; temp may remain | target complete (link fallback: temp may remain) |
 | dir publish (`add`) | no `problems/<name>`; staging may remain | complete problem; membership may be missing (§5.2 step 5) |
 | `test add` | files absent, or published but unregistered | entry registered |

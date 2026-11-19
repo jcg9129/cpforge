@@ -52,7 +52,7 @@ reported fallback or a clean error as specified by the execution contract.
 ## Documentation
 
 The designs describe intended behavior; they are not a list of implemented
-CLI features. Managed-workspace contract amendments are draft, not yet
+CLI features. Managed-workspace contract amendments are settled but not yet
 implemented.
 
 - [Roadmap and implementation status](ROADMAP.md)

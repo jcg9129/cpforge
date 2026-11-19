@@ -2,10 +2,10 @@
 
 Status: v2.
 
-**Managed-workspace amendment (v3): draft, not yet implemented.**
+**Managed-workspace amendment (v4): settled, not yet implemented.**
 `[workspace] ignore` (§7.4) specifies the design in
 `../design-workspace.md` §2.4. Amended content is marked *(draft)* below and
-remains under design review. References labelled *workspace design* point to
+is settled but not yet implemented. References labelled *workspace design* point to
 `../design-workspace.md`.
 
 **Trust model.** Configuration is code: every build, run and command argv,
