@@ -848,7 +848,10 @@ mod tests {
         let name = Identifier::new("foo").unwrap();
         assert_eq!(resolve_add(&name, &[]), Resolution::Create);
         let unrelated = entry("bar", EntryKind::Link, ProblemMetadata::Unreadable);
-        assert_eq!(resolve_add(&name, &[unrelated.clone()]), Resolution::Create);
+        assert_eq!(
+            resolve_add(&name, std::slice::from_ref(&unrelated)),
+            Resolution::Create
+        );
         let exact = entry("foo", EntryKind::Directory, valid("local:foo"));
         assert_eq!(
             resolve_add(&name, &[exact.clone(), unrelated.clone()]),
@@ -856,7 +859,7 @@ mod tests {
         );
         let different = entry("Foo", EntryKind::Link, ProblemMetadata::Missing);
         assert_eq!(
-            resolve_add(&name, &[different.clone()]),
+            resolve_add(&name, std::slice::from_ref(&different)),
             collision(CollisionReason::DifferentSpelling, &["Foo"],)
         );
         assert_eq!(
