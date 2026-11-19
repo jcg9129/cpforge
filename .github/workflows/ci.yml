@@ -70,7 +70,19 @@ jobs:
             exit 1
           fi
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --no-fail-fast --locked
+      - run: cargo test --workspace --all-targets --all-features --no-fail-fast --locked
+      - name: Verify bind-mount storage boundaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ask Cargo for the test executable: its location depends on the Cargo version.
+          test_binary=$(cargo test --workspace --all-features --locked --test storage --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "storage" and .profile.test == true) | .executable')
+          test -x "$test_binary"
+          sudo "$test_binary" --exact linux_bind_mount_boundary --ignored --nocapture
 
   msrv:
     timeout-minutes: 60
@@ -82,4 +94,5 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --no-fail-fast --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --no-fail-fast --locked

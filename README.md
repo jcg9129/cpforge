@@ -37,6 +37,11 @@ also builds the test fixture binary; see its [harness documentation](crates/cpf-
 for individual test invocations. CI provisions C++, Python 3.12 and JDK 21
 for workflow validation.
 
+The `storage-test-hooks` feature exposes deterministic failure injection for
+storage integration tests. It is disabled by default; `--all-features` includes
+these hooks even in non-test builds. The crate is unpublished, and production
+builds should leave this feature disabled.
+
 ## Declared platform floor
 
 | Platform | Targets | Minimum |

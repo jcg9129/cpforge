@@ -250,7 +250,10 @@ replace fail with the old file intact (reported). Documented for users.
    lowercase hex digits (128 random bits), independent of the target name so
    its length is bounded (`create_new`; an existing name is retried with new
    bits), write, `sync_all` (macOS also `F_FULLFSYNC`, best effort;
-   Windows `FlushFileBuffers`); copy the Unix mode.
+   Windows `FlushFileBuffers`). For replacement, apply the target's Unix
+   mode before writing bytes, then restore it after writing (which may clear
+   special bits) and sync it with the content. New files use the default
+   `0666 & !umask` mode.
 2. Unix `rename`; Windows `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING |
    MOVEFILE_WRITE_THROUGH)`, never the copy flag.
 3. Windows sharing violation / access denied: retry with backoff, monotonic,
@@ -262,14 +265,21 @@ replace fail with the old file intact (reported). Documented for users.
 ### 4.3 No-clobber publication
 
 - **Files** (`publish_file_noclobber`): temp as §4.2 step 1, then Linux
-  `renameat2(RENAME_NOREPLACE)` (filesystem refuses it → `link` + `unlink`,
+  `renameat2(RENAME_NOREPLACE)` (filesystem refuses it or `ENOSYS` → `link` + `unlink`,
   a failed unlink → `Cleanup::Pending`), macOS `renamex_np(RENAME_EXCL)`,
   Windows `MoveFileExW` without replace. Existing target → `Exists`.
 - **Directories** (`publish_dir_noclobber`): Linux `renameat2(RENAME_NOREPLACE)`
   and macOS `renamex_np(RENAME_EXCL)` are **required** (no fallback:
   `Unsupported{op, filesystem}`); Windows `MoveFileExW` without replace or
   copy flags. The actual result decides: `EXDEV` / `ERROR_NOT_SAME_DEVICE`
-  → staging removed, `CrossFilesystem` (a device-id precheck is only a hint).
+  → `CrossFilesystem` (a device-id precheck is only a hint). Any failed
+  directory publication leaves staging intact and reports `Cleanup::Pending`;
+  the next outer operation's recovery removes it (§4.5).
+- **Windows retries**: file and directory no-clobber publication use the same
+  monotonic backoff as replacement (≤ 2 s total) for sharing violations and
+  access denied, without edit revalidation. On failure, a file temp is removed
+  (or reported as `Cleanup::Pending` if removal fails); directory staging is
+  retained as above.
 - **Pre-commit vs post-commit**: a failure before the publishing
   call (temp write, `sync_all`, staged-directory sync) is an error with
   `committed = false`, nothing published; a flush or sync failure after it is
@@ -278,7 +288,9 @@ replace fail with the old file intact (reported). Documented for users.
   directory), Unix syncs the target's parent, the source parent when it
   differs, and every ancestor directory the operation newly created **together with
   that ancestor's own parent**, bottom-up (best effort,
-  `Durability::Uncertain` on failure).
+  `Durability::Uncertain` on failure). Only newly created ancestors of this
+  publication's source and target participate; synced ancestors are retired
+  from tracking and removed directories are discarded.
 
 ### 4.4 Edit transaction (shared TOML files)
 
@@ -303,7 +315,9 @@ An editor saving an older buffer after the tool overwrites the tool's change.
 ### 4.5 Locks
 
 - **Workspace lock:** process-local mutex, then an exclusive OS lock on
-  `.cpforge/lock`, opened once per process, non-inheritable. Unix `flock`;
+  `.cpforge/lock`, cached per process, non-inheritable. After locking, compare
+  the handle's identity with the current no-follow directory entry; if replaced,
+  drop the cached handle and retry within the same acquisition bound. Unix `flock`;
   Windows `LockFileEx` on byte range `[0, 1)` of that dedicated file (a
   mandatory range lock; the file is never read or written). Non-blocking
   attempts with monotonic backoff up to 10 s, then `Busy{op}`.
