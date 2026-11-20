@@ -235,7 +235,14 @@ fn create_problem(
         },
         current_dir: guard.root().to_path_buf(),
         workspace_root: Some(guard.root().to_path_buf()),
-        language: language.map(str::to_owned),
+        problem_file: Some(
+            guard
+                .root()
+                .join("problems")
+                .join(name.as_str())
+                .join("problem.toml"),
+        ),
+        prospective_problem: Some(problem_record(name, language, None)),
         operation: Operation::Other,
         ..ConfigRequest::default()
     });

@@ -876,6 +876,7 @@ fn built_in_layer_is_valid_on_every_platform_and_has_no_stage_defaults() {
                 } else {
                     "python3"
                 },
+                "-B",
                 "{source}"
             ])
         );

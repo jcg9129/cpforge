@@ -60,6 +60,218 @@ fn errors(layer: &RawLayer) -> Vec<(&str, Option<usize>, &str)> {
 }
 
 #[test]
+fn problem_file_roles_share_source_path_and_duplicate_rules() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for role in ["support_files", "solution_files"] {
+            for (value, message) in [
+                ("17", "expected an array of strings"),
+                ("[17]", "expected a string"),
+                (
+                    "['../x.h']",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                (
+                    "['/x.h']",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                (
+                    "['a//x.h']",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                (
+                    "['./x.h']",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                (
+                    "['']",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                (
+                    "[\"x\\u0000.h\"]",
+                    "expected a non-empty problem-relative source with / components, without . or ..",
+                ),
+                ("['x.h','x.h']", "duplicate source"),
+            ] {
+                let text = format!("[problem]\nid = 'local:p'\n[config]\n{role} = {value}\n");
+                let layer = parse(
+                    text.as_bytes(),
+                    &source(LayerKind::Problem, platform),
+                    &env(),
+                    platform,
+                );
+                assert_eq!(
+                    layer.diagnostics.len(),
+                    1,
+                    "{platform:?} {text}: {:?}",
+                    layer.diagnostics
+                );
+                let diagnostic = &layer.diagnostics[0];
+                assert_eq!(diagnostic.message, message);
+                let key = if value == "17" {
+                    format!("config.{role}")
+                } else if message == "duplicate source" {
+                    format!("config.{role}[1]")
+                } else {
+                    format!("config.{role}[0]")
+                };
+                assert_eq!(diagnostic.origin.key_path, key);
+                assert_eq!(
+                    diagnostic.origin.file,
+                    source(LayerKind::Problem, platform).file
+                );
+                assert_eq!(diagnostic.origin.line, Some(4));
+                if message == "duplicate source" {
+                    assert_eq!(
+                        diagnostic.second_origin.as_ref().unwrap().key_path,
+                        format!("config.{role}[0]")
+                    );
+                    assert!(array(at(&layer, &[role]), 1).invalid);
+                } else if value == "17" {
+                    assert!(at(&layer, &[role]).invalid);
+                } else {
+                    assert!(array(at(&layer, &[role]), 0).invalid);
+                }
+            }
+            for value in ["[]", "['a/x.h']"] {
+                let text = format!("[problem]\nid = 'local:p'\n[config]\n{role} = {value}");
+                valid(&parse(
+                    text.as_bytes(),
+                    &source(LayerKind::Problem, platform),
+                    &env(),
+                    platform,
+                ));
+            }
+            for path in [r"a\b.h", "C:x.h", "C:/x.h"] {
+                let text = format!("[problem]\nid = 'local:p'\n[config]\n{role} = ['{path}']");
+                let layer = parse(
+                    text.as_bytes(),
+                    &source(LayerKind::Problem, platform),
+                    &env(),
+                    platform,
+                );
+                assert_eq!(
+                    layer.diagnostics.len(),
+                    usize::from(platform == Platform::Windows)
+                );
+            }
+            let text = format!("[problem]\nid = 'local:p'\n[config]\n{role} = ['x.h','X.h']");
+            let layer = parse(
+                text.as_bytes(),
+                &source(LayerKind::Problem, platform),
+                &env(),
+                platform,
+            );
+            assert_eq!(
+                layer.diagnostics.len(),
+                usize::from(platform != Platform::Linux)
+            );
+            if platform != Platform::Linux {
+                assert_eq!(
+                    layer.diagnostics[0]
+                        .second_origin
+                        .as_ref()
+                        .unwrap()
+                        .key_path,
+                    format!("config.{role}[0]")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn problem_roles_and_entry_reject_misplaced_keys_and_overlays() {
+    for (key, value) in [
+        ("support_files", "[]"),
+        ("solution_files", "[]"),
+        ("entry", "'Grader'"),
+    ] {
+        for kind in [
+            LayerKind::DefaultUser,
+            LayerKind::OverrideUser,
+            LayerKind::Workspace,
+        ] {
+            for prefix in [
+                "",
+                "[config]\n",
+                "[languages.cpp]\n",
+                "[languages.cpp.windows]\n",
+                "[run]\n",
+            ] {
+                let text = format!("{prefix}{key} = {value}");
+                let layer = parse(
+                    text.as_bytes(),
+                    &source(kind, Platform::Windows),
+                    &env(),
+                    Platform::Windows,
+                );
+                // Language entries are valid, including in a language overlay.
+                if key == "entry" && prefix.starts_with("[languages.") {
+                    valid(&layer);
+                } else {
+                    assert_eq!(layer.diagnostics.len(), 1, "{kind:?} {text}");
+                    assert_eq!(layer.diagnostics[0].message, "unknown configuration key");
+                    assert_eq!(
+                        layer.diagnostics[0].origin.file,
+                        source(kind, Platform::Windows).file
+                    );
+                }
+            }
+        }
+        let text = format!("[problem]\nid = 'local:p'\n[config.windows]\n{key} = {value}");
+        let layer = parse(
+            text.as_bytes(),
+            &source(LayerKind::Problem, Platform::Windows),
+            &env(),
+            Platform::Windows,
+        );
+        assert_eq!(
+            errors(&layer),
+            [("config.windows", Some(3), "unknown configuration key")]
+        );
+    }
+}
+
+#[test]
+fn problem_and_language_entries_require_nonempty_strings_without_nul() {
+    for (value, message) in [
+        ("''", "string must not be empty"),
+        ("17", "expected a string"),
+        ("\"a\\u0000b\"", "string must contain no NUL"),
+    ] {
+        for (kind, prefix, key) in [
+            (
+                LayerKind::Problem,
+                "[problem]\nid = 'local:p'\n[config]\n",
+                "config.entry",
+            ),
+            (
+                LayerKind::Workspace,
+                "[languages.cpp]\n",
+                "languages.cpp.entry",
+            ),
+        ] {
+            let text = format!("{prefix}entry = {value}");
+            let layer = parse(
+                text.as_bytes(),
+                &source(kind, Platform::Linux),
+                &env(),
+                Platform::Linux,
+            );
+            assert_eq!(layer.diagnostics.len(), 1, "{text}");
+            assert_eq!(layer.diagnostics[0].message, message);
+            assert_eq!(layer.diagnostics[0].origin.key_path, key);
+            let entry = if kind == LayerKind::Problem {
+                at(&layer, &["entry"])
+            } else {
+                at(&layer, &["languages", "cpp", "entry"])
+            };
+            assert!(entry.invalid);
+        }
+    }
+}
+
+#[test]
 fn names_placement_and_nested_types() {
     for (text, key, line, message) in [
         (

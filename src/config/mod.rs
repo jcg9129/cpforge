@@ -40,7 +40,7 @@
 //! stays empty and fails validation. Values retain typed text tokens and origins,
 //! and stages expose deferred occurrences and context requirements for C12a.
 //! The consumer remains responsible for phase-3 context, source existence,
-//! template/source cardinality, tool resolution, expansion and job allocation,
+//! template/solution-file cardinality, tool resolution, expansion and job allocation,
 //! and phase-4 outputs. No CLI, filesystem or trust checks occur in `check`.
 //!
 //! Semantic accessors return `EffectiveNode`s so invalid and partial input
@@ -73,6 +73,10 @@
 //! expands its typed stage plans; C4d uses template destinations; C5 selects
 //! targets; C8 uses source/artifact declarations; C10 reads retention and ignore
 //! patterns; C12a plans commands/hooks; C13 inspects merged values and histories.
+//! Targets expose sources (tool inputs), support files and effective solution
+//! files. Captured files are sources followed by support files; only sources
+//! expand into tool arguments. The effective entry comes from the problem or
+//! language, including Java's derived required artifact paths.
 //! See [`api`] for the owned plans. The typed [`RetentionPlan`] is also available
 //! as `api::Retention`; [`Retention`] remains the lower-level composition view.
 

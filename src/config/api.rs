@@ -42,9 +42,13 @@ pub struct ConfigRequest {
     pub config_path: Option<PathBuf>,
     pub workspace_root: Option<PathBuf>,
     pub problem_file: Option<PathBuf>,
+    /// In-memory prospective problem document, parsed at `problem_file` instead
+    /// of reading it. Requires a workspace and problem path, just like loading
+    /// an existing problem; used before `cpf add` publishes the record.
+    pub prospective_problem: Option<String>,
     pub published_limit: Option<PublishedLimit>,
     pub operation: Operation,
-    /// Language-only selection, e.g. for `cpf add`; ignored for a problem.
+    /// Language-only selection; ignored for an existing or prospective problem.
     pub language: Option<String>,
     pub profile: Option<String>,
     /// Already parsed CLI duration, in milliseconds.
@@ -365,10 +369,17 @@ pub struct TargetPlan {
     pub profile: Option<Sourced<String>>,
     pub build: Option<StagePlan>,
     pub run: StagePlan,
+    /// Tool inputs; these alone supply `{sources}` and `{source}`.
     pub sources: Vec<Sourced<ProblemPath>>,
+    /// Captured companions, excluded from tool inputs. Defaults to an empty list.
+    pub support_files: Vec<Sourced<ProblemPath>>,
+    /// Effective contestant files. Defaults derive from sources then support
+    /// files, with Derived provenance on each member.
+    pub solution_files: Vec<Sourced<ProblemPath>>,
     /// Absent for a language without an artifact declaration (e.g. Python)
     /// and for every build-free target, whose artifacts are never checked (§6.3).
     pub artifacts: Option<Artifacts>,
+    /// Effective entry: problem `config.entry`, otherwise the language's entry.
     pub entry: Option<Sourced<String>>,
     /// Config-relative path already joined at load, without canonicalisation.
     pub template: Option<Sourced<PathBuf>>,
@@ -378,10 +389,10 @@ pub struct TargetPlan {
     _validated: Validated,
 }
 
-/// `cpf add` needs a one-to-one template/source mapping (§6.5).
+/// `cpf add` needs exactly one solution file for its template (§6.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemplateDestinationError {
-    pub source_count: usize,
+    pub solution_file_count: usize,
     pub template_origin: Origin,
 }
 
@@ -389,8 +400,8 @@ impl fmt::Display for TemplateDestinationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}: template requires exactly one source, found {}",
-            self.template_origin, self.source_count
+            "{}: template requires exactly one solution file, found {} solution files",
+            self.template_origin, self.solution_file_count
         )
     }
 }
@@ -400,18 +411,23 @@ impl std::error::Error for TemplateDestinationError {}
 pub type TemplateDestination<'a> = (&'a Sourced<PathBuf>, &'a Sourced<ProblemPath>);
 
 impl TargetPlan {
-    /// Check the add-time source cardinality without reading or copying files.
+    /// Captured file declarations, in sources-then-support order (§6.2).
+    pub fn captured_files(&self) -> impl Iterator<Item = &Sourced<ProblemPath>> {
+        self.sources.iter().chain(&self.support_files)
+    }
+
+    /// Check the add-time solution-file count without reading or copying files.
     pub fn template_destination(
         &self,
     ) -> Result<Option<TemplateDestination<'_>>, TemplateDestinationError> {
         let Some(template) = &self.template else {
             return Ok(None);
         };
-        if let [source] = self.sources.as_slice() {
-            Ok(Some((template, source)))
+        if let [solution] = self.solution_files.as_slice() {
+            Ok(Some((template, solution)))
         } else {
             Err(TemplateDestinationError {
-                source_count: self.sources.len(),
+                solution_file_count: self.solution_files.len(),
                 template_origin: template.origin.clone(),
             })
         }
@@ -468,25 +484,9 @@ impl TargetPlan {
                 .as_ref()
                 .map(|_| StagePlan::validated(ValidatedStage::Build(resolved))),
             run: StagePlan::validated(ValidatedStage::Run(resolved)),
-            sources: settings
-                .sources
-                .as_ref()
-                .into_iter()
-                .flat_map(array)
-                .map(|node| {
-                    sourced(
-                        node,
-                        ProblemPath {
-                            components: node
-                                .string()
-                                .expect("validated source")
-                                .split('/')
-                                .map(str::to_owned)
-                                .collect(),
-                        },
-                    )
-                })
-                .collect(),
+            sources: problem_paths(settings.sources.as_ref()),
+            support_files: problem_paths(Some(&settings.support_files)),
+            solution_files: problem_paths(Some(&settings.solution_files)),
             artifacts: settings
                 .artifacts
                 .as_ref()
@@ -752,12 +752,16 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
     let options = DiscoveryOptions {
         config_override: request.config_path.clone(),
         workspace_root: request.workspace_root.clone(),
-        problem_file: request.problem_file.clone(),
+        problem_file: request
+            .problem_file
+            .clone()
+            .filter(|_| request.prospective_problem.is_none()),
         // A relative base would silently resolve against the process directory.
         current_dir: Some(request.current_dir.clone())
             .filter(|dir| super::syntax::native_absolute(dir.as_os_str(), request.platform)),
     };
-    let layers: Vec<RawLayer> = match discover(&request.environment, request.platform, &options) {
+    let mut layers: Vec<RawLayer> = match discover(&request.environment, request.platform, &options)
+    {
         Ok(sources) => load(&sources, &request.environment, request.platform),
         Err(error) => {
             let origin = super::stages::origin("", "<discovery>");
@@ -788,7 +792,7 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
                         request.platform,
                     ),
                 });
-                if let Some(file) = &request.problem_file {
+                if let Some(file) = &options.problem_file {
                     sources.push(LayerSource {
                         kind: LayerKind::Problem,
                         file: file.clone(),
@@ -799,6 +803,21 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
             layers
         }
     };
+    if let (Some(_), Some(file), Some(document)) = (
+        &request.workspace_root,
+        &request.problem_file,
+        &request.prospective_problem,
+    ) {
+        layers.push(super::parse(
+            document.as_bytes(),
+            &LayerSource {
+                kind: LayerKind::Problem,
+                file: file.clone(),
+            },
+            &request.environment,
+            request.platform,
+        ));
+    }
     let hook_settings = raw_hook_settings(&layers, request.config_path.is_some());
     let merged = compose(&layers, request.platform);
     let selection = Selection {
@@ -889,6 +908,24 @@ fn field<'a>(node: &'a EffectiveNode, key: &str) -> &'a EffectiveNode {
 }
 fn array(node: &EffectiveNode) -> &[EffectiveNode] {
     node.array().expect("validated array")
+}
+fn problem_paths(node: Option<&EffectiveNode>) -> Vec<Sourced<ProblemPath>> {
+    node.into_iter()
+        .flat_map(array)
+        .map(|file| {
+            sourced(
+                file,
+                ProblemPath {
+                    components: file
+                        .string()
+                        .expect("validated problem path")
+                        .split('/')
+                        .map(str::to_owned)
+                        .collect(),
+                },
+            )
+        })
+        .collect()
 }
 fn string(node: &EffectiveNode) -> Sourced<String> {
     sourced(node, node.string().expect("validated string").to_owned())

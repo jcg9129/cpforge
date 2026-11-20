@@ -113,7 +113,7 @@ fn argv(stage: &StagePlan) -> &[TextValue] {
 }
 
 #[test]
-fn template_destination_uses_defining_file_and_effective_sources() {
+fn template_destination_uses_defining_file_and_effective_solution_files() {
     let dir = Directory::new();
     let user = "default_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n";
     dir.user(user);
@@ -130,18 +130,38 @@ fn template_destination_uses_defining_file_and_effective_sources() {
         "languages.cpp.template.path",
     );
     assert_eq!(source.value.components(), ["main.cpp"]);
-    assert_eq!(source.provenance, Provenance::BuiltIn);
+    assert_eq!(
+        source.provenance,
+        Provenance::Derived {
+            inputs: vec![Provenance::BuiltIn]
+        }
+    );
     assert_eq!(source.origin.key_path, "languages.cpp.sources[0]");
     assert!(!template.value.exists());
 
-    for (sources, expected) in [("['a.cpp', 'b.cpp']", 2), ("[]", 0)] {
-        dir.problem(&format!("[config]\nsources = {sources}\n"));
+    for (roles, expected) in [
+        ("sources = ['a.cpp', 'b.cpp']", 2),
+        (
+            "sources = ['a.cpp', 'b.cpp']\nsolution_files = ['b.cpp', 'a.cpp']",
+            2,
+        ),
+        ("sources = []", 0),
+        ("solution_files = []", 0),
+    ] {
+        dir.problem(&format!("[config]\n{roles}\n"));
         let loaded = load_config(&dir.request(true));
         clean(&loaded);
         let plan = loaded.target().unwrap();
         let error = plan.template_destination().unwrap_err();
-        assert_eq!(error.source_count, expected);
+        assert_eq!(error.solution_file_count, expected);
         assert_eq!(error.template_origin, template.origin);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{}: template requires exactly one solution file, found {expected} solution files",
+                template.origin,
+            )
+        );
     }
     dir.problem("[config]\nsources = ['src/main.cpp']\n");
     let plan = load_config(&dir.request(true)).target().unwrap();
@@ -158,6 +178,416 @@ fn template_destination_uses_defining_file_and_effective_sources() {
     dir.problem("[config]\nsources = []\n");
     let plan = load_config(&dir.request(true)).target().unwrap();
     assert_eq!(plan.template_destination(), Ok(None));
+}
+
+#[test]
+fn cpp_grader_roles_keep_origins_and_only_sources_expand_as_tool_inputs() {
+    use crate::exec::{
+        Baseline, Context, InvocationDirs, PreparedCommand, ProblemBinding, ProgramRequest,
+        TargetBindings, prepare,
+    };
+
+    let dir = Directory::new();
+    dir.user("default_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n");
+    let config = "[config]\nsources = [\"solution.cpp\",\"grader.cpp\"]\nsupport_files = [\"grader.h\"]\nsolution_files = ['solution.cpp']\n";
+    dir.problem(config);
+    let loaded = load_config(&dir.request(true));
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert_eq!(plan.sources.len(), 2);
+    assert_eq!(plan.sources[0].value.components(), ["solution.cpp"]);
+    assert_eq!(plan.sources[1].value.components(), ["grader.cpp"]);
+    assert_eq!(plan.support_files.len(), 1);
+    assert_eq!(plan.support_files[0].value.components(), ["grader.h"]);
+    assert_eq!(plan.solution_files.len(), 1);
+    assert_eq!(plan.solution_files[0].value.components(), ["solution.cpp"]);
+    for (file, needle, key) in [
+        (&plan.sources[0], "\"solution.cpp\"", "config.sources[0]"),
+        (&plan.sources[1], "\"grader.cpp\"", "config.sources[1]"),
+        (
+            &plan.support_files[0],
+            "\"grader.h\"",
+            "config.support_files[0]",
+        ),
+        (
+            &plan.solution_files[0],
+            "'solution.cpp'",
+            "config.solution_files[0]",
+        ),
+    ] {
+        file_value(
+            file,
+            &dir.path("ws/problems/sample/problem.toml"),
+            &problem_text(config),
+            needle,
+            key,
+        );
+    }
+    assert_eq!(
+        plan.captured_files()
+            .map(|file| file.value.components().join("/"))
+            .collect::<Vec<String>>(),
+        ["solution.cpp", "grader.cpp", "grader.h"]
+    );
+    let (template, destination) = plan.template_destination().unwrap().unwrap();
+    assert_eq!(template.value, dir.path("user/cpforge/t.cpp"));
+    assert_eq!(destination, &plan.solution_files[0]);
+    let build = plan.build.as_ref().unwrap();
+    assert_eq!(
+        argv(build)
+            .iter()
+            .map(|value| value.tokens.clone())
+            .collect::<Vec<Vec<Token>>>(),
+        vec![
+            vec![Token::Literal("g++".into())],
+            vec![Token::Literal("-std=gnu++23".into())],
+            vec![Token::Literal("-O2".into())],
+            vec![Token::Literal("-Wall".into())],
+            vec![Token::Placeholder(Placeholder::Sources)],
+            vec![Token::Literal("-o".into())],
+            vec![Token::Placeholder(Placeholder::Artifact)],
+        ]
+    );
+    let sources: Vec<PathBuf> = ["solution.cpp", "grader.cpp"]
+        .iter()
+        .map(|name| dir.path(&format!("job/inputs/src/{name}")))
+        .collect();
+    let artifact = dir.path(if cfg!(windows) {
+        "job/out/main.exe"
+    } else {
+        "job/out/main"
+    });
+    let context = Context::target_build(
+        &plan,
+        InvocationDirs {
+            run_cwd: dir.path("job/cwd"),
+            problem: Some(ProblemBinding {
+                dir: dir.path("ws/problems/sample"),
+                id: "local:sample".into(),
+            }),
+            workspace: Some(dir.path("ws")),
+        },
+        TargetBindings {
+            sources: sources.clone(),
+            artifact: Some(artifact.clone()),
+            artifact_dir: Some(dir.path("job/out")),
+            entry: None,
+        },
+    )
+    .unwrap();
+    let prepared = prepare(build, &context, &Baseline::default(), Platform::host(), &[]).unwrap();
+    let mut expected: Vec<std::ffi::OsString> = ["-std=gnu++23", "-O2", "-Wall"]
+        .iter()
+        .map(|value: &&str| std::ffi::OsString::from(*value))
+        .collect();
+    expected.extend(sources.into_iter().map(PathBuf::into_os_string));
+    expected.push("-o".into());
+    expected.push(artifact.into_os_string());
+    assert_eq!(
+        prepared.command,
+        PreparedCommand::Argv {
+            program: ProgramRequest::Lookup("g++".into()),
+            args: expected
+        }
+    );
+}
+
+#[test]
+fn python_grader_uses_no_bytecode_flag_and_templates_the_support_solution() {
+    let dir = Directory::new();
+    dir.user("[languages.python]\ntemplate = { path = 't.py' }\n");
+    let config = "[config]\nlanguage = 'python'\nsources = ['grader.py']\nsupport_files = [\"solution.py\"]\nsolution_files = ['solution.py']\n";
+    dir.problem(config);
+    let loaded = load_config(&dir.request(true));
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert!(plan.build.is_none());
+    assert_eq!(plan.sources[0].value.components(), ["grader.py"]);
+    assert_eq!(plan.support_files[0].value.components(), ["solution.py"]);
+    assert_eq!(plan.solution_files[0].value.components(), ["solution.py"]);
+    for (file, needle, key) in [
+        (&plan.sources[0], "'grader.py'", "config.sources[0]"),
+        (
+            &plan.support_files[0],
+            "\"solution.py\"",
+            "config.support_files[0]",
+        ),
+        (
+            &plan.solution_files[0],
+            "'solution.py'",
+            "config.solution_files[0]",
+        ),
+    ] {
+        file_value(
+            file,
+            &dir.path("ws/problems/sample/problem.toml"),
+            &problem_text(config),
+            needle,
+            key,
+        );
+    }
+    assert_eq!(
+        argv(&plan.run)
+            .iter()
+            .map(|value| value.tokens.clone())
+            .collect::<Vec<Vec<Token>>>(),
+        vec![
+            vec![Token::Literal(
+                if cfg!(windows) { "python" } else { "python3" }.into()
+            )],
+            vec![Token::Literal("-B".into())],
+            vec![Token::Placeholder(Placeholder::Source)],
+        ]
+    );
+    let (template, destination) = plan.template_destination().unwrap().unwrap();
+    assert_eq!(template.value, dir.path("user/cpforge/t.py"));
+    assert_eq!(destination, &plan.solution_files[0]);
+}
+
+#[test]
+fn problem_java_entry_supplies_the_effective_entry_and_required_origin() {
+    let dir = Directory::new();
+    for (name, expected) in [
+        ("Grader", "Grader.class"),
+        ("judge.Grader", "judge/Grader.class"),
+    ] {
+        let config = format!(
+            "[config]\nlanguage = 'java'\nsources = ['Solution.java','Grader.java']\nentry = '{name}'\n"
+        );
+        dir.problem(&config);
+        let loaded = load_config(&dir.request(true));
+        clean(&loaded);
+        let plan = loaded.target().unwrap();
+        let entry = plan.entry.as_ref().unwrap();
+        assert_eq!(entry.value, name);
+        file_value(
+            entry,
+            &dir.path("ws/problems/sample/problem.toml"),
+            &problem_text(&config),
+            "entry",
+            "config.entry",
+        );
+        let Some(Artifacts::Dir { required }) = &plan.artifacts else {
+            panic!("directory artifact")
+        };
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].value, expected);
+        assert_eq!(required[0].origin, entry.origin);
+        assert_eq!(
+            required[0].provenance,
+            Provenance::Derived {
+                inputs: vec![entry.provenance.clone()]
+            }
+        );
+        assert_eq!(required[0].overlay, None);
+    }
+    let config = "[config]\nlanguage = 'java'\nentry = '/tmp/Grader'\n";
+    dir.problem(config);
+    let loaded = load_config(&dir.request(true));
+    assert_eq!(loaded.diagnostics().len(), 1);
+    assert_eq!(
+        loaded.diagnostics()[0].message,
+        "derived artifact must be output-relative"
+    );
+    assert_eq!(
+        loaded.diagnostics()[0].origin,
+        expected_origin(
+            &dir.path("ws/problems/sample/problem.toml"),
+            &problem_text(config),
+            "entry",
+            "config.entry"
+        )
+    );
+    assert!(loaded.target().is_err());
+    let user = "[languages.java]\nartifacts = { dir = true, required = ['Explicit.class'] }\n";
+    dir.user(user);
+    let loaded = load_config(&dir.request(true));
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert_eq!(plan.entry.unwrap().value, "/tmp/Grader");
+    let Some(Artifacts::Dir { required }) = plan.artifacts else {
+        panic!("directory artifact")
+    };
+    assert_eq!(required.len(), 1);
+    assert_eq!(required[0].value, "Explicit.class");
+    file_value(
+        &required[0],
+        &dir.path("user/cpforge/config.toml"),
+        user,
+        "'Explicit.class'",
+        "languages.java.artifacts.required[0]",
+    );
+}
+
+#[test]
+fn default_roles_preserve_source_locations_with_derived_solution_provenance() {
+    let dir = Directory::new();
+    for (language, name) in [
+        ("cpp", "main.cpp"),
+        ("python", "main.py"),
+        ("java", "Main.java"),
+    ] {
+        let mut request = dir.request(false);
+        request.language = Some(language.into());
+        let loaded = load_config(&request);
+        clean(&loaded);
+        let plan = loaded.target().unwrap();
+        assert!(plan.support_files.is_empty());
+        let settings = &loaded.universe().selected.as_ref().unwrap().settings;
+        assert!(settings.support_files.array().unwrap().is_empty());
+        assert_eq!(settings.support_files.provenance, Provenance::BuiltIn);
+        assert_eq!(
+            settings.support_files.origin,
+            super::super::stages::origin("config.support_files", "<built-in>")
+        );
+        assert_eq!(
+            settings.solution_files.provenance,
+            Provenance::Derived {
+                inputs: vec![Provenance::BuiltIn, Provenance::BuiltIn]
+            }
+        );
+        assert_eq!(
+            settings.solution_files.origin,
+            super::super::stages::origin("config.solution_files", "<default>")
+        );
+        assert_eq!(plan.sources.len(), 1);
+        assert_eq!(plan.sources[0].value.components(), [name]);
+        assert_eq!(plan.sources[0].provenance, Provenance::BuiltIn);
+        assert_eq!(plan.solution_files.len(), 1);
+        assert_eq!(plan.solution_files[0].value, plan.sources[0].value);
+        assert_eq!(plan.solution_files[0].origin, plan.sources[0].origin);
+        assert_eq!(
+            plan.solution_files[0].provenance,
+            Provenance::Derived {
+                inputs: vec![Provenance::BuiltIn]
+            }
+        );
+        assert_eq!(
+            plan.captured_files().collect::<Vec<_>>(),
+            vec![&plan.sources[0]]
+        );
+    }
+    dir.problem(
+        "[config]\nlanguage = 'cpp'\nsources = ['a.cpp','b.cpp']\nsupport_files = ['header.h']\n",
+    );
+    let loaded = load_config(&dir.request(true));
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert_eq!(plan.solution_files.len(), 3);
+    for (solution, captured) in plan.solution_files.iter().zip(plan.captured_files()) {
+        assert_eq!(solution.value, captured.value);
+        assert_eq!(solution.origin, captured.origin);
+        assert_eq!(
+            solution.provenance,
+            Provenance::Derived {
+                inputs: vec![captured.provenance.clone()]
+            }
+        );
+    }
+}
+
+#[test]
+fn prospective_problem_document_is_loaded_instead_of_the_existing_record() {
+    let dir = Directory::new();
+    dir.user("default_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n");
+    dir.problem("[config]\nunknown_key = true\n");
+    let mut request = dir.request(true);
+    let config = "[config]\nlanguage = 'cpp'\nsources = [\"solution.cpp\", 'grader.cpp']\nsolution_files = ['solution.cpp']\n";
+    request.prospective_problem = Some(problem_text(config));
+    let loaded = load_config(&request);
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert_eq!(plan.language_source, LanguageSource::Problem);
+    file_value(
+        &plan.language,
+        &dir.path("ws/problems/sample/problem.toml"),
+        &problem_text(config),
+        "language",
+        "config.language",
+    );
+    let (_, destination) = plan.template_destination().unwrap().unwrap();
+    file_value(
+        destination,
+        &dir.path("ws/problems/sample/problem.toml"),
+        &problem_text(config),
+        "'solution.cpp'",
+        "config.solution_files[0]",
+    );
+    assert_eq!(destination.value.components(), ["solution.cpp"]);
+    assert_eq!(
+        fs::read_to_string(dir.path("ws/problems/sample/problem.toml")).unwrap(),
+        problem_text("[config]\nunknown_key = true\n")
+    );
+}
+
+#[test]
+fn problem_entry_is_available_to_preparation_without_a_language_entry() {
+    use crate::exec::{
+        Baseline, CommandBindings, Context, InvocationDirs, LanguageBinding, PreparedCommand,
+        ProgramRequest, TargetBindings, prepare,
+    };
+
+    let dir = Directory::new();
+    dir.user("[commands.show_entry]\nargv = ['echo', '{entry}']\n");
+    dir.problem("[config]\nlanguage = 'python'\nentry = 'Grader'\n[config.run]\nargv = ['echo', '{entry}']\n");
+    let loaded = load_config(&dir.request(true));
+    clean(&loaded);
+    let plan = loaded.target().unwrap();
+    assert_eq!(plan.entry.as_ref().unwrap().origin.key_path, "config.entry");
+    let dirs = InvocationDirs {
+        run_cwd: dir.path("job/cwd"),
+        problem: None,
+        workspace: None,
+    };
+    let context = Context::target_run(
+        &plan,
+        dirs.clone(),
+        TargetBindings {
+            sources: vec![dir.path("job/inputs/src/main.py")],
+            artifact: None,
+            artifact_dir: None,
+            entry: Some("Grader".into()),
+        },
+    )
+    .unwrap();
+    let expected = PreparedCommand::Argv {
+        program: ProgramRequest::Lookup("echo".into()),
+        args: vec!["Grader".into()],
+    };
+    assert_eq!(
+        prepare(
+            &plan.run,
+            &context,
+            &Baseline::default(),
+            Platform::host(),
+            &[]
+        )
+        .unwrap()
+        .command,
+        expected
+    );
+    let command = loaded.command("show_entry").unwrap();
+    let context = Context::command(
+        &command,
+        dirs,
+        CommandBindings {
+            language: Some(LanguageBinding::from_target(&plan)),
+            ..CommandBindings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepare(
+            &command.stage,
+            &context,
+            &Baseline::default(),
+            Platform::host(),
+            &[]
+        )
+        .unwrap()
+        .command,
+        expected
+    );
 }
 
 #[test]

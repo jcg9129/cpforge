@@ -197,6 +197,55 @@ fn explicit_language_without_template_is_recorded_without_solution() {
 }
 
 #[test]
+fn new_problem_uses_its_prospective_config_when_invoked_inside_another_problem() {
+    let workspace = Workspace::new();
+    workspace.user_config("default_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n[languages.python]\ntemplate = { path = 't.py' }\n");
+    fs::write(workspace.path("user/cpforge/t.cpp"), b"cpp template").unwrap();
+    fs::write(workspace.path("user/cpforge/t.py"), b"python template").unwrap();
+    success(&workspace.add(&["grader"]));
+    fs::write(workspace.path("problems/grader/problem.toml"), format!("{}\n[config]\nlanguage = 'python'\nsources = ['grader.py']\nsupport_files = ['solution.py']\nsolution_files = []\n", problem("grader"))).unwrap();
+    success(
+        &workspace
+            .command()
+            .current_dir(workspace.path("problems/grader"))
+            .args(["add", "inherited"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read(workspace.path("problems/inherited/main.cpp")).unwrap(),
+        b"cpp template"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path("problems/inherited/problem.toml")).unwrap(),
+        format!(
+            "{}\n[files]\ncreated = [{{ path = \"main.cpp\", command = \"add\" }}]\n",
+            problem("inherited")
+        )
+    );
+    success(
+        &workspace
+            .command()
+            .current_dir(workspace.path("problems/grader"))
+            .args(["add", "explicit", "--language", "python"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read(workspace.path("problems/explicit/main.py")).unwrap(),
+        b"python template"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path("problems/explicit/problem.toml")).unwrap(),
+        format!(
+            "{}\n[config]\nlanguage = \"python\"\n\n[files]\ncreated = [{{ path = \"main.py\", command = \"add\" }}]\n",
+            problem("explicit")
+        )
+    );
+    workspace.empty_staging();
+}
+
+#[test]
 fn configuration_and_template_errors_publish_nothing() {
     for (config, workspace_config, language, message) in [
         ("schema = 1\n", "schema = 1\n", "nosuch", "nosuch"),
@@ -210,13 +259,13 @@ fn configuration_and_template_errors_publish_nothing() {
             "schema = 1\ndefault_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n",
             "schema = 1\n[languages.cpp]\nsources = ['a.cpp', 'b.cpp']\n",
             "cpp",
-            "exactly one source",
+            "exactly one solution file, found 2 solution files",
         ),
         (
             "schema = 1\ndefault_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n",
             "schema = 1\n[languages.cpp]\nsources = []\n",
             "cpp",
-            "exactly one source",
+            "exactly one solution file, found 0 solution files",
         ),
         ("schema = 99\n", "schema = 1\n", "cpp", "schema"),
     ] {

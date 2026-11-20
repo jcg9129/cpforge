@@ -470,6 +470,15 @@ pub struct Problem<'a> {
     pub node: &'a EffectiveNode,
 }
 impl<'a> Problem<'a> {
+    pub fn support_files(self) -> Option<&'a EffectiveNode> {
+        self.node.get("support_files")
+    }
+    pub fn solution_files(self) -> Option<&'a EffectiveNode> {
+        self.node.get("solution_files")
+    }
+    pub fn entry(self) -> Option<&'a EffectiveNode> {
+        self.node.get("entry")
+    }
     pub fn build(self) -> Option<Stage<'a>> {
         Some(Stage {
             node: self.node.get("build")?,

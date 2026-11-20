@@ -12,9 +12,9 @@ extensions = ["py"]
 sources = ["main.py"]
 build = false
 [languages.python.run]
-argv = ["python3", "{source}"]
+argv = ["python3", "-B", "{source}"]
 [languages.python.run.windows]
-argv = ["python", "{source}"]
+argv = ["python", "-B", "{source}"]
 
 [languages.java]
 extensions = ["java"]

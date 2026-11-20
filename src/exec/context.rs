@@ -26,7 +26,8 @@ pub struct InvocationDirs {
 /// Absolute paths allocated by the caller, not checked for existence here.
 /// Sources are captured paths when capture was performed; no original-source
 /// fallback exists. `artifact` is present iff the target has a file artifact;
-/// `artifact_dir` iff it has a build; `entry` iff the language declares one.
+/// `artifact_dir` iff it has a build; `entry` iff the target has an effective
+/// entry (problem `config.entry`, else the language's).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetBindings {
     pub sources: Vec<PathBuf>,
@@ -44,7 +45,7 @@ pub struct TestBinding {
 
 /// Language declarations available independently of a build dependency.
 /// Constructed from a selected target so supplying an arbitrary entry value
-/// cannot make an undeclared language entry available.
+/// cannot make an undeclared entry available.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LanguageBinding {
     entry: Option<String>,
@@ -141,7 +142,7 @@ impl Context {
                 stage,
                 &stage.cwd,
                 "entry",
-                Reason::InvalidBinding("entry binding must match the language declaration"),
+                Reason::InvalidBinding("entry binding must match the effective entry"),
             ));
         }
         if errors.is_empty() {

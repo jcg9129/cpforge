@@ -393,6 +393,7 @@ impl Validator<'_> {
         if let Some(build) = &target.build {
             self.stage(build);
         }
+        self.file_roles(target);
         let Some(artifacts) = &target.settings.artifacts else {
             return;
         };
@@ -423,6 +424,9 @@ impl Validator<'_> {
             let mut dependencies = fields(std::slice::from_ref(&input), &[&["dir"], &["required"]]);
             if uses_entry {
                 dependencies.push(path(&["languages", "java", "entry"]));
+                if target.run.inputs.contains(&path(&["config", "run"])) {
+                    dependencies.push(path(&["config", "entry"]));
+                }
             }
             let unknown_entry = uses_entry
                 && target.settings.entry.as_ref().map_or_else(
@@ -450,7 +454,13 @@ impl Validator<'_> {
                         let derived = matches!(item.provenance, super::Provenance::Derived { .. });
                         if item.string().is_some_and(|s| {
                             !super::syntax::output_relative(s, self.merged.platform)
-                                || (derived && s.split('/').any(|c| c.is_empty() || c == "."))
+                                || (derived
+                                    && s.split(|c| {
+                                        c == '/'
+                                            || (self.merged.platform == super::Platform::Windows
+                                                && c == '\\')
+                                    })
+                                    .any(|c| c.is_empty() || c == "."))
                         }) {
                             self.error(
                                 item.origin.clone(),
@@ -469,6 +479,73 @@ impl Validator<'_> {
                     "file and required are mutually exclusive",
                     Some(required.origin.clone()),
                 );
+            }
+        }
+    }
+
+    fn file_roles(&mut self, target: &ComposedTarget) {
+        let settings = &target.settings;
+        let mut dependencies = vec![path(&["languages", &target.language, "sources"])];
+        if target.run.inputs.contains(&path(&["config", "run"])) {
+            dependencies.extend([
+                path(&["config", "sources"]),
+                path(&["config", "support_files"]),
+            ]);
+        }
+        let unknown_sources = settings.sources.as_ref().map_or_else(
+            || self.unknown_definitions(),
+            |node| self.unknown_atomic(node),
+        );
+        if marked(self.merged, &dependencies) || unknown_sources {
+            return;
+        }
+        let mut captured: BTreeMap<String, &EffectiveNode> = BTreeMap::new();
+        for source in settings
+            .sources
+            .iter()
+            .filter_map(EffectiveNode::array)
+            .flatten()
+        {
+            if let Some(text) = source.string() {
+                captured.insert(
+                    super::syntax::source_key(text, self.merged.platform),
+                    source,
+                );
+            }
+        }
+        for support in settings.support_files.array().into_iter().flatten() {
+            let Some(text) = support.string() else {
+                continue;
+            };
+            let key = super::syntax::source_key(text, self.merged.platform);
+            if let Some(source) = captured.get(&key) {
+                self.error(
+                    support.origin.clone(),
+                    "path appears in both sources and support_files",
+                    Some(source.origin.clone()),
+                );
+            } else {
+                captured.insert(key, support);
+            }
+        }
+        // Default solution files are captured files by construction. An invalid
+        // explicit list cannot supply inputs for the membership check.
+        if matches!(
+            settings.solution_files.provenance,
+            super::Provenance::Derived { .. }
+        ) || marked(self.merged, &[path(&["config", "solution_files"])])
+        {
+            return;
+        }
+        for solution in settings.solution_files.array().into_iter().flatten() {
+            if let Some(text) = solution.string() {
+                if !captured.contains_key(&super::syntax::source_key(text, self.merged.platform)) {
+                    self.error(
+                        solution.origin.clone(),
+                        "solution_files member must be one of the captured files (sources or support_files)",
+                        None,
+                    );
+                }
             }
         }
     }

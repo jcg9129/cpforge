@@ -84,6 +84,231 @@ fn diagnostics(report: &CheckReport) -> Vec<(&str, &str)> {
 }
 
 #[test]
+fn file_role_conflicts_and_membership_errors_report_exact_origins_together() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for support in ["solution.cpp", "SOLUTION.cpp"] {
+            let document = format!(
+                "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nsources = ['solution.cpp']\nsupport_files = ['{support}']\nsolution_files = ['outside.cpp', 'missing.h']\n"
+            );
+            let raw = layer(&document, LayerKind::Problem, platform);
+            assert!(raw.diagnostics.is_empty());
+            let config = compose(&[raw], platform);
+            let report = check(&config, &Selection::default());
+            let overlaps = support == "solution.cpp" || platform != Platform::Linux;
+            assert_eq!(report.diagnostics().len(), if overlaps { 3 } else { 2 });
+            let problem = config.problem().unwrap();
+            if overlaps {
+                let diagnostic = &report.diagnostics()[0];
+                assert_eq!(
+                    diagnostic.message,
+                    "path appears in both sources and support_files"
+                );
+                assert_eq!(
+                    diagnostic.origin,
+                    problem.support_files().unwrap().array().unwrap()[0].origin
+                );
+                assert_eq!(
+                    diagnostic.second_origin,
+                    Some(
+                        problem.sources().unwrap().array().unwrap()[0]
+                            .origin
+                            .clone()
+                    )
+                );
+            }
+            for (diagnostic, member) in report.diagnostics()[usize::from(overlaps)..]
+                .iter()
+                .zip(problem.solution_files().unwrap().array().unwrap())
+            {
+                assert_eq!(
+                    diagnostic.message,
+                    "solution_files member must be one of the captured files (sources or support_files)"
+                );
+                assert_eq!(diagnostic.origin, member.origin);
+                assert_eq!(diagnostic.second_origin, None);
+            }
+            assert!(resolve(&config, &Selection::default()).is_err());
+        }
+    }
+}
+
+#[test]
+fn solution_membership_uses_the_source_case_rule_and_allows_empty_lists() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for roles in [
+            "sources = ['solution.cpp']\nsolution_files = ['SOLUTION.cpp']",
+            "sources = []\nsupport_files = ['solution.cpp']\nsolution_files = ['SOLUTION.cpp']",
+            "sources = ['solution.cpp']\nsupport_files = ['header.h']\nsolution_files = []",
+        ] {
+            let document =
+                format!("[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\n{roles}");
+            let config = merged(&[(&document, LayerKind::Problem)], platform);
+            let report = check(&config, &Selection::default());
+            assert_eq!(
+                report.diagnostics().len(),
+                usize::from(platform == Platform::Linux && !roles.ends_with("[]")),
+                "{platform:?} {roles}"
+            );
+            if platform != Platform::Linux || roles.ends_with("[]") {
+                clean(&report);
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_role_inputs_skip_dependent_checks_but_keep_independent_errors() {
+    for (roles, expected_key, expected_message) in [
+        (
+            "sources = ['../bad']\nsupport_files = ['../bad']\nsolution_files = ['outside.cpp']",
+            "config.sources[0]",
+            "expected a non-empty problem-relative source with / components, without . or ..",
+        ),
+        (
+            "support_files = ['../x.h']\nsolution_files = ['outside.cpp']",
+            "config.support_files[0]",
+            "expected a non-empty problem-relative source with / components, without . or ..",
+        ),
+        (
+            "support_files = ['x.h','x.h']\nsolution_files = ['outside.cpp']",
+            "config.support_files[1]",
+            "duplicate source",
+        ),
+        (
+            "solution_files = ['outside.cpp','outside.cpp']",
+            "config.solution_files[1]",
+            "duplicate source",
+        ),
+        (
+            "solution_files = 17",
+            "config.solution_files",
+            "expected an array of strings",
+        ),
+    ] {
+        let document = format!(
+            "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\n{roles}\n[config.run]\ncwd = {{}}\n"
+        );
+        let raw = layer(&document, LayerKind::Problem, Platform::Linux);
+        let raw_diagnostics = raw.diagnostics.clone();
+        assert_eq!(raw_diagnostics[0].origin.key_path, expected_key);
+        assert_eq!(raw_diagnostics[0].message, expected_message);
+        let config = compose(&[raw], Platform::Linux);
+        let report = check(&config, &Selection::default());
+        assert_eq!(
+            report.diagnostics().len(),
+            raw_diagnostics.len() + 1,
+            "{roles}: {:?}",
+            report.diagnostics()
+        );
+        assert_eq!(
+            &report.diagnostics()[..raw_diagnostics.len()],
+            raw_diagnostics
+        );
+        assert_eq!(
+            report.diagnostics().last().unwrap().message,
+            "cwd requires path or selector"
+        );
+    }
+    // A malformed solution list does not hide an independent capture conflict.
+    let config = merged(
+        &[(
+            "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nsources = ['same.cpp']\nsupport_files = ['same.cpp']\nsolution_files = 17",
+            LayerKind::Problem,
+        )],
+        Platform::Linux,
+    );
+    assert_eq!(
+        diagnostics(&check(&config, &Selection::default())),
+        [
+            ("config.solution_files", "expected an array of strings"),
+            (
+                "config.support_files[0]",
+                "path appears in both sources and support_files"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn java_required_derivation_validates_problem_entry_in_phase_two_only() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for entry in [
+            "/tmp/Grader",
+            "a..b",
+            ".Grader",
+            "judge/./Grader",
+            "judge//Grader",
+        ] {
+            let document = format!(
+                "[problem]\nid = 'local:p'\n[config]\nlanguage = 'java'\nentry = '{entry}'"
+            );
+            let raw = layer(&document, LayerKind::Problem, platform);
+            assert!(raw.diagnostics.is_empty(), "{platform:?} {entry}");
+            let config = compose(&[raw], platform);
+            let report = check(&config, &Selection::default());
+            assert_eq!(
+                diagnostics(&report),
+                [("config.entry", "derived artifact must be output-relative")],
+                "{platform:?} {entry}"
+            );
+            assert_eq!(
+                report.diagnostics()[0].origin,
+                config.problem().unwrap().entry().unwrap().origin
+            );
+            // An explicit artifact requirement does not depend on the entry.
+            let config = merged(
+                &[
+                    (
+                        "[languages.java]\nartifacts = { dir = true, required = ['kept.class'] }",
+                        LayerKind::Workspace,
+                    ),
+                    (&document, LayerKind::Problem),
+                ],
+                platform,
+            );
+            clean(&check(&config, &Selection::default()));
+        }
+        for entry in ["''", "17", "\"a\\u0000b\""] {
+            let document =
+                format!("[problem]\nid = 'local:p'\n[config]\nlanguage = 'java'\nentry = {entry}");
+            let raw = layer(&document, LayerKind::Problem, platform);
+            assert_eq!(raw.diagnostics.len(), 1);
+            let expected = raw.diagnostics.clone();
+            let config = compose(&[raw], platform);
+            assert_eq!(
+                check(&config, &Selection::default()).diagnostics(),
+                expected
+            );
+        }
+    }
+    for entry in [r"C:\tmp\Grader", r"\Grader", r"judge\\Grader"] {
+        let document =
+            format!("[problem]\nid = 'local:p'\n[config]\nlanguage = 'java'\nentry = '{entry}'");
+        let config = merged(&[(&document, LayerKind::Problem)], Platform::Windows);
+        assert_eq!(
+            diagnostics(&check(&config, &Selection::default())),
+            [("config.entry", "derived artifact must be output-relative")]
+        );
+    }
+}
+
+#[test]
+fn unknown_source_inputs_do_not_create_solution_membership_errors() {
+    let unknown_user = layer("[", LayerKind::DefaultUser, Platform::Linux);
+    let problem = layer(
+        "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nsolution_files = ['could-be-in-user-sources.cpp']",
+        LayerKind::Problem,
+        Platform::Linux,
+    );
+    let expected = unknown_user.diagnostics.clone();
+    let config = compose(&[unknown_user, problem], Platform::Linux);
+    assert_eq!(
+        check(&config, &Selection::default()).diagnostics(),
+        expected
+    );
+}
+
+#[test]
 fn precedence_rows_one_to_six_and_specificity_over_layer() {
     for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
         for (use_profile, use_problem, cli, expected_ms, expected_source) in [

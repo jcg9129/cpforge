@@ -185,7 +185,10 @@ impl<'a> Validator<'a> {
                         self.integer(n, 1, 1);
                     }
                     "language" if problem => self.name(n, true),
-                    "sources" if problem => self.strings(n, StringRule::Source, lexical, active),
+                    "sources" | "support_files" | "solution_files" if problem => {
+                        self.strings(n, StringRule::Source, lexical, active)
+                    }
+                    "entry" if problem => self.nonempty(n),
                     "compare" => self.compare(n),
                     "build" | "run" => self.table(
                         n,
@@ -375,8 +378,12 @@ impl<'a> Validator<'a> {
         }
     }
     fn nonempty(&mut self, n: &mut RawNode) {
-        if self.string(n).is_some_and(|s| s.is_empty()) {
-            self.error(n, "string must not be empty");
+        if let Some(text) = self.string(n) {
+            if text.is_empty() {
+                self.error(n, "string must not be empty");
+            } else if text.contains('\0') {
+                self.error(n, "string must contain no NUL");
+            }
         }
     }
     fn name(&mut self, n: &mut RawNode, reserved: bool) {
@@ -445,11 +452,7 @@ impl<'a> Validator<'a> {
                     if !syntax::source_valid(&s, platform) {
                         self.error(value, "expected a non-empty problem-relative source with / components, without . or ..");
                     }
-                    let key = if platform == Platform::Linux {
-                        s.clone()
-                    } else {
-                        s.to_ascii_lowercase()
-                    };
+                    let key = syntax::source_key(&s, platform);
                     if let Some(other) = seen.get(&key) {
                         value.invalid = true;
                         self.diagnostics.push(Diagnostic {

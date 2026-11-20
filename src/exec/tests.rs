@@ -202,10 +202,8 @@ fn source_requires_exactly_one_and_reports_the_count() {
     let target = dir.target("python", "");
     for count in [0, 1, 2] {
         let bindings = dir.bindings(&target, count);
-        let expected: Vec<OsString> = bindings
-            .sources
-            .iter()
-            .map(|p| p.as_os_str().to_owned())
+        let expected: Vec<OsString> = std::iter::once(OsString::from("-B"))
+            .chain(bindings.sources.iter().map(|p| p.as_os_str().to_owned()))
             .collect();
         let ctx = Context::target_run(&target, dir.dirs(), bindings).unwrap();
         let result = prepare(

@@ -221,6 +221,15 @@ pub(super) fn source_valid(text: &str, platform: Platform) -> bool {
         && text.split('/').all(|c| !matches!(c, "" | "." | ".."))
 }
 
+/// Textual equality for problem-relative file roles (§6.2).
+pub(super) fn source_key(text: &str, platform: Platform) -> String {
+    if platform == Platform::Linux {
+        text.to_owned()
+    } else {
+        text.to_ascii_lowercase()
+    }
+}
+
 pub(super) fn ignore_valid(text: &str) -> bool {
     !text.is_empty()
         && !text.contains(['[', ']', '!', '\\', '\0'])

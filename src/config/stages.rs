@@ -30,7 +30,7 @@ pub struct PublishedLimit {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
-    /// A language-only target (for example, a future `cpf add` consumer).
+    /// A language-only target, outside an existing or prospective problem.
     /// For a selected problem, config.language/default_language select instead.
     pub language: Option<String>,
     pub profile: Option<String>,
@@ -94,6 +94,8 @@ impl ComposedStage {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TargetSettings {
     pub sources: Option<EffectiveNode>,
+    pub support_files: EffectiveNode,
+    pub solution_files: EffectiveNode,
     pub artifacts: Option<EffectiveNode>,
     pub entry: Option<EffectiveNode>,
     pub template: Option<EffectiveNode>,
@@ -627,7 +629,31 @@ pub(super) fn target(
         .language(language)
         .expect("language selected from merged config");
     let problem_settings = if problem { merged.problem() } else { None };
-    let entry = lang.entry().cloned();
+    let entry = problem_settings
+        .and_then(|p| p.entry())
+        .or_else(|| lang.entry())
+        .cloned();
+    let sources = problem_settings
+        .and_then(|p| p.sources())
+        .or_else(|| lang.sources())
+        .cloned();
+    let support_files = problem_settings
+        .and_then(|p| p.support_files())
+        .cloned()
+        .unwrap_or_else(|| {
+            EffectiveNode::new(
+                "support_files",
+                NodeKind::Other,
+                EffectiveValue::Array(Vec::new()),
+                None,
+                Provenance::BuiltIn,
+                origin("config.support_files", "<built-in>"),
+            )
+        });
+    let solution_files = problem_settings
+        .and_then(|p| p.solution_files())
+        .cloned()
+        .unwrap_or_else(|| default_solution_files(sources.as_ref(), &support_files));
     let mut artifacts = lang.artifacts().cloned();
     if language == "java" {
         if let Some(artifact) = &mut artifacts {
@@ -668,10 +694,9 @@ pub(super) fn target(
         language: language.into(),
         profile: profile.map(str::to_owned),
         settings: TargetSettings {
-            sources: problem_settings
-                .and_then(|p| p.sources())
-                .or_else(|| lang.sources())
-                .cloned(),
+            sources,
+            support_files,
+            solution_files,
             artifacts,
             entry,
             template: lang.template().cloned(),
@@ -686,4 +711,40 @@ pub(super) fn target(
         run,
         ignored,
     }
+}
+
+fn default_solution_files(
+    sources: Option<&EffectiveNode>,
+    support_files: &EffectiveNode,
+) -> EffectiveNode {
+    let inputs: Vec<&EffectiveNode> = sources.into_iter().chain([support_files]).collect();
+    let mut files: Vec<EffectiveNode> = inputs
+        .iter()
+        .filter_map(|node| node.array())
+        .flatten()
+        .cloned()
+        .collect();
+    for file in &mut files {
+        file.provenance = Provenance::Derived {
+            inputs: vec![file.provenance.clone()],
+        };
+        file.events = vec![file.event(EventKind::Set)];
+    }
+    let provenance = Provenance::Derived {
+        inputs: inputs.iter().map(|node| node.provenance.clone()).collect(),
+    };
+    let mut node = EffectiveNode::new(
+        "solution_files",
+        NodeKind::Other,
+        EffectiveValue::Array(files),
+        None,
+        provenance,
+        origin("config.solution_files", "<default>"),
+    );
+    node.markers = inputs
+        .iter()
+        .flat_map(|node| node.markers.clone())
+        .collect();
+    node.events.push(node.event(EventKind::Set));
+    node
 }
