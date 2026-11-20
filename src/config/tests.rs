@@ -1442,9 +1442,10 @@ fn explicit_override_never_reads_default_file() {
         config_override: Some(dir.0.join("override.toml")),
         ..DiscoveryOptions::default()
     };
-    let sources = discover(&env, Platform::Linux, &options).unwrap();
+    // Real files: use the host's path rules.
+    let sources = discover(&env, Platform::host(), &options).unwrap();
     assert_eq!(sources.len(), 1);
-    let layers = load(&sources, &env, Platform::Linux);
+    let layers = load(&sources, &env, Platform::host());
     valid(&layers[0]);
     assert_eq!(layers[0].kind, LayerKind::OverrideUser);
 }

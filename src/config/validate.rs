@@ -669,9 +669,9 @@ impl<'a> Validator<'a> {
 
     fn deadline(&mut self, n: &mut RawNode) {
         // Scale straight to milliseconds so `"2003.5ms"` rounds half up exactly.
-        let milliseconds = match &n.value {
-            RawValue::Integer(i) => *i as f64 * 1000.0,
-            RawValue::Float(f) => *f * 1000.0,
+        let (number, factor) = match &n.value {
+            RawValue::Integer(i) => (*i as f64, 1000.0),
+            RawValue::Float(f) => (*f, 1000.0),
             RawValue::String(s) => {
                 let (number, factor) = if let Some(s) = s.strip_suffix("ms") {
                     (s, 1.0)
@@ -684,7 +684,7 @@ impl<'a> Validator<'a> {
                     return;
                 };
                 match number.parse::<f64>() {
-                    Ok(n) => n * factor,
+                    Ok(n) => (n, factor),
                     Err(_) => {
                         self.error(n, "invalid duration number");
                         return;
@@ -696,15 +696,17 @@ impl<'a> Validator<'a> {
                 return;
             }
         };
-        if !milliseconds.is_finite() {
+        // Contract order: finiteness and sign of the number as written, then
+        // rounding and range; a product overflowing to infinity is out of range.
+        if !number.is_finite() {
             self.error(n, "duration must be finite");
             return;
         }
-        if milliseconds < 0.0 {
+        if number < 0.0 {
             self.error(n, "duration must not be negative");
             return;
         }
-        let milliseconds = milliseconds.round();
+        let milliseconds = (number * factor).round();
         if !(1.0..=86_400_000.0).contains(&milliseconds) {
             self.error(n, "rounded duration must be in 1..=86400000 milliseconds");
             return;
