@@ -253,7 +253,8 @@ impl Drop for JobLease {
 }
 
 /// An acquired probe keeps its independent handle locked until dropped. Pruning
-/// must retain it through the directory rename; it cannot become a job owner.
+/// must drop it before the directory rename, closing the handle for Windows.
+/// It cannot become a job owner; a free lease is never re-taken by an owner.
 #[derive(Debug)]
 pub struct ProbeLock {
     _lease: JobLease,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
@@ -96,6 +96,8 @@ struct Walker<'a> {
     device: u64,
     mounts: HashSet<PathBuf>,
     report: WalkReport,
+    child_bytes: Option<(&'a Path, &'a mut BTreeMap<OsString, u64>)>,
+    on_entry: Option<&'a mut dyn FnMut(&Path)>,
 }
 
 fn run(
@@ -110,7 +112,30 @@ fn run(
         action,
         #[cfg(feature = "storage-test-hooks")]
         Some(&guard.test_hooks),
+        None,
+        None,
     )
+}
+
+/// One measurement supplies both total usage and immediate-child sizes, with
+/// identical no-follow and mount-boundary decisions for both views.
+pub(super) fn measure_children(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    on_entry: &mut dyn FnMut(&Path),
+) -> Result<(WalkReport, BTreeMap<OsString, u64>), StorageError> {
+    let path = guard.check_path(path)?;
+    let mut children = BTreeMap::new();
+    let report = run_owned(
+        guard.root(),
+        &path,
+        Action::Measure,
+        #[cfg(feature = "storage-test-hooks")]
+        Some(&guard.test_hooks),
+        Some(&mut children),
+        Some(on_entry),
+    )?;
+    Ok((report, children))
 }
 
 /// The same walker for an exclusively owned disposable child of a caller's
@@ -122,6 +147,8 @@ pub(crate) fn measure_owned_tree(root: &Path, path: &Path) -> Result<WalkReport,
         Action::Measure,
         #[cfg(feature = "storage-test-hooks")]
         None,
+        None,
+        None,
     )
 }
 
@@ -132,7 +159,18 @@ pub(crate) fn remove_owned_tree(root: &Path, path: &Path) -> Result<WalkReport, 
         Action::Remove,
         #[cfg(feature = "storage-test-hooks")]
         None,
+        None,
+        None,
     )
+}
+
+#[cfg(feature = "storage-test-hooks")]
+pub(super) fn remove_owned_tree_with_hooks(
+    root: &Path,
+    path: &Path,
+    hooks: &super::TestHooks,
+) -> Result<WalkReport, StorageError> {
+    run_owned(root, path, Action::Remove, Some(hooks), None, None)
 }
 
 fn run_owned(
@@ -140,29 +178,47 @@ fn run_owned(
     path: &Path,
     action: Action,
     #[cfg(feature = "storage-test-hooks")] test_hooks: Option<&super::TestHooks>,
+    child_bytes: Option<&mut BTreeMap<OsString, u64>>,
+    on_entry: Option<&mut dyn FnMut(&Path)>,
 ) -> Result<WalkReport, StorageError> {
-    let path = super::checked_path(root, path, true)?;
-    // A capability to mutate below the root never grants removal of the root.
-    if path == root {
-        return Err(StorageError::new(ErrorKind::InvalidPath { path }));
+    let result = (|| {
+        let path = super::checked_path(root, path, true)?;
+        // A capability to mutate below the root never grants removal of the root.
+        if path == root {
+            return Err(StorageError::new(ErrorKind::InvalidPath { path }));
+        }
+        let parent = path.parent().expect("below root");
+        super::checked_path(root, parent, false)?;
+        let parent_handle = sys::open_dir(parent).map_err(|e| StorageError::io(parent, e))?;
+        let name = path.file_name().expect("below root");
+        let info =
+            native::info(&parent_handle, name, &path).map_err(|e| StorageError::io(&path, e))?;
+        let mounts = mount_points().map_err(|e| StorageError::io("/proc/self/mountinfo", e))?;
+        let mut walker = Walker {
+            _scope: std::marker::PhantomData,
+            #[cfg(feature = "storage-test-hooks")]
+            test_hooks,
+            action,
+            device: info.device,
+            mounts,
+            report: WalkReport::default(),
+            child_bytes: child_bytes.map(|children| (path.as_path(), children)),
+            // Coerce to the walker's shorter trait-object lifetime; `&mut`
+            // inside `Option` is invariant and would not shorten by itself.
+            on_entry: on_entry.map(|on_entry| on_entry as &mut dyn FnMut(&Path)),
+        };
+        walker.visit(parent_handle, name, &path, info);
+        Ok(walker.report)
+    })();
+    match result {
+        Err(StorageError {
+            kind: ErrorKind::Io { source, .. },
+            ..
+        }) if action == Action::Remove && source.kind() == io::ErrorKind::NotFound => {
+            Ok(WalkReport::default())
+        }
+        result => result,
     }
-    let parent = path.parent().expect("below root");
-    super::checked_path(root, parent, false)?;
-    let parent_handle = sys::open_dir(parent).map_err(|e| StorageError::io(parent, e))?;
-    let name = path.file_name().expect("below root");
-    let info = native::info(&parent_handle, name, &path).map_err(|e| StorageError::io(&path, e))?;
-    let mounts = mount_points().map_err(|e| StorageError::io("/proc/self/mountinfo", e))?;
-    let mut walker = Walker {
-        _scope: std::marker::PhantomData,
-        #[cfg(feature = "storage-test-hooks")]
-        test_hooks,
-        action,
-        device: info.device,
-        mounts,
-        report: WalkReport::default(),
-    };
-    walker.visit(parent_handle, name, &path, info);
-    Ok(walker.report)
 }
 
 // Frames retain names and completion state, never directory handles. The
@@ -178,17 +234,28 @@ struct Frame {
 
 impl Walker<'_> {
     fn visit(&mut self, parent: File, name: &OsStr, path: &Path, info: Info) {
+        if let Some(on_entry) = &mut self.on_entry {
+            on_entry(path);
+        }
         let Ok(Some((mut directory, frame))) = self.enter(&parent, name, path, info, false) else {
             return;
         };
         drop(parent);
         let mut stack = vec![frame];
-        while let Some(frame) = stack.last_mut() {
+        'walk: while let Some(frame) = stack.last_mut() {
             if let Some(child) = frame.children.next() {
                 let child_path = frame.path.join(&child);
+                // Discover names even when inspecting the entry fails: a
+                // governed record may be unreadable and must protect its job.
+                if let Some(on_entry) = &mut self.on_entry {
+                    on_entry(&child_path);
+                }
                 let info = match native::info(&directory, &child, &child_path) {
                     Ok(info) => info,
                     Err(error) => {
+                        if self.vanished(&error) {
+                            continue;
+                        }
                         self.report.errors.push((child_path, error));
                         frame.complete = false;
                         continue;
@@ -216,6 +283,28 @@ impl Walker<'_> {
             let parent = match native::open_parent(&directory, parent_path) {
                 Ok(parent) => parent,
                 Err(error) => {
+                    if self.vanished(&error) {
+                        // The directory left was unlinked by another remover
+                        // (Unix `..` of a dead directory) or its parent is gone
+                        // (Windows ascends by path). Resume at the first live
+                        // ancestor frame, which keeps its unvisited children.
+                        while let Some(live) = stack.last() {
+                            match sys::open_dir(&live.path) {
+                                Ok(handle) => {
+                                    directory = handle;
+                                    continue 'walk;
+                                }
+                                Err(error) if self.vanished(&error) => {
+                                    stack.pop();
+                                }
+                                Err(error) => {
+                                    self.report.errors.push((live.path.clone(), error));
+                                    return;
+                                }
+                            }
+                        }
+                        return;
+                    }
                     self.report.errors.push((parent_path.into(), error));
                     return; // All unprocessed ancestors are retained.
                 }
@@ -231,6 +320,9 @@ impl Walker<'_> {
                     ));
                     return; // All unprocessed ancestors are retained.
                 }
+                // A concurrent remover unlinked the open directory. Ascend
+                // normally so remaining siblings are still visited.
+                Err(error) if self.vanished(&error) => {}
                 Err(error) => {
                     self.report.errors.push((frame.path.clone(), error));
                     return;
@@ -246,8 +338,10 @@ impl Walker<'_> {
                     Kind::Directory,
                     !stack.is_empty(),
                 ) {
-                    self.report.errors.push((frame.path, error));
-                    frame.complete = false;
+                    if !self.vanished(&error) {
+                        self.report.errors.push((frame.path, error));
+                        frame.complete = false;
+                    }
                 }
             }
             directory = parent;
@@ -255,6 +349,10 @@ impl Walker<'_> {
                 parent_frame.complete &= frame.complete;
             }
         }
+    }
+
+    fn vanished(&self, error: &io::Error) -> bool {
+        self.action == Action::Remove && error.kind() == io::ErrorKind::NotFound
     }
 
     // None means a completed leaf; Some descends into a directory. Every
@@ -316,6 +414,13 @@ impl Walker<'_> {
                     .bytes
                     .checked_add(info.bytes)
                     .ok_or_else(|| io::Error::other("tree size overflow"))?;
+                if let Some((root, children)) = &mut self.child_bytes {
+                    if let Some(name) = path.strip_prefix(*root).ok().and_then(|p| p.iter().next())
+                    {
+                        // The total addition above bounds each child's sum too.
+                        *children.entry(name.into()).or_default() += info.bytes;
+                    }
+                }
                 if self.action == Action::Sync {
                     sys::sync_file(&native::open_file(parent, name, path)?)?;
                 }
@@ -330,9 +435,14 @@ impl Walker<'_> {
             }
             Ok(None)
         })();
-        result.map_err(|error| {
-            self.report.errors.push((path.into(), error));
-        })
+        match result {
+            Err(error) if self.vanished(&error) => Ok(None),
+            Err(error) => {
+                self.report.errors.push((path.into(), error));
+                Err(())
+            }
+            Ok(value) => Ok(value),
+        }
     }
 }
 

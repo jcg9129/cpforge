@@ -14,6 +14,7 @@ mod edit;
 pub mod job;
 pub mod job_seq;
 mod lock;
+pub mod prune;
 mod publish;
 mod record;
 mod recovery;
@@ -225,4 +226,6 @@ pub struct TestHooks {
     pub recovery_read_failure: Option<PathBuf>,
     pub walker_mount_point: Option<PathBuf>,
     pub walker_device_boundary: Option<PathBuf>,
+    /// Refuse pruning renames without changing the source or destination.
+    pub fail_prune_rename: bool,
 }
