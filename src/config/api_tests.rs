@@ -534,13 +534,8 @@ fn problem_entry_is_available_to_preparation_without_a_language_entry() {
     clean(&loaded);
     let plan = loaded.target().unwrap();
     assert_eq!(plan.entry.as_ref().unwrap().origin.key_path, "config.entry");
+    // `{entry}` needs a target, so both stages need the problem and workspace.
     let dirs = InvocationDirs {
-        run_cwd: dir.path("job/cwd"),
-        problem: None,
-        workspace: None,
-    };
-    // A problem's run stage needs the selected problem and its workspace.
-    let target_dirs = InvocationDirs {
         run_cwd: dir.path("job/cwd"),
         problem: Some(ProblemBinding {
             dir: dir.path("ws/problems/sample"),
@@ -550,7 +545,7 @@ fn problem_entry_is_available_to_preparation_without_a_language_entry() {
     };
     let context = Context::target_run(
         &plan,
-        target_dirs,
+        dirs.clone(),
         TargetBindings {
             sources: vec![dir.path("job/inputs/src/main.py")],
             artifact: None,
