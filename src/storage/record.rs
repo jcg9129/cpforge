@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::path::Path;
 
-use toml_edit::DocumentMut;
+use toml_edit::{DocumentMut, ImDocument};
 
 #[derive(Debug)]
 pub enum Record<T, E> {
@@ -66,6 +66,23 @@ pub fn read_tool_record<T, E>(
 }
 
 fn read_record<T, E>(path: &Path, classify: impl FnOnce(&[u8]) -> Record<T, E>) -> Record<T, E> {
+    match read_record_bytes(path) {
+        RecordBytes::Missing => Record::Missing,
+        RecordBytes::Unreadable(error) => Record::Unreadable(error),
+        RecordBytes::Present(bytes) => classify(&bytes),
+    }
+}
+
+/// Shared regular-file reader. Keeping the bytes lets span-aware consumers map
+/// syntax-error offsets without parsing a diagnostic's rendered text.
+#[derive(Debug)]
+pub(crate) enum RecordBytes {
+    Missing,
+    Unreadable(io::Error),
+    Present(Vec<u8>),
+}
+
+pub(crate) fn read_record_bytes(path: &Path) -> RecordBytes {
     let mut open = OpenOptions::new();
     open.read(true);
     #[cfg(unix)]
@@ -75,19 +92,19 @@ fn read_record<T, E>(path: &Path, classify: impl FnOnce(&[u8]) -> Record<T, E>) 
     }
     let mut file = match open.open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Record::Missing,
-        Err(error) => return Record::Unreadable(error),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return RecordBytes::Missing,
+        Err(error) => return RecordBytes::Unreadable(error),
     };
     match file.metadata() {
         Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Record::Unreadable(io::Error::other("record is not a regular file")),
-        Err(error) => return Record::Unreadable(error),
+        Ok(_) => return RecordBytes::Unreadable(io::Error::other("record is not a regular file")),
+        Err(error) => return RecordBytes::Unreadable(error),
     }
     let mut bytes = Vec::new();
     if let Err(error) = file.read_to_end(&mut bytes) {
-        return Record::Unreadable(error);
+        return RecordBytes::Unreadable(error);
     }
-    classify(&bytes)
+    RecordBytes::Present(bytes)
 }
 
 /// Parse TOML, read `schema` alone (absent means 1), then decode/validate the
@@ -97,7 +114,18 @@ pub fn classify_user_record<T, E>(
     supported: i64,
     validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
 ) -> Record<T, E> {
-    classify_record(bytes, supported, false, validate)
+    classify_record(bytes, supported, false, |document| {
+        validate(&document.into_mut())
+    })
+}
+
+/// Schema-first classification retaining the original document and its spans.
+pub fn classify_user_record_spanned<T, E>(
+    bytes: &[u8],
+    supported: i64,
+    validate: impl FnOnce(&ImDocument<String>) -> Result<T, E>,
+) -> Record<T, E> {
+    classify_record(bytes, supported, false, |document| validate(&document))
 }
 
 /// Parse TOML and require `schema` before validating any tool-only fields.
@@ -107,20 +135,22 @@ pub fn classify_tool_record<T, E>(
     supported: i64,
     validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
 ) -> Record<T, E> {
-    classify_record(bytes, supported, true, validate)
+    classify_record(bytes, supported, true, |document| {
+        validate(&document.into_mut())
+    })
 }
 
 fn classify_record<T, E>(
     bytes: &[u8],
     supported: i64,
     schema_required: bool,
-    validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
+    validate: impl FnOnce(ImDocument<String>) -> Result<T, E>,
 ) -> Record<T, E> {
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) => return Record::Malformed(MalformedRecord::Encoding(error)),
     };
-    let document = match text.parse::<DocumentMut>() {
+    let document = match ImDocument::parse(text.to_owned()) {
         Ok(document) => document,
         Err(error) => return Record::Malformed(MalformedRecord::Toml(error)),
     };
@@ -138,7 +168,7 @@ fn classify_record<T, E>(
     if schema < supported {
         return Record::Malformed(MalformedRecord::SchemaTooOld { schema, supported });
     }
-    match validate(&document) {
+    match validate(document) {
         Ok(value) => Record::Valid(value),
         Err(error) => Record::Malformed(MalformedRecord::Fields(error)),
     }
@@ -154,6 +184,28 @@ mod tests {
             .and_then(|item| item.as_str())
             .map(str::to_owned)
             .ok_or("name must be a string")
+    }
+
+    #[test]
+    fn spanned_classification_retains_original_offsets() {
+        let bytes = b"# original\nname = 'toy'\n";
+        let record = classify_user_record_spanned(bytes, 1, |document| {
+            assert_eq!(document.raw().as_bytes(), bytes);
+            Ok::<_, ()>(document.get("name").unwrap().span().unwrap())
+        });
+        let Record::Valid(span) = record else {
+            panic!("expected valid record")
+        };
+        assert_eq!(&bytes[span], b"'toy'");
+        assert!(matches!(
+            classify_user_record_spanned(b"schema = 2", 1, |_| -> Result<(), ()> {
+                panic!("newer schema must not be decoded")
+            }),
+            Record::TooNew {
+                schema: 2,
+                supported: 1
+            }
+        ));
     }
 
     #[test]

@@ -26,9 +26,10 @@ pub use edit::{EditError, edit_toml, edit_toml_replay};
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
 pub use publish::{atomic_replace, publish_dir_noclobber, publish_file_noclobber};
 pub use record::{
-    MalformedRecord, Record, classify_tool_record, classify_user_record, read_tool_record,
-    read_user_record,
+    MalformedRecord, Record, classify_tool_record, classify_user_record,
+    classify_user_record_spanned, read_tool_record, read_user_record,
 };
+pub(crate) use record::{RecordBytes, read_record_bytes};
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 
 #[derive(Debug)]

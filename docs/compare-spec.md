@@ -81,7 +81,11 @@ compare = { float = { abs = 1e-6, rel = 1e-6 } }      # full form
 compare = { float = 1e-6 }                            # preset: abs = rel = 1e-6, either
 compare = { float_abs = 1e-6 }                        # preset: abs only
 compare = { float_rel = 1e-6 }                        # preset: rel only
+compare = { tokens = true }                           # exact, tokens, lines: selector = true
 ```
+
+The non-float selectors take no settings and are written `{ exact = true }`,
+`{ tokens = true }` or `{ lines = true }`; any other value is an error.
 
 | Key | Type | Default | Rule |
 |---|---|---|---|

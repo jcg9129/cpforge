@@ -112,7 +112,7 @@ are unknown keys in this version.
 
 - Layers merge in order 0 → 3; later wins. Tables merge key by key,
   recursively, **except replace-as-unit nodes**, which a later layer replaces
-  whole: every array; `compare`; `artifacts`; `limits`; `env_remove`; `cwd`
+  whole: every array; `compare`; `artifacts`; `template`; `limits`; `env_remove`; `cwd`
   (`selector` and `path` never mix); and a stage's **command**: setting
   `argv` removes an inherited `shell` and vice versa, and setting either
   form replaces the whole inherited command, also `shell` over `shell`;
@@ -319,7 +319,8 @@ placeholders anywhere and is never rebased; (4) expansion (§5);
 else `PATH` lookup. An empty result is an error. "Rebased at load" in §4.2
 means exactly rule (1). Other `argv` elements are never rebased. `shell.interpreter[0]` is literal: leading `~/` expansion, rebasing by
 rule (1) and program resolution apply, but placeholders are neither
-recognised nor expanded in it (§5.1); its resolved path is absolute. After
+recognised nor expanded in it (§5.1); a `{` or `}` anywhere in the interpreter
+is a phase-1 error, so `{{` is not an escape there; its resolved path is absolute. After
 expansion, an `argv[0]` containing a separator and `cwd.path` must be
 absolute; a relative result (e.g. from `{problem_id}/tool`) and the
 Windows drive-relative and root-relative forms are phase-3 errors.
