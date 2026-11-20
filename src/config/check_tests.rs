@@ -96,7 +96,7 @@ fn precedence_rows_one_to_six_and_specificity_over_layer() {
             let mut texts = vec![];
             if use_profile {
                 texts.extend([
-                    // Lowercase names: Windows folds environment keys (§4.3).
+                    // Canonical keys follow the platform environment fold (§4.3).
                     ("[languages.cpp.profiles.fast.run]\ndeadline_s = 3\nenv = { x = 'profile' }", LayerKind::DefaultUser),
                     ("[run]\ndeadline_s = 1\nenv = { x = 'global', g = 'global' }\n[languages.cpp.run]\ndeadline_s = 2\nenv = { x = 'language', l = 'language' }", LayerKind::Workspace),
                 ]);
@@ -127,9 +127,13 @@ fn precedence_rows_one_to_six_and_specificity_over_layer() {
             if use_profile {
                 assert_eq!(
                     value(run.node.get("env").unwrap()),
-                    json!({"g":"global", "l":"language", "x":if use_problem { "problem" } else { "profile" }})
+                    if platform == Platform::Windows {
+                        json!({"G":"global", "L":"language", "X":if use_problem { "problem" } else { "profile" }})
+                    } else {
+                        json!({"g":"global", "l":"language", "x":if use_problem { "problem" } else { "profile" }})
+                    }
                 );
-                let events = &run.history[&vec!["env".into(), "x".into()]];
+                let events = &run.history[&vec!["env".into(), env_name_fold(platform, "x")]];
                 assert_eq!(
                     events.iter().map(|e| e.kind).collect::<Vec<_>>(),
                     if use_problem {
@@ -1302,4 +1306,77 @@ fn unreadable_problem_file_leaves_the_target_unresolved() {
         assert!(report.universe().selected.is_none());
         assert!(resolve(&result, &selected).is_err());
     }
+}
+
+#[test]
+fn command_placeholder_declarations_are_checked_in_phase_two() {
+    for (placeholder, declaration, value, message) in [
+        (
+            "sources",
+            "needs_build",
+            "false",
+            "source placeholders require needs_build = true",
+        ),
+        (
+            "source",
+            "needs_build",
+            "false",
+            "source placeholders require needs_build = true",
+        ),
+        (
+            "test_input",
+            "for_each_test",
+            "false",
+            "test placeholders require for_each_test = true",
+        ),
+        (
+            "test_answer",
+            "for_each_test",
+            "false",
+            "test placeholders require for_each_test = true",
+        ),
+        (
+            "iteration",
+            "repeat",
+            "1",
+            "iteration placeholder requires repeat",
+        ),
+    ] {
+        for explicit in [false, true] {
+            // An explicit repeat of one is a declaration; its default is not.
+            if declaration == "repeat" && explicit {
+                continue;
+            }
+            let extra = if explicit {
+                format!("\n{declaration} = {value}")
+            } else {
+                String::new()
+            };
+            let result = workspace(&format!(
+                "[commands.c]\nargv = ['echo', '{{{placeholder}}}']{extra}"
+            ));
+            let report = check(&result, &Selection::default());
+            assert_eq!(diagnostics(&report), [("commands.c.argv[1]", message)]);
+            assert_eq!(
+                report.diagnostics()[0]
+                    .second_origin
+                    .as_ref()
+                    .map(|o| o.key_path.as_str()),
+                explicit
+                    .then_some(format!("commands.c.{declaration}"))
+                    .as_deref()
+            );
+
+            // Invalid declaration input suppresses the dependent error.
+            let result = workspace(&format!(
+                "[commands.c]\nargv = ['echo', '{{{placeholder}}}']\n{declaration} = 'invalid'"
+            ));
+            let report = check(&result, &Selection::default());
+            assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+        }
+    }
+    let result = workspace(
+        "[commands.c]\nargv = ['echo', '{sources}', '{source}', '{artifact}', '{artifact_dir}', '{test_input}', '{test_answer}', '{iteration}']\nneeds_build = true\nfor_each_test = true\nrepeat = 1",
+    );
+    clean(&check(&result, &Selection::default()));
 }

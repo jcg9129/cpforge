@@ -4,6 +4,7 @@ mod add;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod exec;
 pub mod exit;
 pub mod names;
 pub mod storage;

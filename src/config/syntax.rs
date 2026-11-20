@@ -130,7 +130,7 @@ pub(super) fn absolute(path: &str, platform: Platform) -> bool {
     native_absolute(OsStr::new(path), platform)
 }
 
-pub(super) fn native_absolute(path: &OsStr, platform: Platform) -> bool {
+pub(crate) fn native_absolute(path: &OsStr, platform: Platform) -> bool {
     // ASCII path syntax has the same bytes in native Unix and Windows encodings.
     let bytes = path.as_encoded_bytes();
     if platform != Platform::Windows {
@@ -155,7 +155,7 @@ pub(super) fn windows_relative(path: &str) -> bool {
 
 /// Join using the validation platform, including when tests run on another OS.
 /// Native strings are retained without lossy conversion.
-pub(super) fn join(base: &Path, tail: &OsStr, platform: Platform) -> PathBuf {
+pub(crate) fn join(base: &Path, tail: &OsStr, platform: Platform) -> PathBuf {
     let mut result = base.as_os_str().to_os_string();
     if !result.is_empty()
         && !result

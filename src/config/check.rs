@@ -326,26 +326,45 @@ impl Validator<'_> {
                             None,
                         );
                     }
-                    if matches!(
-                        placeholder,
-                        Placeholder::Artifact | Placeholder::ArtifactDir
-                    ) && stage
-                        .node
-                        .get("needs_build")
-                        .and_then(EffectiveNode::boolean)
-                        != Some(true)
-                        && !self.blocked(stage, &[&["needs_build"]])
-                        && !self.unknown_field(stage, "needs_build")
-                    {
-                        self.error(
-                            node.origin.clone(),
+                    let requirement = match placeholder {
+                        Placeholder::Artifact | Placeholder::ArtifactDir => Some((
+                            "needs_build",
                             "artifact placeholders require needs_build = true",
-                            stage
-                                .node
-                                .get("needs_build")
-                                .filter(|_| stage.explicitly_set("needs_build"))
-                                .map(|n| n.origin.clone()),
-                        );
+                        )),
+                        Placeholder::Sources | Placeholder::Source => Some((
+                            "needs_build",
+                            "source placeholders require needs_build = true",
+                        )),
+                        Placeholder::TestInput | Placeholder::TestAnswer => Some((
+                            "for_each_test",
+                            "test placeholders require for_each_test = true",
+                        )),
+                        Placeholder::Iteration => {
+                            Some(("repeat", "iteration placeholder requires repeat"))
+                        }
+                        _ => None,
+                    };
+                    if let Some((key, message)) = requirement {
+                        let declared = if key == "repeat" {
+                            // The implicit count of one is not a declaration.
+                            stage.explicitly_set(key)
+                        } else {
+                            stage.node.get(key).and_then(EffectiveNode::boolean) == Some(true)
+                        };
+                        if !declared
+                            && !self.blocked(stage, &[&[key]])
+                            && !self.unknown_field(stage, key)
+                        {
+                            self.error(
+                                node.origin.clone(),
+                                message,
+                                stage
+                                    .node
+                                    .get(key)
+                                    .filter(|_| stage.explicitly_set(key))
+                                    .map(|n| n.origin.clone()),
+                            );
+                        }
                     }
                 }
             }

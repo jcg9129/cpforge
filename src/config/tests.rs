@@ -667,7 +667,7 @@ fn environment_names_values_and_platform_activity() {
         vec![(
             "run.env.PATH",
             Some(2),
-            "duplicate environment name (ASCII case-insensitive on Windows)"
+            "duplicate environment name (case-insensitive on Windows)"
         )]
     );
     assert_eq!(
@@ -1727,4 +1727,17 @@ fn review_template_trust_and_problem_overlay_diagnostics() {
             "platform overlays cannot be nested or used at this site"
         )]
     );
+}
+
+#[test]
+fn windows_non_ascii_environment_duplicates_name_both_origins() {
+    let layer = raw("[run]\nenv = { 'Ä' = '1', 'ä' = '2' }", Platform::Windows);
+    assert_eq!(layer.diagnostics.len(), 1);
+    let error = &layer.diagnostics[0];
+    assert_eq!(
+        error.message,
+        "duplicate environment name (case-insensitive on Windows)"
+    );
+    assert!(error.origin.key_path.contains('ä'));
+    assert!(error.second_origin.as_ref().unwrap().key_path.contains('Ä'));
 }

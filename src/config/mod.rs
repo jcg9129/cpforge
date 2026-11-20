@@ -54,7 +54,7 @@
 //! table. Environment `false` values remain tombstones, not absent keys.
 //! `MergedConfig::history` also retains events for removed keys; paths are
 //! vectors of literal key segments; array indices are decimal segments.
-//! Windows environment maps and paths use the ASCII-lowercase name, while each
+//! Windows environment maps and history paths use `env_name_fold`, while each
 //! node's `name` keeps the spelling of the source that set it
 //! (`Stage::env_entries`). `MergedConfig::markers` holds every marker; markers
 //! from inactive or forbidden branches (`applies == false`) are attached to no
@@ -80,9 +80,10 @@ pub mod api;
 mod built_in;
 mod check;
 mod compose;
+mod env;
 mod load;
 mod stages;
-mod syntax;
+pub(crate) mod syntax;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -106,6 +107,7 @@ pub use compose::{
     MergedConfig, NodeKind, Problem, Profile, Provenance, ProvenanceEvent, ResetMode, Retention,
     Stage, UnknownInput, ValueSnapshot, compose,
 };
+pub use env::{env_name_fold, env_name_fold_os};
 pub use load::{DiscoveryError, DiscoveryOptions, Environment, LayerSource, discover, load, parse};
 pub use stages::{
     CapPolicy, ComposedStage, ComposedTarget, ContextRequirements, DeferredValue, Operation,

@@ -160,7 +160,7 @@ pub enum Cwd {
 
 /// Apply in list order after capturing the baseline environment. `name` is
 /// the spelling to install, including the winning Windows spelling; on Windows
-/// a removal or unset matches baseline names ASCII case-insensitively (§4.3).
+/// a removal or unset matches baseline names using `env_name_fold_os` (§4.3).
 /// Reserved `CPF_*` variables are injected later by the job consumer.
 #[derive(Clone, Debug, PartialEq)]
 // A set retains separate metadata for the installed name and literal value.

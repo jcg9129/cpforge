@@ -105,7 +105,7 @@ pub struct ProvenanceEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InvalidMarker {
     /// Effective path, with overlay segments removed. Array indices are decimal
-    /// segments; Windows environment names are ASCII lowercase.
+    /// segments; Windows environment names use `env_name_fold`.
     pub path: Vec<String>,
     pub origin: Origin,
     pub provenance: Provenance,
@@ -156,7 +156,7 @@ pub enum EffectiveValue {
 pub struct EffectiveNode {
     /// The key as written by the source that supplied this node (array
     /// elements: the decimal index). On Windows, environment maps are keyed by
-    /// the ASCII-lowercase name while `name` keeps the winning spelling.
+    /// `env_name_fold` while `name` keeps the winning spelling.
     pub name: String,
     pub value: EffectiveValue,
     pub typed: Option<TypedValue>,
@@ -532,7 +532,7 @@ impl<'a> Stage<'a> {
     pub fn cwd(self) -> Option<&'a EffectiveNode> {
         self.node.get("cwd")
     }
-    /// Keyed by the ASCII-lowercase name on Windows and by the name itself
+    /// Keyed by `env_name_fold` on Windows and by the name itself
     /// elsewhere; see `env_entries` for the spelling to install.
     pub fn env(self) -> Option<&'a BTreeMap<String, EffectiveNode>> {
         self.node.get("env")?.table()
@@ -645,10 +645,10 @@ fn child_path(path: &[String], key: &str) -> KeyPath {
     result
 }
 
-/// Windows environment names compare ASCII case-insensitively (§4.3).
+/// Share environment equality with raw validation and execution preparation (§4.3).
 fn map_key(kind: NodeKind, platform: Platform, key: &str) -> String {
-    if kind == NodeKind::Env && platform == Platform::Windows {
-        key.to_ascii_lowercase()
+    if kind == NodeKind::Env {
+        super::env_name_fold(platform, key)
     } else {
         key.to_owned()
     }

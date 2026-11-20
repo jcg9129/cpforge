@@ -118,13 +118,12 @@ impl<'a> Validator<'a> {
             let mut entries: Vec<_> = t.iter_mut().collect();
             entries.sort_by_key(|(_, n)| n.origin.span.as_ref().map(|s| s.start));
             for (key, value) in entries {
-                let folded = key.to_ascii_lowercase();
+                let folded = super::env_name_fold(self.platform, key);
                 if let Some(other) = seen.get(&folded) {
                     value.invalid = true;
                     self.diagnostics.push(Diagnostic {
                         severity: Severity::Error,
-                        message: "duplicate environment name (ASCII case-insensitive on Windows)"
-                            .into(),
+                        message: "duplicate environment name (case-insensitive on Windows)".into(),
                         origin: value.origin.clone(),
                         second_origin: Some(other.clone()),
                     });

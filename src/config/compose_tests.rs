@@ -368,7 +368,7 @@ fn reset_discards_fields_and_retains_its_fact_after_reintroduction() {
         .unwrap();
     assert_eq!(
         plain(&reset.removed[0].value),
-        json!({"argv":["old"],"env":{"a":"old"}})
+        json!({"argv":["old"],"env":{"A":"old"}})
     );
 }
 
@@ -386,11 +386,7 @@ fn env_tombstone_survives_middle_layer_and_can_be_set_again() {
             ),
             ("[languages.demo.run]\ndeadline_s = 1", LayerKind::Workspace),
         ];
-        let key = if platform == Platform::Windows {
-            "x"
-        } else {
-            "X"
-        };
+        let key = "X";
         let result = merged(&texts, platform);
         let node = result
             .at(&["languages", "demo", "run", "env", key])
@@ -446,12 +442,12 @@ fn env_tombstone_survives_middle_layer_and_can_be_set_again() {
     let env = result.run().unwrap().env().unwrap();
     assert_eq!(
         env.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["path", "x"]
+        ["PATH", "X"]
     );
-    assert_eq!(value(&env["path"]), json!("new"));
-    assert_eq!(value(&env["x"]), json!("kept"));
-    assert_eq!(env["path"].name, "pAtH");
-    assert_eq!(env["x"].name, "X");
+    assert_eq!(value(&env["PATH"]), json!("new"));
+    assert_eq!(value(&env["X"]), json!("kept"));
+    assert_eq!(env["PATH"].name, "pAtH");
+    assert_eq!(env["X"].name, "X");
     assert_eq!(
         result
             .run()
@@ -462,7 +458,7 @@ fn env_tombstone_survives_middle_layer_and_can_be_set_again() {
         ["pAtH", "X"]
     );
     origin(
-        &env["path"],
+        &env["PATH"],
         LayerKind::Workspace,
         Platform::Windows,
         2,
@@ -471,7 +467,7 @@ fn env_tombstone_survives_middle_layer_and_can_be_set_again() {
         None,
     );
     origin(
-        &env["x"],
+        &env["X"],
         LayerKind::DefaultUser,
         Platform::Windows,
         2,
@@ -480,7 +476,7 @@ fn env_tombstone_survives_middle_layer_and_can_be_set_again() {
         None,
     );
     assert_eq!(
-        env["path"]
+        env["PATH"]
             .events
             .iter()
             .map(|e| e.kind)
@@ -584,10 +580,10 @@ fn overlay_unit_replacement_and_deletion_match_layer_rules() {
     assert!(language.build().unwrap().node.reset_occurred);
     assert_eq!(
         value(language.run().unwrap().node),
-        json!({"shell":{"interpreter":["sh","-c"],"script":"win"},"cwd":{"selector":"problem"},"limits":{},"env":{"x":false}})
+        json!({"shell":{"interpreter":["sh","-c"],"script":"win"},"cwd":{"selector":"problem"},"limits":{},"env":{"X":false}})
     );
     let node = result
-        .at(&["languages", "demo", "run", "env", "x"])
+        .at(&["languages", "demo", "run", "env", "X"])
         .unwrap();
     origin(
         node,
@@ -936,7 +932,7 @@ fn rows_stay_separate_and_public_views_preserve_partial_presence() {
     let language = result.language("demo").unwrap();
     assert_eq!(
         value(language.build().unwrap().node),
-        json!({"env":{"a":"language"}})
+        json!({"env":{"A":"language"}})
     );
     let profile = language.profile("p").unwrap();
     assert_eq!(
@@ -1145,9 +1141,9 @@ fn reset_history_captures_the_table_after_generic_contributions() {
     let reset = build.node.events.last().unwrap();
     assert_eq!(
         plain(&reset.removed[0].value),
-        json!({"argv":["old"],"env":{"a":"local","b":"user"}})
+        json!({"argv":["old"],"env":{"A":"local","B":"user"}})
     );
-    let history = &result.history[&path(&["languages", "demo", "build", "env", "a"])];
+    let history = &result.history[&path(&["languages", "demo", "build", "env", "A"])];
     assert_eq!(
         history.iter().map(|event| event.kind).collect::<Vec<_>>(),
         [EventKind::Set, EventKind::Replace, EventKind::Discarded]
@@ -1174,7 +1170,7 @@ fn env_names_keep_the_spelling_of_the_winning_source() {
     let result = merged(&texts, Platform::Windows);
     let env = result.run().unwrap().env().unwrap();
     assert_eq!(env.len(), 1);
-    assert_eq!(value(&env["my_flag"]), json!("2"));
+    assert_eq!(value(&env["MY_FLAG"]), json!("2"));
     assert_eq!(env_entries(&result), [("my_flag".to_owned(), json!("2"))]);
     let result = merged(
         &[
@@ -1391,4 +1387,16 @@ fn merge_from_composes_rows_with_or_without_resets() {
     assert_eq!(value(deadline), json!(3));
     assert_eq!(deadline.provenance, cli);
     assert_eq!(value(preserved.get("argv").unwrap()), json!(["py"]));
+}
+
+#[test]
+fn windows_non_ascii_environment_override_installs_later_spelling() {
+    let result = merged(
+        &[
+            ("[run]\nenv = { 'Ä' = '1' }", LayerKind::DefaultUser),
+            ("[run]\nenv = { 'ä' = '2' }", LayerKind::Workspace),
+        ],
+        Platform::Windows,
+    );
+    assert_eq!(env_entries(&result), [("ä".to_owned(), json!("2"))]);
 }
