@@ -299,14 +299,24 @@ replace fail with the old file intact (reported). Documented for users.
 
 Runs with a borrowed workspace guard (§4.5).
 
-1. Read the target's bytes; record length, SHA-256, file identity. Refuse a
-   link, a non-regular file, or more than one hard link.
-2. Parse (`toml_edit`), check the schema (§9), apply the command's
-   **semantic operations** to this freshly read document.
+1. From one no-follow read through the guard's checked paths, record the
+   target's bytes, length, SHA-256, file identity (Unix device + inode;
+   Windows volume serial + file index), file type and hard-link count.
+   Refuse a link, a non-regular file, or more than one hard link.
+2. Parse (`toml_edit::DocumentMut`), run the caller's schema check (§9)
+   **before** applying the command's **semantic operations** to this freshly
+   read document. Untouched items, comments and formatting round-trip
+   byte-for-byte.
 3. Write the temp file (§4.2 step 1).
 4. **Validate before each publish attempt** (also every Windows retry):
-   re-read; different bytes, length or identity, disappearance or type
-   change → temp removed, `Conflict`. The command may restart once from 1.
+   re-read and recheck bytes, length, SHA-256, identity, file type **and
+   hard-link count**; any difference, disappearance or type change → temp
+   removed (or cleanup warning), `Conflict`. The primitive returns Conflict
+   without replay. The caller may explicitly opt into a replay wrapper:
+   at most two attempts total, each starting from 1 and rechecking the schema.
+   Both `check` and operations are replayable `Fn` callbacks with no external
+   side effects. A second Conflict is returned as Conflict. Cleanup warnings
+   from the first attempt survive in the replay result.
 5. Publish (§4.2 steps 2–4).
 
 **Guarantee, stated exactly:** *The tool aborts when the final validation
@@ -748,6 +758,7 @@ finalizes them (execution contract §6.2).
 | Commit point | Crash before it | Crash after it |
 |---|---|---|
 | atomic replace | old content; temp may remain (recovered §4.5 in metadata recovery locations; inside a job directory, pruned with it) | new content complete |
+| shared-record edit (§4.4) | old content; temp may remain | new content complete |
 | file no-clobber publish | target absent; temp may remain | target complete (link fallback: temp may remain) |
 | dir publish (`add`) | no `problems/<name>`; staging may remain | complete problem; membership may be missing (§5.2 step 5) |
 | `test add` | files absent, or published but unregistered | entry registered |
@@ -763,13 +774,25 @@ finalizes them (execution contract §6.2).
 | *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
 | *(draft)* adopt / gitignore | old content | new content |
 
+Coverage assignment (command rows remain assigned to their implementing tasks):
+
+| Rows / transaction | Task coverage |
+|---|---|
+| atomic replace, shared-record edit, file and directory publication primitives; lock/recovery boundaries | C4b (covered by library helper subprocesses) |
+| init, add directory + membership, init job-seq | C4c |
+| test add | C6 |
+| job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
+| fsck new epoch; adopt; gitignore | their respective command tasks |
+
 Reruns: `init`, `add --contest` complete the operation; `test add` may
 create a new number and leave the earlier files unregistered.
 
 **Tests:**
 
-- Kill a real `cpf` subprocess at every commit point (test-only env var);
-  assert the allowed states and the rerun behaviour.
+- Kill a real subprocess at every commit point (test-only env var); assert
+  the allowed states and the rerun behaviour. Storage primitives and edit
+  transactions use a library helper subprocess (C4b). Each command task
+  additionally kills the actual `cpf` binary at that command's commit points.
 - Injected failures: link + failed unlink; rename + failed directory sync
   (`Durability::Uncertain`, caller continues); directory `RENAME_NOREPLACE`
   unsupported; `EXDEV` on publish; existing empty destination directory;

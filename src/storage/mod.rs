@@ -8,8 +8,11 @@
 //! Unix mode only; ownership, ACLs, extended attributes and Windows attributes
 //! are inherited from the destination directory rather than preserved.
 
+mod crash;
+mod edit;
 mod lock;
 mod publish;
+mod record;
 mod recovery;
 mod sys;
 mod walk;
@@ -18,8 +21,10 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+pub use edit::{EditError, edit_toml, edit_toml_replay};
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
 pub use publish::{atomic_replace, publish_dir_noclobber, publish_file_noclobber};
+pub use record::{MalformedRecord, Record, classify_user_record, read_user_record};
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 
 #[derive(Debug)]
@@ -163,6 +168,11 @@ pub struct TestHooks {
     pub fail_unlink: bool,
     pub fail_pre_commit_sync: bool,
     pub fail_write_disk_full: bool,
+    pub fail_publish_permission_denied: bool,
+    /// Simulate an editor after the baseline read, before parsing/checking it.
+    pub edit_after_read: Option<fn(&std::path::Path)>,
+    /// Simulate an editor after a failed native replacement attempt.
+    pub replace_after_failure: Option<fn(&std::path::Path, usize)>,
     pub first_temp_random: Option<[u8; 16]>,
     pub force_directory_unsupported: bool,
     pub force_cross_filesystem: bool,

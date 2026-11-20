@@ -171,7 +171,9 @@ impl WorkspaceLock {
         };
         // Bootstrap of the metadata directory and lock is the only creation
         // before recovery: both are needed to serialize first-time initialization.
+        super::crash::point("lock.acquired");
         guard.recovery = recovery::recover(&guard);
+        super::crash::point("lock.recovered");
         Ok(guard)
     }
 }

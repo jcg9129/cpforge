@@ -54,9 +54,10 @@ Planned:
   overrides, environment rules, placeholders and explicit shell execution.
 - Portable identifiers and collision detection; locks, atomic replacement,
   no-clobber publication and recoverable command transactions.
-  C4a covers storage primitive fixtures; subprocess kill tests at publication
-  commit points (storage contract §10) are deferred to C5, once the workspace
-  commands exist.
+  C4a covers storage primitive fixtures; C4b covers publication and edit
+  commit points with real library helper subprocesses (storage contract §10).
+  Each command task additionally kills the actual `cpf` binary at its commit
+  points (init/add in C4c, test add in C6, job/fact work in C10/C15).
 - `cpf init`, `cpf add`, current-problem selection and per-problem language;
   test discovery and `cpf test add/ls/enable/disable` through the test-store
   interface. Missing and empty answers stay distinct.

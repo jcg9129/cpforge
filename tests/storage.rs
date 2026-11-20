@@ -1641,3 +1641,93 @@ fn windows_exclusive_file_publication_keeps_an_open_existing_destination() {
     assert_no_temps(&dir.0);
     drop(held);
 }
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn injected_permission_and_cross_device_failures_preserve_all_targets() {
+    use cpforge::storage::TestHooks;
+    for cross_device in [false, true] {
+        let dir = Directory::new();
+        fs::write(dir.path("replace"), b"old").unwrap();
+        let lock = dir.lock();
+        let guard = lock
+            .acquire_with_options(
+                "publication refusal",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        fail_publish_permission_denied: !cross_device,
+                        force_cross_filesystem: cross_device,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let stage = guard.create_dir_all(".cpforge/staging/current").unwrap();
+        fs::write(stage.join("data"), b"staged").unwrap();
+        let errors = [
+            atomic_replace(&guard, "replace", b"new", || Ok(())).unwrap_err(),
+            publish_file_noclobber(&guard, "exclusive", b"new").unwrap_err(),
+            publish_dir_noclobber(&guard, &stage, "directory").unwrap_err(),
+        ];
+        for error in errors {
+            assert!(!error.committed());
+            if cross_device {
+                assert!(matches!(error.kind, ErrorKind::CrossFilesystem { .. }));
+            } else {
+                assert!(matches!(error.kind, ErrorKind::Io { ref source, .. }
+                    if source.kind() == std::io::ErrorKind::PermissionDenied));
+            }
+        }
+        assert_eq!(fs::read(dir.path("replace")).unwrap(), b"old");
+        assert!(!dir.path("exclusive").exists());
+        assert!(!dir.path("directory").exists());
+        assert_eq!(fs::read(stage.join("data")).unwrap(), b"staged");
+        assert_no_temps(&dir.0);
+        drop(guard);
+        let guard = lock.acquire("recover publication refusal").unwrap();
+        assert!(guard.recovery_warning().is_none());
+        assert!(!stage.exists());
+        assert!(
+            publish_file_noclobber(&guard, "exclusive", b"rerun")
+                .unwrap()
+                .committed
+        );
+    }
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn disk_full_and_failed_temp_removal_are_recovered_before_rerun() {
+    use cpforge::storage::TestHooks;
+    let dir = Directory::new();
+    let lock = dir.lock();
+    let guard = lock
+        .acquire_with_options(
+            "disk full with pending cleanup",
+            LockOptions {
+                test_hooks: TestHooks {
+                    fail_write_disk_full: true,
+                    fail_unlink: true,
+                    ..TestHooks::default()
+                },
+                ..LockOptions::default()
+            },
+        )
+        .unwrap();
+    let error = publish_file_noclobber(&guard, "exclusive", b"complete").unwrap_err();
+    let Cleanup::Pending(temp) = error.cleanup else {
+        panic!("missing cleanup warning");
+    };
+    assert!(!dir.path("exclusive").exists());
+    assert!(temp.exists());
+    drop(guard);
+    let guard = lock.acquire("recover disk full temp").unwrap();
+    assert!(guard.recovery_warning().is_none());
+    assert!(!temp.exists());
+    assert!(
+        publish_file_noclobber(&guard, "exclusive", b"complete")
+            .unwrap()
+            .committed
+    );
+}

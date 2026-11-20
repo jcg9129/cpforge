@@ -17,16 +17,20 @@ pub fn atomic_replace(
 ) -> Result<Published, StorageError> {
     let target = destination(guard, target.as_ref())?;
     let temp = prepare_temp(guard, &target, bytes, true)?;
+    super::crash::point("atomic_replace.temp_synced");
     let result = replace_attempts(guard, &temp, &target, &mut validate);
     if let Err(error) = result {
         return Err(clean_file(guard, error, &temp));
     }
-    Ok(finish(
+    super::crash::point("atomic_replace.renamed");
+    let published = finish(
         guard,
         &target,
         target.parent().expect("destination parent"),
         Cleanup::Done,
-    ))
+    );
+    super::crash::point("atomic_replace.directory_synced");
+    Ok(published)
 }
 
 /// Create a complete file exclusively. An existing destination is never reused.
@@ -37,8 +41,13 @@ pub fn publish_file_noclobber(
 ) -> Result<Published, StorageError> {
     let target = destination(guard, target.as_ref())?;
     let temp = prepare_temp(guard, &target, bytes, false)?;
+    super::crash::point("file_noclobber.before_publish");
     #[cfg(feature = "storage-test-hooks")]
-    let result = if guard.test_hooks.force_link_fallback {
+    let result = if guard.test_hooks.fail_publish_permission_denied {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    } else if guard.test_hooks.force_cross_filesystem {
+        Err(io::Error::from_raw_os_error(cross_device_code()))
+    } else if guard.test_hooks.force_link_fallback {
         Err(io::Error::from_raw_os_error(unsupported_code()))
     } else {
         exclusive_attempts(&temp, &target)
@@ -57,6 +66,7 @@ pub fn publish_file_noclobber(
                     &temp,
                 ));
             }
+            super::crash::point("file_noclobber.linked");
             // link is the commit point. An unlink failure is only a warning.
             unlink_temp(guard, &temp)
         }
@@ -68,12 +78,10 @@ pub fn publish_file_noclobber(
             ));
         }
     };
-    Ok(finish(
-        guard,
-        &target,
-        temp.parent().expect("temp parent"),
-        cleanup,
-    ))
+    super::crash::point("file_noclobber.after_publish");
+    let published = finish(guard, &target, temp.parent().expect("temp parent"), cleanup);
+    super::crash::point("file_noclobber.directory_synced");
+    Ok(published)
 }
 
 /// Publish a fully staged tree without clobbering even an empty directory.
@@ -121,8 +129,11 @@ pub fn publish_dir_noclobber(
         }
         pre_sync(guard).map_err(|e| StorageError::io(&source, e))?;
         walk::sync_tree(guard, &source)?;
+        super::crash::point("dir_noclobber.staging_synced");
         #[cfg(feature = "storage-test-hooks")]
-        let published = if guard.test_hooks.force_directory_unsupported {
+        let published = if guard.test_hooks.fail_publish_permission_denied {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        } else if guard.test_hooks.force_directory_unsupported {
             Err(io::Error::from_raw_os_error(unsupported_code()))
         } else if guard.test_hooks.force_cross_filesystem {
             Err(io::Error::from_raw_os_error(cross_device_code()))
@@ -133,6 +144,7 @@ pub fn publish_dir_noclobber(
         let published = exclusive_attempts(&source, &target);
         published
             .map_err(|error| publication_error("publish directory", &source, &target, error))?;
+        super::crash::point("dir_noclobber.renamed");
         guard.created.borrow_mut().retain_mut(|created| {
             if created.as_path() == source.as_path() {
                 *created = target.clone();
@@ -142,12 +154,14 @@ pub fn publish_dir_noclobber(
                 !created.starts_with(&source)
             }
         });
-        Ok(finish(
+        let published = finish(
             guard,
             &target,
             source.parent().expect("staging parent"),
             Cleanup::Done,
-        ))
+        );
+        super::crash::point("dir_noclobber.directories_synced");
+        Ok(published)
     })();
     result.map_err(|mut error: StorageError| {
         error.cleanup = Cleanup::Pending(source);
@@ -309,15 +323,32 @@ fn replace_attempts(
     validate: &mut impl FnMut() -> Result<(), Conflict>,
 ) -> Result<(), StorageError> {
     let mut validation_error = None;
+    #[cfg(feature = "storage-test-hooks")]
+    let mut attempt = 0;
     let result = publication_attempts(|| {
-        if let Err(error) = guard
-            .check_path(target)
-            .and_then(|_| validate().map_err(|e| StorageError::new(ErrorKind::Conflict(e))))
+        if let Err(error) = validate()
+            .map_err(|e| StorageError::new(ErrorKind::Conflict(e)))
+            .and_then(|()| guard.check_path(target))
         {
             validation_error = Some(error);
             return Err(io::Error::other("publication validation failed"));
         }
-        sys::replace(temp, target)
+        #[cfg(feature = "storage-test-hooks")]
+        {
+            attempt += 1;
+            if guard.test_hooks.fail_publish_permission_denied {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            if guard.test_hooks.force_cross_filesystem {
+                return Err(io::Error::from_raw_os_error(cross_device_code()));
+            }
+        }
+        let result = sys::replace(temp, target);
+        #[cfg(feature = "storage-test-hooks")]
+        if let (Err(_), Some(hook)) = (&result, guard.test_hooks.replace_after_failure) {
+            hook(target, attempt);
+        }
+        result
     });
     if let Some(error) = validation_error {
         return Err(error);
