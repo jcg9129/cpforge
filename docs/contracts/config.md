@@ -1,6 +1,8 @@
 # Configuration and commands contract
 
-Status: v2.
+Status: v3 (v2 plus the schema amendment: key matrix §1.1, discovery §1.2,
+precedence-preserving merge §2.1, diagnostics §3.2, program-path rules §4.4,
+hook switch §8.3).
 
 **Managed-workspace amendment (v4): settled, not yet implemented.**
 `[workspace] ignore` (§7.4) specifies the design in
@@ -23,7 +25,88 @@ trust decision this contract makes is whether a workspace may run **hooks**
 | 2 workspace | `<root>/cpforge.toml` | |
 | 3 problem | `problems/<p>/problem.toml`, table `[config]` only | the outer document carries `schema` and identity (storage contract §3, §9) |
 
-Every file carries `schema = 1` (storage contract §9).
+Every file carries `schema = 1` (storage contract §9). The user config file
+is classified like the user-editable formats of storage contract §9: an
+absent `schema` means 1, a newer one is `too_new` and nothing in the file is
+used.
+
+### 1.1 Keys
+
+Every key not listed here is a phase-1 error naming the key and the file.
+"Layers" says where a key may appear; elsewhere it is a phase-1 error, also
+when its value would be valid. Problem layer means the `[config]` table of
+`problem.toml`; the rest of that document belongs to the storage contract
+and the problem record, not to configuration.
+
+| Key | Type | Layers | Notes |
+|---|---|---|---|
+| `schema` | integer | 1, 2 (problem: outer document) | |
+| `default_language` | string, a language name | 1, 2 | §6.2 |
+| `languages.<l>` | language table | 1, 2 | below; `<l>` is a name (§1.1 names) |
+| `build`, `run` | stage table | 1, 2 | global tables, precedence row 2 |
+| `commands.<c>` | command table | 1, 2 | §8.1 |
+| `compare` | comparator value | 1, 2 | compare spec §5.1; replace-as-unit |
+| `retention.{keep_jobs, job_bytes, workspace_bytes, cwd_bytes, build_bytes}` | §7.1 types | 1, 2 | §7.3 |
+| `workspace.ignore` | array of patterns | 1, 2 | §7.4 |
+| `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
+| `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
+| `config.language` | string | 3 | §6.2 |
+| `config.sources` | array of paths | 3 | §6.2 |
+| `config.compare` | comparator value | 3 | |
+| `config.build`, `config.run` | stage table | 3 | precedence row 5 |
+
+**Language table** `languages.<l>`: `extensions` (array of non-empty
+strings without `.` or `/`), `sources` (array, §6.2 rules), `entry` (non-empty
+string), `artifacts` (§6.3; exactly one of `file = "<name>"` or `dir = true`
+with optional `required`), `template = { path }` (config-relative), `build`
+(stage table or `false`), `run` (stage table), `profiles.<p>` (table with
+optional `build`, a stage table or `false`, and `run`), platform overlays
+(§2).
+
+**Stage table** (build, run, global, profile and problem stages): `argv`,
+`shell = { interpreter, script, args }`, `cwd`, `env`, `env_remove`,
+`deadline_s`, `stdout_cap`, `stderr_cap`, `limits = { address_space,
+job_commit }` (§4.1, §7). **Command table**: the stage fields plus
+`needs_build`, `for_each_test`, `repeat`, `keep_going` (booleans except
+`repeat`, §8) and `stdin`, plus platform overlays. `stdin` elsewhere is an
+error. `run = false` is an error.
+
+**Nested fields.** `argv`, `shell.interpreter`, `shell.args`, `env_remove`,
+`extensions`, `sources` and `artifacts.required` are arrays of strings;
+`shell.script`, `template.path`, `cwd.path`, `cwd.selector`, `entry` and
+`artifacts.file` are strings; `env` is a table of strings or `false`. A
+composed `shell` needs `interpreter` and `script`; `args` defaults to `[]`.
+`template` needs `path`. `cwd` holds exactly one of `path` or `selector`
+(`"run"`, `"problem"`, `"workspace"`). `artifacts` holds `file`, or `dir =
+true` with optional `required`; `required` with `file` and `dir = false`
+are errors. Unknown nested keys are errors. Paths in this section are
+document-root paths: the problem layer's keys are those under `config.`.
+
+**Names** of languages, profiles and commands: non-empty, ASCII letters,
+digits, `-` and `_`, starting with a letter; `unix`, `linux`, `macos`,
+`windows` are refused as language and profile names (they would collide
+with overlay keys) but allowed as command names (§2).
+
+Keys from later designs (`submit`, `archive`, `check` outside `problem.toml`)
+are unknown keys in this version.
+
+### 1.2 Discovery
+
+- User layer: Unix uses `$XDG_CONFIG_HOME` if it is non-empty and
+  absolute, else `$HOME/.config` (macOS too); Windows needs a non-empty
+  absolute `%APPDATA%`. No usable base directory → a discovery error. The
+  default file absent → an empty layer; present but unreadable, malformed
+  or `too_new` → error. `--config <file>` absent or unreadable → error, and
+  with `--config` the default file is not read at all, its hook settings
+  included (§8.3).
+- Workspace layer: `cpforge.toml` at the workspace root (found per storage
+  contract §2); outside a workspace there is no layer 2 and no layer 3.
+- Problem layer: the selected problem's `problem.toml` (storage contract §9
+  classification); a problem without a `[config]` table contributes an empty
+  layer. Only the selected problem's file is read.
+- A minimal workspace (`schema = 1` only, as `cpf init` writes it) is valid.
+  A missing language (no problem `language` and no `default_language`) is an
+  error only for an operation that needs a target.
 
 ## 2. Merge
 
@@ -31,7 +114,9 @@ Every file carries `schema = 1` (storage contract §9).
   recursively, **except replace-as-unit nodes**, which a later layer replaces
   whole: every array; `compare`; `artifacts`; `limits`; `env_remove`; `cwd`
   (`selector` and `path` never mix); and a stage's **command**: setting
-  `argv` removes an inherited `shell` and vice versa.
+  `argv` removes an inherited `shell` and vice versa, and setting either
+  form replaces the whole inherited command, also `shell` over `shell`;
+  omitted `shell` fields are never inherited.
 - **Deletion:** `build = false` in a language (or profile) removes an
   inherited build stage (the language becomes build-free); `env = { NAME =
   false }` **unsets** `NAME`: it is absent from the final environment whatever
@@ -47,6 +132,43 @@ Every file carries `schema = 1` (storage contract §9).
   with replace-as-unit and deletion applied inside that computation; the
   result then merges with the next layer. So a later layer's generic value
   overrides an earlier layer's platform value.
+- Overlay sites also include `config.build` and `config.run` (problem
+  layer). An overlay table holds what its site may hold except further
+  overlay keys: `languages.cpp.windows.run` and
+  `languages.cpp.windows.profiles.debug.build` are valid; `unix.linux`,
+  `languages.cpp.windows.run.linux` and `languages.cpp.profiles.p.build.windows`
+  (no overlay site beneath a profile's stage) are errors.
+- **Nested sites.** Within a layer a site's overlays are resolved after
+  those of the sites beneath it: first `languages.cpp.run` is computed from
+  its generic table, `run.unix` and `run.<os>`; then `languages.cpp` with
+  `languages.cpp.unix` and `languages.cpp.<os>` merged over that result. So
+  `languages.cpp.windows.run.argv` beats `languages.cpp.run.windows.argv`
+  in the same layer.
+
+### 2.1 Merge per precedence row
+
+Layers are merged **within** each precedence row of §6.1, never into one
+flat table first: a problem `[config.build]` (row 5) stays above a
+user-level profile (row 4) whatever their layers. For each stage the rows are
+then composed lowest to highest with the same replace-as-unit rules.
+Deletion markers survive composition: an `env` tombstone stays until a
+higher source sets the name again, and is then shown with both origins.
+
+**Build stage existence.** Only rows 3 and 4 decide whether a build stage
+exists. Their contributions are applied in the order row 3 layers 0 → 2,
+then row 4 layers 0 → 2; `build = false` is a **reset**: it discards every
+row-3/4 contribution before it, and a later build table starts a fresh
+stage from its own fields, so fields discarded by the reset do not return.
+The merged contribution keeps the fact that a reset occurred, so a reset
+followed by a table is not the same as the table alone. Rows 2 and 5 are
+**modifiers**: they never create a build stage, are not discarded by a
+reset, and apply to the stage if one exists; for a build-free target the
+global `[build]` and the problem's `[config.build]` are ignored (shown as
+ignored by `cpf config show`). Row 1 defaults (deadlines, caps) apply to any
+stage that exists. After the resets, the surviving contributions
+are composed with rows 1, 2, 5 and 6 in §6.1 order, and completeness is
+validated on that result (phase 2); discarded row-3/4 fields never supply a
+missing field.
 
 ## 3. Validation phases
 
@@ -61,6 +183,25 @@ Phases 1–3 report **all** offending keys at once, with provenance (§3.1),
 before anything runs (also before hooks). An unused language, profile or
 command is checked in phases 1–2 only; its tools need not exist.
 
+**Validation platform.** Loading takes an explicit platform (the host by
+default; tests inject one). Every overlay branch gets the structural checks
+(keys, types, grammar, raw exclusivity); platform-specific lexical rules
+(Windows path forms, Windows case-insensitive duplicates) apply to the
+generic values and the overlays active on that platform. `limits` values
+parse in phase 1 to byte counts ≥ 1 and ≤ `u64::MAX` with checked
+arithmetic; page rounding and platform maxima (§7.2) are phase-3 checks for
+the active platform.
+
+**Phase-2 universe.** `cpf config check` and every load validate, for the
+validation platform: each language through rows 1–4 without a profile and
+with each of its profiles; each command from its own layered tables plus
+command defaults, and again with hook defaults and restrictions if a hook
+names it (hooks are validated even when disabled or untrusted). When a language can be selected,
+the selected problem is also validated with that language, the selected
+profile and row 5; a missing language is an error only for an operation
+that needs a target (§1.2), otherwise target settings stay unresolved. Every language needs a complete run stage; every existing build
+stage and every command needs exactly one complete `argv` or `shell`.
+
 ### 3.1 Provenance
 
 Every effective leaf and array element records one of
@@ -68,6 +209,41 @@ Every effective leaf and array element records one of
 `Environment { name }`, `Derived { inputs: [Provenance] }` (e.g. a deadline
 computed from a published limit, an expanded argv element). `cpf config show
 --origin` prints it, plus the platform overlay and profile applied.
+
+### 3.2 Diagnostics and recovery
+
+- Each diagnostic names the file, the key path and, when known, line and
+  column; a conflict (two exclusive forms, a duplicate) names both origins.
+  Legal overrides and tombstones are provenance, not diagnostics.
+- A file with a TOML syntax error, unreadable bytes or a `too_new` schema
+  yields that one diagnostic and makes the layer **invalid** (not empty);
+  the other files are still checked.
+- A field with a phase-1 error leaves an **invalid marker** at its key (a
+  container error, at the container's path). Markers keep provenance
+  through overlay and row composition, also when a later value overrides
+  them. Phase 2 skips each check whose inputs include a marker, so no
+  completeness error is derived from an invalid field; all other checks
+  run, and all diagnostics of phases 1 and 2 are reported together.
+- Any phase-1 or phase-2 error prevents plan construction; a phase-3 error
+  prevents executing the selected plan. Warnings (e.g. a trust
+  canonicalisation failure, §8.3) never make configuration non-executable.
+- An invalid file leaves a layer-wide **unknown-input marker**: phase-2
+  checks whose result depends on that layer (a reference that could be
+  defined there, a stage that could be completed there) are skipped; raw
+  validation of other files and independent checks continue.
+- Provenance (§3.1) records, per key, the ordered events set, replace,
+  delete (tombstone), reset (`build = false`) and ignored, including the
+  values removed.
+
+### 3.3 Consumer interface
+
+Loading, platform composition and target resolution are separate steps.
+Results expose diagnostics, whether each field was explicitly present,
+provenance with its events, and deferred values. Target resolution takes
+the language or problem, the profile and the CLI overrides, and returns the
+declarative stages, the context requirements (§8.1) and the effective target
+settings (`sources`, artifacts, `entry`, template, compare). Loading and
+phases 1–2 never probe tools, read sources or allocate job paths.
 
 ## 4. Execution specs
 
@@ -120,22 +296,33 @@ Built once per run, in this order:
 4. Inject `CPF_*` variables (§8.3) last; configuration cannot override them.
 
 Names containing NUL or `=` (Windows: also empty names), and values containing
-NUL, are errors. Inherited values stay native strings. The supervisor installs
+NUL, are errors, and so is a name in `env` or `env_remove` that starts with
+`CPF_` (ASCII case-insensitive on Windows), all in phase 1. Inherited values
+stay native strings. The supervisor installs
 exactly this map (`env_clear` + set, execution contract §2).
 
 ### 4.4 Program resolution
 
 `cpf` resolves programs itself; Rust's search is never used.
 
-**Order for `argv[0]` and `cwd.path`**: (1) an element with no
-placeholder that is a relative path is rebased against its defining file at
-load; (2) an element that **starts** with a placeholder is never rebased;
-(3) an element that contains a placeholder **not** at its start (e.g.
-`./{problem_id}/tool`) is an error at load: write it as an absolute path or
-start it with a placeholder (`{workspace}/…`); (4) expansion (§5);
-(5) classification of `argv[0]`: contains a separator → path, else `PATH`
-lookup. An empty result is an error. "Rebased at load" in §4.2 means
-exactly rule (1).
+**Order for `argv[0]` and `cwd.path`**, after a leading `~/` is expanded
+(§4.2): (1) an element with no placeholder that is a relative **path** is
+rebased against its defining file's directory at load; for `argv[0]` a path
+is an element containing a separator (`/`; on Windows also `\`), so a bare
+name such as `g++` is a lookup token and never rebased, while `cwd.path` is
+always a path; (2) an element that **starts** with a placeholder is never
+rebased; (3) a **relative** element that contains a placeholder **not** at
+its start (e.g. `./{problem_id}/tool`) is an error at load: start it with a
+placeholder (`{workspace}/…`) or write an absolute path, which may contain
+placeholders anywhere and is never rebased; (4) expansion (§5);
+(5) classification of the expanded `argv[0]`: contains a separator → path,
+else `PATH` lookup. An empty result is an error. "Rebased at load" in §4.2
+means exactly rule (1). Other `argv` elements are never rebased. `shell.interpreter[0]` is literal: leading `~/` expansion, rebasing by
+rule (1) and program resolution apply, but placeholders are neither
+recognised nor expanded in it (§5.1); its resolved path is absolute. After
+expansion, an `argv[0]` containing a separator and `cwd.path` must be
+absolute; a relative result (e.g. from `{problem_id}/tool`) and the
+Windows drive-relative and root-relative forms are phase-3 errors.
 
 | Case | Outcome |
 |---|---|
@@ -192,16 +379,16 @@ Preflight does not guarantee that files stay unchanged until spawn.
 | `{source}` | scalar | as `{sources}`, with exactly one source |
 | `{artifact}` | scalar | build, run, command with `needs_build`; target has a `file` artifact |
 | `{artifact_dir}` | scalar | build, run, command with `needs_build`; target has a build |
-
-In **build**, `{artifact}` and `{artifact_dir}` are the allocated output paths
-the build writes; **path availability ≠ output existence**: outputs are checked
-only in phase 4.
 | `{entry}` | scalar | the language declares `entry` |
 | `{problem_dir}`, `{problem_id}` | scalar | a problem is selected (all stages, hooks) |
 | `{workspace}` | scalar | inside a workspace (all stages, hooks) |
 | `{test_input}` | scalar | command with `for_each_test` |
 | `{test_answer}` | scalar | command with `for_each_test` and the test has an answer (else plan error for that test) |
 | `{iteration}` | scalar, 1-based | command with `repeat` |
+
+In **build**, `{artifact}` and `{artifact_dir}` are the allocated output paths
+the build writes; **path availability ≠ output existence**: outputs are checked
+only in phase 4.
 
 Unavailable → phase-3 error naming the stage and placeholder.
 
@@ -247,7 +434,8 @@ and limits.
 ### 6.2 Target selection
 
 - Language: problem `[config] language`, else `default_language` (layers
-  1–2), else an error.
+  1–2), else unresolved: an error only for an operation that needs a
+  target (§1.2).
 - `sources`: an explicit, ordered array of problem-relative paths, no
   globbing; default: the language's `sources`. Each path is validated in
   phase 1: non-empty, relative, components separated by `/` only (a `\` is
@@ -326,7 +514,11 @@ which is the class path.
 `[languages.<l>.profiles.<name>]` with optional `build` and `run`, selected by
 `--profile`; unknown → phase-2 error; the record names it. `template = { path
 = … }` per language (config-relative), used by `cpf add` without overwriting
-(storage contract §5.2).
+(storage contract §5.2). The template is copied to the target's single
+source path: `cpf add` with a template requires exactly one effective
+source, and zero or several are an error before anything is published (a
+mapping of several template files is a later design). Checking
+configuration alone does not report it.
 
 ## 7. Deadlines, limits, retention
 
@@ -392,8 +584,9 @@ are matched against **problem-relative** paths with `/` separators:
   no other metacharacters, no negation, no character classes (a `[`, `]`,
   `!` or `\` is an error in phase 1).
 - A pattern without `/` matches the final component at any depth; one with
-  `/` is anchored at the problem directory. Empty patterns, a leading `/`,
-  `..` components and NUL are errors.
+  `/` is anchored at the problem directory. Empty patterns, a leading or
+  trailing `/`, an empty (`a//b`), `.` or `..` component, a `**` that is not
+  a whole component (`ab**`, `**b`) and NUL are errors.
 - **Units**: matching is per path component. A component that is
   valid UTF-8 is matched per Unicode scalar value (`?` = one scalar). A
   Windows name is decoded from UTF-16 into **code points**, where a lone
@@ -461,10 +654,13 @@ repeat = 5
 [hooks]
 on_switch = ["notify"]          # names of [commands.*]
 after_test = ["log"]
+```
 
-# default user config file only
+```toml
+# default user config file only (may also hold on_switch / after_test)
 [hooks]
 trusted_workspaces = ["/example/cp"]   # absolute workspace roots
+enabled = true                         # master switch, default true
 ```
 
 - **Trust:** hooks run only if the workspace root is listed in
@@ -473,6 +669,9 @@ trusted_workspaces = ["/example/cp"]   # absolute workspace roots
   `--config` replaces the user layer, hooks are disabled for the invocation
   (stated in the output). `trusted_workspaces` or an `enabled` key in any
   other layer is a phase-1 error.
+- **Switch:** `hooks.enabled` (boolean, default `true`) in the default user
+  config file; `false` disables every hook in every workspace, trusted or
+  not. Like `trusted_workspaces` it is read from that file directly.
 - **Identity**: at check time both each listed path and the workspace
   root are canonicalised (`realpath`; Windows `GetFinalPathNameByHandle`) and
   compared for exact equality of the canonical forms (Windows
@@ -485,8 +684,9 @@ trusted_workspaces = ["/example/cp"]   # absolute workspace roots
   configuration is code.
 - **Hook context:** references are validated in phase 2 as hooks: only
   problem-identity placeholders (`{problem_dir}`, `{problem_id}`,
-  `{workspace}`); `for_each_test`, `repeat` and `needs_build` are errors on a
-  command used as a hook. The triggering command captures the problem
+  `{workspace}`); the keys `for_each_test`, `repeat` and `needs_build` are
+  errors on a command used as a hook when **present**, whatever their value
+  (`repeat = 1` included). The triggering command captures the problem
   identity and paths **during its metadata operation** and passes that
   context to the hook, so a concurrent switch does not change what the hook
   sees.
@@ -570,6 +770,46 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     launchable; if nothing else matches, the error lists it.
   - `argv = ["./{problem_id}/tool"]` → load error (placeholder not at the
     start); `argv = ["{workspace}/{problem_id}/tool"]` → valid, not rebased.
+- **v3 schema cases, exact results:**
+  - `argv = ["g++", …]` in `/u/cfg.toml` → not rebased, `PATH` lookup;
+    `argv = ["bin/x"]` → `/u/bin/x`; `cwd = { path = "out" }` → `/u/out`;
+    `argv = ["/opt/{problem_id}/tool"]` → valid, not rebased.
+  - Built-in Python (`build = false`), user `[languages.python.build] argv
+    = ["py-compile", "{sources}"]` → build stage with that `argv`, the
+    applicable defaults and modifiers, and no discarded fields;
+    workspace `[languages.python] build = false` on top → build-free again,
+    and a workspace `[build] deadline_s = 5` is reported as ignored.
+  - User `[languages.cpp.profiles.fast.run] deadline_s = 3`, problem
+    `[config.run] deadline_s = 7`, `--profile fast` → 7 (row 5 over row 4).
+  - `[config] commands = …` in `problem.toml` → phase-1 error (layer);
+    `[languages.cpp] extension = […]` → unknown key; `env = { CPF_X = "1" }`
+    → error; `hooks.enabled` in a workspace or a `--config` file → error.
+  - A hook command with `repeat = 1` → phase-2 error.
+  - `shell = { interpreter = ["{workspace}/sh", "-c"], script = "true" }`
+    → phase-1 error (no placeholders in the interpreter).
+  - Selected problem without `language`, no `default_language`: `cpf config
+    check` → exit 0, target unresolved; `cpf test` → error.
+  - Unreadable user file and a workspace `on_switch = ["notify"]` with no
+    `notify` command → only the unreadable-file error (the reference could
+    be defined in the user layer).
+  - Global `[build] argv = ["cc"]`, `[languages.cpp] build = false`,
+    `--profile p` with `[languages.cpp.profiles.p.build] env = { A = "1" }`
+    → a complete build using `cc` and `A=1`.
+  - A complete `shell` in the user layer, workspace `shell = { args = ["x"]
+    }` → phase-2 errors: `interpreter` and `script` missing.
+  - Same layer: `[languages.cpp.run.windows] argv = ["a"]` and
+    `[languages.cpp.windows.run] argv = ["b"]` → `["b"]` on Windows, the
+    generic run elsewhere.
+  - User `[languages.cpp.build] env = { A = "1" }`, workspace
+    `[languages.cpp] build = false`, workspace
+    `[languages.cpp.profiles.p.build] argv = ["c++", "{sources}", "-o",
+    "{artifact}"]`, global `[build] deadline_s = 9`, `--profile p` → build
+    with that `argv`, no `A`, deadline 9 s; without `--profile` →
+    build-free, `[build]` ignored.
+  - A syntax error in the user file and an unknown key in the workspace
+    file → both reported; the workspace's other keys still checked.
+  - `cpf add` with `languages.cpp.template = { path = "t.cpp" }` and problem `sources = ["a.cpp",
+    "b.cpp"]` → error, nothing published; `cpf config check` → exit 0.
 - *(draft)* **Ignore patterns (§7.4), exact results:**
   - `*.o` matches `a.o` and `x/y/a.o`; `x/*.o` matches `x/a.o`, not
     `x/y/a.o` or `y/x/a.o`; `**` matches every file at any depth;
