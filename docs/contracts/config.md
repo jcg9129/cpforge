@@ -109,8 +109,8 @@ are unknown keys in this version.
   included (§8.3).
 - Workspace layer: `cpforge.toml` at the workspace root (found per storage
   contract §2); outside a workspace there is no layer 2 and no layer 3.
-- Problem layer: the selected problem's `problem.toml` (storage contract §9
-  classification); a problem without a `[config]` table contributes an empty
+- Problem layer: the selected problem's `problem.toml` (selected per storage
+  contract §5.7; §9 classification); a problem without a `[config]` table contributes an empty
   layer. Only the selected problem's file is read.
 - A minimal workspace (`schema = 1` only, as `cpf init` writes it) is valid.
   A missing language (no problem `language` and no `default_language`) is an

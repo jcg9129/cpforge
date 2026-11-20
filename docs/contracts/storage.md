@@ -518,6 +518,109 @@ targets, unexpected entries in reserved trees, and the state of `job-seq`
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
 
+### 5.7 Selection: `cpf current`, `cpf switch`
+
+A command that **needs a problem** resolves it once, at start, with the first
+source that is present; precedence picks a source, it never searches for a
+candidate that happens to be valid:
+
+1. `--problem <ref>` (global flag).
+2. The **cwd problem**: the current directory is `<root>/problems/<x>` or
+   below it. Ancestry is **physical**: the current directory as the
+   operating system reports it, canonicalised once, compared component-wise
+   with the canonical root (§2). A link is never part of that path, so
+   entering `problems/a` through a link to `problems/b` selects `b`, and a
+   link that leads outside `problems/` gives no cwd problem. `<x>` is then
+   validated like a reference (below), collision check included.
+3. The **saved selection** in `.cpforge/state.toml`.
+
+Only the winning source is read: a valid `--problem` or cwd problem succeeds
+even when `state.toml` is broken, and the cwd problem is not inspected when
+`--problem` is given. An error in the winning source never falls through to
+the next one:
+
+| Situation | Result |
+|---|---|
+| `--problem` cannot be resolved | error; no fallback |
+| current directory not below `problems/<x>` | no cwd problem; the saved selection is consulted |
+| cwd problem `<x>` is not a valid problem (invalid identifier, link, not a directory, `problem.toml` not `valid`, `IdentityMismatch`) | error naming `<x>` and the cause; no fallback |
+| `state.toml` missing, or valid without `current_problem` | `NoSelection` |
+| saved identity names a missing or invalid problem | error naming the saved identity and the cause |
+| `state.toml` `unreadable`, `malformed` or `too_new` and the saved selection is needed | error |
+| outside a workspace | workspace-required error |
+
+**References** (`--problem`, `cpf switch`): `<name>` or `local:<name>`, where
+`<name>` is an Identifier (§2.1). A reference, the cwd problem's `<x>` and a
+saved identity all resolve through the same lookup, the rules of §2.1 for an
+existing entry of `problems/`: exactly one entry with the key,
+spelled exactly as given, a directory and not a link, `problem.toml`
+`valid`, identity bound to the directory. A different spelling, several
+entries, a link or a mismatched identity is an error, never corrected or
+chosen, so with `problems/A` and `problems/a` both present (Linux), neither
+is selectable by any source. `<contest>/<label>` and path references are
+later designs. **Readers** (`current`, and every command that only resolves
+its problem) perform this lookup **without** the workspace lock, listing
+`problems/` and classifying `problem.toml` directly; the §2.1 collision check
+under the lock is required only where a name is created. A concurrent
+change can make a reader's answer stale, never a mixture of two states of
+one file. `switch` performs the same lookup under the lock.
+
+Selection needs a problem, not a target: it works for every problem kind,
+including unknown kinds, and needs no language, sources or template.
+Configuration is then loaded for the **resolved** problem (configuration
+contract §1.2), not for the cwd problem when another source won.
+
+**`state.toml`** (tool-only, §3, §9): `schema = 1` and an optional
+`current_problem` (a valid identity, §2.1); unknown keys are `malformed`.
+Schema 1 is owned entirely by its writer: a field added later needs a new
+schema version. Classified with the tool-only record classification (§9).
+
+**`cpf current`** prints the identity of the problem this invocation would
+use (the precedence above), followed by a newline, and nothing else;
+`cpf current --path` prints its absolute directory instead (native bytes on
+Unix, the platform's string form on Windows), followed by a newline. A path
+that contains a newline is printed as is; line-oriented consumers are the
+target. On failure stdout is empty, the diagnostic goes to stderr, and the
+exit code is 1 (`NoSelection` included) until the report transport assigns
+codes. `current` is read-only: no lock, no recovery, no write, no hooks.
+
+**`cpf switch <ref>`** changes only the saved selection; it does not
+change what the current directory selects. Under the workspace lock, after
+leftover recovery (§4.5): resolve `<ref>` (above), classify `state.toml`;
+`missing` or `valid` → if `current_problem` already equals the identity,
+nothing is written (still a successful switch); otherwise atomically replace
+(§4.2) with `schema = 1`, `current_problem = "<identity>"`. A valid state
+naming a stale problem is replaced without resolving the old value.
+`unreadable`, `malformed` or `too_new` → refused, nothing written (the
+user removes or repairs the file; a recovery command is a later design).
+`--problem` together with `switch` is a usage error. Output: exactly
+`<identity>` and a newline on stdout; on stderr, when a cwd problem exists
+and differs, a note that this directory still selects it (a broken cwd
+problem is not an error for `switch`: the note says it could not be
+resolved). Hooks (`on_switch`) run after a
+successful switch once hooks exist (configuration contract §8.3); they are
+not part of this transaction.
+
+No command updates the saved selection implicitly (`add` and jobs do not).
+A job resolves its problem once; a later switch does not retarget it.
+Atomic replacement lets a concurrent reader see the old or the new
+selection; it does not give a snapshot of other metadata.
+
+Tests: the precedence matrix, including an invalid winner with a valid
+lower source and an unreadable lower source with a valid winner; fresh
+workspace → `NoSelection`; stale saved problem replaced by `switch`;
+`malformed` and `too_new` state refused and left byte-identical; different
+spelling, collision (`problems/A` and `problems/a`, Linux), link and
+identity mismatch as references and as cwd problem; the current directory
+entered through a link `problems/a` → `problems/b` selects `b`, through a
+link to a directory outside `problems/` gives no cwd problem; `current`
+running while `switch` replaces the state sees the old or the new
+identity; an unknown-kind problem selectable; stdout purity of `current`;
+`current` leaves the workspace byte-identical (no lock file created, no
+recovery); same-selection `switch` writes nothing; `switch` inside another
+problem prints the identity alone on stdout and the note on stderr; configuration loaded for `--problem` B while the
+current directory is in A uses B's `[config] language`.
+
 ## 6. Job directories, leases, pruning
 
 ### 6.1 Layout
@@ -789,8 +892,8 @@ finalizes them (execution contract §6.2).
   absent `schema` means 1. Steps in order: read bytes; parse TOML; read
   `schema` alone; decode and validate fields. Directory binding of a valid
   identity (§2.1) is checked after classification and is not part of it.
-- *(draft)* **Record classification** of the tool-only records `job-seq`
-  and `facts/*.toml`, one enum used everywhere: `missing` (no file);
+- **Record classification** of the tool-only records `state.toml` (§5.7)
+  and, *(draft)*, `job-seq` and `facts/*.toml`, one enum used everywhere: `missing` (no file);
   `unreadable` (the bytes cannot be read: I/O error, permission, not a
   regular file); `malformed` (not TOML; `schema` absent or not an integer;
   `SchemaTooOld`, none exists yet; or a supported schema with a missing or
