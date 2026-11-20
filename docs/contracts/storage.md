@@ -735,6 +735,46 @@ lease is released when the last clone drops.
 admission and inactive; a lease that exists but cannot be opened
 (permission, I/O error) leaves the directory in place and is reported.
 
+**Registered and ready** (C10a decisions, 2026-11-20). Steps 1–5 produce a
+**registered** job: sequence allocated, directory, `job.toml` and held
+lease. Nothing can run from a registered job. Freezing (§7: selected tests,
+then the captured files) runs outside the workspace lock under the held
+lease, and only its complete success, together with planning of the
+source-consuming stage (§7 capture check and accident guard), produces a
+**ready** job, the only value from which runs can be started. A failure
+after registration leaves an inactive directory (possibly with partial
+copies) for pruning, never a usable manifest; its sequence number stays a
+gap. Admission that fails after step 2 may already have renamed prune
+candidates: fail closed means no new job runs, not no filesystem change; the
+renamed `.reclaim-*` directories are still deleted (step 6) or retried by a
+later prune.
+
+- **Job id**: `<UTC time, 17 digits yyyymmddHHMMSSmmm>-<16 lowercase hex
+  random>`, created with `create_dir` (an existing name → new random part).
+  "Oldest" (§6.3) orders by the id's byte order (time, then random part as
+  a tie-breaker); directory timestamps are never used. A clock set back
+  can misorder jobs; that only changes which inactive job is pruned first.
+- **`job.toml`**: `schema = 1`, `epoch`, `n` (§9 encodings), nothing else in
+  the CLI foundation. The capture check and the captured file lists live in
+  the ready job value and reach reports (report schema) and facts (§6.5);
+  they are not persisted here.
+- **Lease**: a regular file `lease` inside the job directory, locked with the
+  §4.5 backend (`flock(LOCK_EX | LOCK_NB)` on Unix; `LockFileEx` exclusive,
+  fail-immediately, on a one-byte range on Windows). Owner and probe
+  handles are opened independently and are not inherited by children; on
+  Windows both open with read, write and delete sharing so the directory can
+  be renamed while a probe or owner handle is open. Probe outcomes are kept
+  distinct: `held` (skip), `acquired` (inactive), `absent` (interrupted
+  admission, inactive), `failed(e)` (cannot open or lock for another
+  reason: never treated as inactive; the directory stays and is reported).
+- **Stale recovery** means reclaiming inactive storage only. Nothing
+  decides from age or process ids that a job died, and nothing rebuilds its
+  report or publishes its fact; repairing `job-seq` is `fsck`'s.
+- **Fingerprints** (§6.5) are computed later from the private copies (they
+  are tool-owned and never modified after capture), so capture records the
+  ordered source and support lists and the copy paths, and C15a hashes the
+  copies as written.
+
 **Limitation:** after an abrupt `cpf` death, Unix descendants outside
 containment (execution contract `setsid` limitation) can keep writing. Pruning removes the
 names, but storage held by open files is released only when those writers
@@ -754,7 +794,13 @@ universal §4.5 leftover recovery, but selects and renames nothing.
 It never touches anything else.
 
 1. Under the workspace lock, measure (§6.4) and list inactive job
-   directories oldest first. Candidates: beyond the newest `keep_jobs`
+   directories oldest first (by job id, §6.2). Active jobs count towards the
+   measured usage and are never candidates; `keep_jobs` counts inactive
+   jobs. A job directory holding a **newer-schema** `job.toml`, `spec.json`,
+   `record.json` or `report.json` is never a candidate (reported); one whose
+   `job.toml` is missing or malformed (interrupted admission) is a normal
+   candidate; a record that cannot be read leaves the directory in place
+   (reported), since its schema is unknown. Candidates: beyond the newest `keep_jobs`
    (*default* 20) inactive jobs; then, using **projected** usage (measured
    usage minus the measured size of candidates already selected), further
    oldest inactive jobs while projected usage exceeds `workspace_bytes`
@@ -766,10 +812,20 @@ It never touches anything else.
    leaves the directory in place (reported, retried next time).
 3. Release probe locks and the workspace lock; delete each `.reclaim-*` with
    the no-follow walker (§2). Leftovers stay as `.reclaim-*` and are retried by the
-   next prune.
+   next prune. Two processes may delete the same `.reclaim-*` tree at once:
+   an entry that disappears during deletion is success, never an error. A
+   rename never overwrites an existing `.reclaim-<job-id>`: that candidate is
+   skipped and reported. Projected usage subtracts a candidate only after its
+   rename succeeded.
 
 ### 6.4 Retention
 
+- **Owners** (C10a decisions): `keep_jobs` and `workspace_bytes` are enforced
+  by pruning (§6.3); `job_bytes` by the shared reservation interface below,
+  which every producer of job files uses (admission and freezing write
+  `job.toml` and the copies; later the run, record and report writers);
+  `cwd_bytes` by run finalization; the build cap by build finalization
+  (build planning).
 - **Per job** (`job_bytes`, *default* 1 GiB): exact, in-process, for bytes
   `cpf` itself writes for the job (captures, frozen inputs, specs, records,
   reports, logs), through the execution contract's reservation interface (execution contract §5.4).
