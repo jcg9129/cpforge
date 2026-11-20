@@ -89,7 +89,11 @@ fn success(output: &Output) {
 fn failure(output: &Output, code: i32, message: &str) {
     assert_eq!(output.status.code(), Some(code), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.starts_with("cpf: error: "), "{output:?}");
+    // Warnings (e.g. incomplete leftover recovery) may precede the error.
+    assert!(
+        stderr.lines().any(|line| line.starts_with("cpf: error: ")),
+        "{output:?}"
+    );
     assert!(stderr.contains(message), "expected {message:?}: {output:?}");
 }
 
