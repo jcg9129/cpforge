@@ -148,10 +148,31 @@ pub fn prepare(
         }
     }
     let environment = environment(baseline, &stage.environment, platform);
+    let artifact_dir = ctx.artifact_dir().cloned();
+    if let Some(path) = &artifact_dir {
+        for (invalid, reason) in [
+            (contains_nul(path.as_os_str()), Reason::Nul),
+            (
+                !native_absolute(path.as_os_str(), platform),
+                Reason::NotAbsolute,
+            ),
+        ] {
+            if invalid {
+                expansion.error(
+                    "artifact_dir",
+                    None,
+                    reason,
+                    &stage.cwd.origin,
+                    &stage.cwd.provenance,
+                );
+            }
+        }
+    }
     if expansion.errors.is_empty() {
         Ok(PreparedStage {
             kind: stage.kind,
             command: command.expect("no program error"),
+            artifact_dir,
             cwd: cwd.expect("no cwd error"),
             shared_cwd: stage.shared_cwd(),
             environment,

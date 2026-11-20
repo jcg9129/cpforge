@@ -298,6 +298,12 @@ impl Context {
         self.target().map(|target| target.sources.as_slice())
     }
 
+    pub(super) fn artifact_dir(&self) -> Option<&PathBuf> {
+        self.target
+            .as_ref()
+            .and_then(|target| target.artifact_dir.as_ref())
+    }
+
     fn target(&self) -> Result<&TargetBindings, Reason> {
         if self.plan.kind == StageKind::Hook {
             return Err(Reason::HookPlaceholder);

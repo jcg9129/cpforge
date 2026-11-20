@@ -1,5 +1,6 @@
-//! Pure execution preparation: invocation declarations, native placeholder
-//! expansion, absolute cwd selection and environment steps 1–3 (§4.3).
+//! Execution preparation and program resolution before admission or launch:
+//! invocation declarations, native placeholder expansion, absolute cwd selection
+//! and environment steps 1–3 (§4.3).
 //!
 //! Construct a [`Context`] from the invocation's plan and caller-allocated paths,
 //! capture one [`Baseline`] per job, then call [`prepare`] for each invocation.
@@ -8,14 +9,18 @@
 //! Contexts retain their originating stage to prevent reuse with another plan's
 //! declarations. Supplied undeclared bindings are construction errors.
 //!
-//! [`PreparedStage`] is not launchable. Program lookup, launchability, generated
-//! programs and launch kinds belong to C2b; shell lowering belongs to C2c. Job
+//! [`PreparedStage`] is not launchable. [`resolve`] performs program lookup and
+//! launchability checks through [`Probe`], retaining diagnostics and launch kind.
+//! Generated programs yield a [`DeferredStage`] checked only after their producer
+//! succeeds. [`ResolvedStage`] still retains shell parts for C2c lowering. Job
 //! admission later injects `CPF_*`, stdin, sinks and normalized limits. Neither
 //! preparation nor these types persist, hash or construct an execution spec.
 
 mod context;
 mod error;
 mod prepare;
+mod probe;
+mod resolve;
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -28,6 +33,12 @@ pub use context::{
 };
 pub use error::{PrepareError, PrepareErrorKind, PrepareErrors};
 pub use prepare::prepare;
+pub use probe::{Executable, NativeProbe, Probe, ProbeResult};
+pub use resolve::{
+    CandidateReason, DeferredStage, EntryReason, LaunchKind, Resolution, ResolutionRecord,
+    ResolutionTrace, ResolveError, ResolveErrorKind, ResolveErrors, ResolvedCommand,
+    ResolvedProgram, ResolvedStage, SkippedCandidate, SkippedEntry, resolve,
+};
 
 /// One ordered native environment snapshot, captured once by the job caller.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -83,6 +94,8 @@ pub enum PreparedCommand {
 pub struct PreparedStage {
     pub kind: StageKind,
     pub command: PreparedCommand,
+    /// Producer output root, retained for lexical generated-program classification.
+    pub artifact_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub shared_cwd: bool,
     pub environment: Vec<(OsString, OsString)>,

@@ -11,10 +11,10 @@ use crate::config::{
 use super::*;
 
 #[derive(Debug)]
-struct Directory(PathBuf);
+pub(super) struct Directory(PathBuf);
 
 impl Directory {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut bits = [0_u8; 16];
         getrandom::fill(&mut bits).unwrap();
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -24,7 +24,7 @@ impl Directory {
         Self(path)
     }
 
-    fn path(&self, relative: &str) -> PathBuf {
+    pub(super) fn path(&self, relative: &str) -> PathBuf {
         self.0.join(relative)
     }
 
@@ -50,17 +50,17 @@ impl Directory {
         })
     }
 
-    fn command(&self, body: &str) -> CommandPlan {
+    pub(super) fn command(&self, body: &str) -> CommandPlan {
         self.load(&format!("[commands.c]\n{body}\n"), None)
             .command("c")
             .unwrap()
     }
 
-    fn target(&self, language: &str, extra: &str) -> TargetPlan {
+    pub(super) fn target(&self, language: &str, extra: &str) -> TargetPlan {
         self.load(extra, Some(language)).target().unwrap()
     }
 
-    fn dirs(&self) -> InvocationDirs {
+    pub(super) fn dirs(&self) -> InvocationDirs {
         InvocationDirs {
             run_cwd: self.path("job/cwd"),
             problem: Some(ProblemBinding {
@@ -71,7 +71,7 @@ impl Directory {
         }
     }
 
-    fn bindings(&self, target: &TargetPlan, count: usize) -> TargetBindings {
+    pub(super) fn bindings(&self, target: &TargetPlan, count: usize) -> TargetBindings {
         TargetBindings {
             sources: (0..count)
                 .map(|i| self.path(&format!("job/inputs/src/{i}.cpp")))
@@ -104,7 +104,7 @@ fn pairs(values: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         .collect()
 }
 
-fn prepared(stage: &StagePlan, ctx: &Context) -> PreparedStage {
+pub(super) fn prepared(stage: &StagePlan, ctx: &Context) -> PreparedStage {
     prepare(stage, ctx, &Baseline::default(), Platform::host(), &[]).unwrap()
 }
 
@@ -121,7 +121,7 @@ fn args(stage: &PreparedStage) -> &[OsString] {
     }
 }
 
-fn command_context(plan: &CommandPlan, dirs: InvocationDirs) -> Context {
+pub(super) fn command_context(plan: &CommandPlan, dirs: InvocationDirs) -> Context {
     Context::command(plan, dirs, CommandBindings::default()).unwrap()
 }
 
