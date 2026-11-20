@@ -24,7 +24,7 @@
 //! supplied fields from defaults. Histories have paths relative to each stage;
 //! ignored build modifiers retain their document paths on `ComposedTarget`.
 //!
-//! C1d should wrap `resolve(&merged, &Selection)` for target operations, or use
+//! The consumer API wraps `resolve(&merged, &Selection)` for target operations and uses
 //! `CheckReport::executable` for command-only operations. Both capabilities are
 //! unavailable on any phase-1/2 error, while warnings remain reportable. Plan
 //! from `ResolvedTarget` and from `ExecutableStage` (`ExecutableConfig::command`
@@ -66,7 +66,17 @@
 //! `{ lines = true }` (compare spec §5.1).
 //! Configuration names follow the configuration contract's letter-first rule,
 //! rather than the broader filesystem `Identifier` policy in `crate::names`.
+//!
+//! # Consumers
+//!
+//! [`load_config`] returns diagnostics and inspection even after errors. C2
+//! expands its typed stage plans; C4d uses template destinations; C5 selects
+//! targets; C8 uses source/artifact declarations; C10 reads retention and ignore
+//! patterns; C12a plans commands/hooks; C13 inspects merged values and histories.
+//! See [`api`] for the owned plans. The typed [`RetentionPlan`] is also available
+//! as `api::Retention`; [`Retention`] remains the lower-level composition view.
 
+pub mod api;
 mod built_in;
 mod check;
 mod compose;
@@ -80,6 +90,12 @@ use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 
+pub use api::{
+    Artifacts, CommandPlan, ConfigErrors, ConfigRequest, Cwd, Deadline, EnvEdit, HookPlan,
+    HookPlans, HookSettings, LanguageSource, Limits, LoadedConfig, ProblemPath, ProgramValue,
+    Retention as RetentionPlan, Sourced, StageCommand, StagePlan, Stdin, StreamCap, TargetPlan,
+    TemplateDestination, TemplateDestinationError, TextValue, load_config,
+};
 pub use built_in::built_in;
 pub use check::{
     CheckReport, ComposedUniverse, ExecutableConfig, ExecutableStage, ResolvedTarget, check,
