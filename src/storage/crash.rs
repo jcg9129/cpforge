@@ -14,7 +14,11 @@
 //! `lock.acquired` (before recovery), `lock.recovered`;
 //! `init.locked` (after lock acquisition and recovery),
 //! `init.job_seq_published` (after publishing a new initial job-seq),
-//! `init.config_published` (after publishing cpforge.toml).
+//! `init.config_published` (after publishing cpforge.toml);
+//! `add.locked` (after recovery), `add.staged` (complete unpublished tree),
+//! `add.published` (complete problem directory), `add.contest_created`
+//! (schema-only contest file published), `add.member_added` (membership edit
+//! completed, including an unchanged existing membership).
 //! Selecting `file_noclobber.linked` also forces the Linux link fallback in
 //! test builds, so real command subprocesses can exercise that boundary.
 

@@ -1,5 +1,6 @@
 //! CLI foundation for cpforge.
 
+mod add;
 pub mod cli;
 pub mod config;
 pub mod error;
@@ -18,8 +19,22 @@ use crate::{
 
 /// Run the parsed CLI.
 pub fn run(cli: Cli) -> Result<(), Error> {
-    if let Some(Command::Init { path }) = cli.command {
-        return workspace::init(&path);
+    match cli.command {
+        Some(Command::Init { path }) => return workspace::init(&path),
+        Some(Command::Add {
+            name,
+            contest,
+            label,
+            language,
+        }) => {
+            return add::add(
+                &name,
+                contest.as_deref(),
+                label.as_deref(),
+                language.as_deref(),
+            );
+        }
+        None => {}
     }
     let help = Cli::command().render_help().to_string();
     Err(clap::Error::raw(ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand, help).into())

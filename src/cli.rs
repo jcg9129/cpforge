@@ -19,6 +19,20 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Add a local problem, optionally to a contest.
+    Add {
+        /// Problem name (the identity becomes `local:<name>`).
+        name: String,
+        /// Contest to add the problem to.
+        #[arg(long)]
+        contest: Option<String>,
+        /// Problem label within the contest (requires --contest).
+        #[arg(long, requires = "contest")]
+        label: Option<String>,
+        /// Language recorded for the new problem and used for its template.
+        #[arg(long)]
+        language: Option<String>,
+    },
     /// Initialise an existing directory as a workspace.
     Init {
         /// Workspace directory (defaults to the current directory).

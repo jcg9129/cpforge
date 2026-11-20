@@ -30,6 +30,9 @@ pub enum EditError<E> {
     NotSingleRegularFile {
         path: PathBuf,
     },
+    TooLarge {
+        path: PathBuf,
+    },
     Encoding(std::str::Utf8Error),
     Parse(toml_edit::TomlError),
     Check(E),
@@ -56,6 +59,12 @@ impl<E: fmt::Display> fmt::Display for EditError<E> {
             Self::NotSingleRegularFile { path } => {
                 write!(f, "{} is not a regular file with one link", path.display())
             }
+            Self::TooLarge { path } => write!(
+                f,
+                "{} is malformed: record exceeds the {}-byte size limit",
+                path.display(),
+                super::RECORD_SIZE_LIMIT
+            ),
             Self::Encoding(error) => fmt::Display::fmt(error, f),
             Self::Parse(error) => fmt::Display::fmt(error, f),
             Self::Check(error) => write!(f, "record check failed: {error}"),
@@ -73,7 +82,7 @@ impl<E: std::error::Error + 'static> std::error::Error for EditError<E> {
             Self::Encoding(error) => Some(error),
             Self::Parse(error) => Some(error),
             Self::Check(error) | Self::Operations(error) => Some(error),
-            Self::NotSingleRegularFile { .. } => None,
+            Self::NotSingleRegularFile { .. } | Self::TooLarge { .. } => None,
         }
     }
 }
@@ -111,7 +120,7 @@ fn read_baseline<E>(guard: &WorkspaceGuard<'_>, path: &Path) -> Result<Baseline,
         };
         open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
     }
-    let mut file = open
+    let file = open
         .open(&path)
         .map_err(|error| EditError::Storage(StorageError::io(&path, error)))?;
     let metadata = file
@@ -122,9 +131,16 @@ fn read_baseline<E>(guard: &WorkspaceGuard<'_>, path: &Path) -> Result<Baseline,
     if sys::is_link(&metadata) || !metadata.is_file() || links != 1 {
         return Err(EditError::NotSingleRegularFile { path });
     }
+    if metadata.len() > super::RECORD_SIZE_LIMIT as u64 {
+        return Err(EditError::TooLarge { path });
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    file.take(super::RECORD_SIZE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|error| EditError::Storage(StorageError::io(&path, error)))?;
+    if bytes.len() > super::RECORD_SIZE_LIMIT {
+        return Err(EditError::TooLarge { path });
+    }
     Ok(Baseline {
         hash: Sha256::digest(&bytes).into(),
         bytes,
@@ -164,6 +180,7 @@ fn identity_and_links(file: &File) -> std::io::Result<([u64; 2], u64)> {
 }
 
 /// Edit a fresh TOML document, checking its schema before applying operations.
+/// An unchanged document is validated but never rewritten (`committed = false`).
 /// Untouched items retain their original formatting and comments. Neither this
 /// primitive nor its caller callbacks retry on Conflict. `check` and `ops` must
 /// be replayable functions without external side effects (also when used with
@@ -191,9 +208,22 @@ pub fn edit_toml<E>(
     let before = document.to_string();
     ops(&mut document).map_err(EditError::Operations)?;
     let rendered = document.to_string();
-    let output = if before == rendered {
-        text.to_owned()
-    } else {
+    let unchanged = || read_baseline::<E>(guard, &path).is_ok_and(|current| current == baseline);
+    if before == rendered {
+        if !unchanged() {
+            return Err(EditError::Conflict {
+                conflict: Conflict { path },
+                cleanup: Cleanup::Done,
+                previous_cleanup: Cleanup::Done,
+            });
+        }
+        return Ok(Published {
+            committed: false,
+            durability: super::Durability::Ok,
+            cleanup: Cleanup::Done,
+        });
+    }
+    let output = {
         // Keep the original spelling only when the result is still the same
         // document; otherwise publish toml_edit's own rendering.
         let preserved = preserve_lines(text, &rendered);
@@ -202,7 +232,9 @@ pub fn edit_toml<E>(
         });
         if same { preserved } else { rendered }
     };
-    let unchanged = || read_baseline::<E>(guard, &path).is_ok_and(|current| current == baseline);
+    if output.len() > super::RECORD_SIZE_LIMIT {
+        return Err(EditError::TooLarge { path });
+    }
     let result = atomic_replace(guard, &path, output.as_bytes(), || {
         if !unchanged() {
             return Err(Conflict { path: path.clone() });

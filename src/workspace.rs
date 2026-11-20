@@ -12,14 +12,14 @@ use crate::storage::{
 };
 
 #[derive(Debug, Default)]
-struct InitReport {
-    lines: Vec<String>,
-    warnings: Vec<String>,
+pub(crate) struct Report {
+    pub(crate) lines: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// Preserve progress and warnings even when a later step refuses to continue.
 pub(crate) fn init(root: &Path) -> Result<(), Error> {
-    let mut report = InitReport::default();
+    let mut report = Report::default();
     let result = initialize(root, &mut report);
     for line in report.lines {
         println!("{line}");
@@ -30,13 +30,13 @@ pub(crate) fn init(root: &Path) -> Result<(), Error> {
     result
 }
 
-fn initialize(root: &Path, report: &mut InitReport) -> Result<(), Error> {
+fn initialize(root: &Path, report: &mut Report) -> Result<(), Error> {
     let lock = WorkspaceLock::new(root)?;
     let guard = lock.acquire("init")?;
     initialize_locked(&guard, report)
 }
 
-fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut InitReport) -> Result<(), Error> {
+fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut Report) -> Result<(), Error> {
     if let Some(warning) = guard.recovery_warning() {
         for (path, error) in warning.paths.iter().zip(&warning.errors) {
             report.warnings.push(format!(
@@ -46,9 +46,19 @@ fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut InitReport) -> Res
         }
     }
     crash::point("init.locked");
-    // The tool only checks for cpforge.toml here, so a linked config is allowed.
+    // Reading the workspace marker may follow a link to a regular config.
     let config = guard.entry_path(Path::new("cpforge.toml"))?;
     let initial = !exists(&config)?;
+    if !initial
+        && !fs::metadata(&config)
+            .map_err(|error| StorageError::io(&config, error))?
+            .is_file()
+    {
+        return Err(Error::Failure(format!(
+            "{} is not a regular workspace marker",
+            config.display()
+        )));
+    }
     report.lines.push(format!(
         "workspace lock acquired: {}",
         guard.root().join(".cpforge/lock").display()
@@ -88,8 +98,8 @@ fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut InitReport) -> Res
                 .push("created cpforge.toml; workspace initialised".to_owned());
         }
         Err(error) => {
-            cleanup_warning(report, &error.cleanup);
             if matches!(&error.kind, ErrorKind::Exists { .. }) {
+                cleanup_warning(report, &error.cleanup);
                 report
                     .lines
                     .push("already initialised; kept cpforge.toml".to_owned());
@@ -101,10 +111,7 @@ fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut InitReport) -> Res
     Ok(())
 }
 
-fn ensure_initial_sequence(
-    guard: &WorkspaceGuard<'_>,
-    report: &mut InitReport,
-) -> Result<(), Error> {
+fn ensure_initial_sequence(guard: &WorkspaceGuard<'_>, report: &mut Report) -> Result<(), Error> {
     let path = guard.check_path(".cpforge/job-seq")?;
     let mut record = read_job_sequence(&path);
     if matches!(&record, Record::Missing) {
@@ -128,10 +135,10 @@ fn ensure_initial_sequence(
                 return Ok(());
             }
             Err(error) => {
-                cleanup_warning(report, &error.cleanup);
                 if !matches!(&error.kind, ErrorKind::Exists { .. }) {
                     return Err(error.into());
                 }
+                cleanup_warning(report, &error.cleanup);
                 guard.check_path(&path)?;
                 record = read_job_sequence(&path);
             }
@@ -164,7 +171,7 @@ fn exists(path: &Path) -> Result<bool, Error> {
     }
 }
 
-fn publication_warnings(report: &mut InitReport, path: &Path, published: &Published) {
+pub(crate) fn publication_warnings(report: &mut Report, path: &Path, published: &Published) {
     if let Durability::Uncertain(error) = &published.durability {
         report.warnings.push(format!(
             "{} was published; durability uncertain: {error}",
@@ -174,7 +181,7 @@ fn publication_warnings(report: &mut InitReport, path: &Path, published: &Publis
     cleanup_warning(report, &published.cleanup);
 }
 
-fn cleanup_warning(report: &mut InitReport, cleanup: &Cleanup) {
+pub(crate) fn cleanup_warning(report: &mut Report, cleanup: &Cleanup) {
     if let Cleanup::Pending(path) = cleanup {
         report
             .warnings
@@ -265,7 +272,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let mut report = InitReport::default();
+            let mut report = Report::default();
             let result = initialize_locked(&guard, &mut report);
             if classification == "valid" {
                 result.unwrap();
@@ -310,7 +317,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let mut report = InitReport::default();
+        let mut report = Report::default();
         initialize_locked(&guard, &mut report).unwrap();
         assert_eq!(
             fs::read(dir.0.join("cpforge.toml")).unwrap(),
@@ -346,7 +353,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let mut report = InitReport::default();
+        let mut report = Report::default();
         initialize_locked(&guard, &mut report).unwrap();
         assert!(
             report
@@ -370,7 +377,7 @@ mod tests {
         assert!(leftover.exists());
         drop(guard);
 
-        let mut report = InitReport::default();
+        let mut report = Report::default();
         initialize(&dir.0, &mut report).unwrap();
         assert!(report.warnings.is_empty());
         assert!(!leftover.exists());
@@ -395,7 +402,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let mut report = InitReport::default();
+        let mut report = Report::default();
         initialize_locked(&guard, &mut report).unwrap();
         assert_eq!(
             report
@@ -421,7 +428,7 @@ mod tests {
         }
         drop(guard);
 
-        let mut report = InitReport::default();
+        let mut report = Report::default();
         initialize(&dir.0, &mut report).unwrap();
         assert!(report.warnings.is_empty());
         assert_eq!(fs::read(dir.0.join(".cpforge/job-seq")).unwrap(), sequence);
@@ -434,5 +441,29 @@ mod tests {
                     .starts_with(".cpf-tmp-")
             }));
         }
+    }
+
+    #[test]
+    fn failed_init_reports_pending_temp_cleanup_once() {
+        let dir = Directory::new();
+        let lock = WorkspaceLock::new(&dir.0).unwrap();
+        let guard = lock
+            .acquire_with_options(
+                "init",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        fail_write_disk_full: true,
+                        fail_unlink: true,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let mut report = Report::default();
+        let error = initialize_locked(&guard, &mut report).unwrap_err();
+        assert!(report.warnings.is_empty());
+        assert_eq!(error.to_string().matches("cleanup pending").count(), 1);
+        assert!(!dir.0.join("cpforge.toml").exists());
     }
 }

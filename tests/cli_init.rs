@@ -13,11 +13,25 @@ impl Directory {
     fn new() -> Self {
         let mut bits = [0_u8; 16];
         getrandom::fill(&mut bits).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "cpforge-init-c4c-{:032x}",
-            u128::from_le_bytes(bits)
-        ));
-        fs::create_dir(&path).unwrap();
+        // TMPDIR may itself point inside a checkout. Choose a writable
+        // ancestor outside every git tree so host git state cannot leak in.
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let path = temporary
+            .ancestors()
+            .find_map(|base| {
+                if base
+                    .ancestors()
+                    .any(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok())
+                {
+                    return None;
+                }
+                let candidate = base.join(format!(
+                    "cpforge-init-c4c-{:032x}",
+                    u128::from_le_bytes(bits)
+                ));
+                fs::create_dir(&candidate).ok().map(|()| candidate)
+            })
+            .expect("a writable temporary directory outside a git tree");
         Self(fs::canonicalize(path).unwrap())
     }
 
@@ -590,4 +604,14 @@ fn malformed_initial_sequence_error_is_readable() {
         "{stderr}"
     );
     assert!(!dir.path("cpforge.toml").exists());
+}
+
+#[test]
+fn directory_named_cpforge_toml_is_not_an_existing_workspace() {
+    let dir = Directory::new();
+    fs::create_dir(dir.path("cpforge.toml")).unwrap();
+    let output = init(&dir.0);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a regular workspace marker"));
+    assert!(!dir.path(".cpforge/job-seq").exists());
 }

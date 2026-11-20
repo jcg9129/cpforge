@@ -3,6 +3,7 @@
 //! Create structural directories through [`WorkspaceGuard::create_dir_all`] so
 //! publication can sync every newly created ancestor and its parent.
 //!
+//! An unchanged edit succeeds with `committed = false` and performs no write.
 //! A successful publication is always committed, even if durability or cleanup
 //! needs a warning. Never retry it because of those warnings. Replacements copy
 //! Unix mode only; ownership, ACLs, extended attributes and Windows attributes
@@ -29,7 +30,8 @@ pub use record::{
     MalformedRecord, Record, classify_tool_record, classify_user_record,
     classify_user_record_spanned, read_tool_record, read_user_record,
 };
-pub(crate) use record::{RecordBytes, read_record_bytes};
+pub(crate) use record::{RECORD_SIZE_LIMIT, RecordBytes, read_record_bytes};
+pub(crate) use sys::is_link;
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 
 #[derive(Debug)]

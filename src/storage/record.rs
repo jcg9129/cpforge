@@ -6,6 +6,9 @@ use std::path::Path;
 
 use toml_edit::{DocumentMut, ImDocument};
 
+/// Maximum bytes read or parsed for a small editable metadata record.
+pub(crate) const RECORD_SIZE_LIMIT: usize = 1024 * 1024;
+
 #[derive(Debug)]
 pub enum Record<T, E> {
     Missing,
@@ -17,6 +20,7 @@ pub enum Record<T, E> {
 
 #[derive(Debug)]
 pub enum MalformedRecord<E> {
+    TooLarge { limit: usize },
     Encoding(std::str::Utf8Error),
     Toml(toml_edit::TomlError),
     SchemaMissing,
@@ -28,6 +32,7 @@ pub enum MalformedRecord<E> {
 impl<E: std::fmt::Display> std::fmt::Display for MalformedRecord<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::TooLarge { limit } => write!(f, "record exceeds the {limit}-byte size limit"),
             Self::Encoding(error) => write!(f, "not UTF-8: {error}"),
             Self::Toml(error) => write!(f, "not TOML: {}", error.message()),
             Self::SchemaMissing => write!(f, "`schema` is missing"),
@@ -70,6 +75,9 @@ fn read_record<T, E>(path: &Path, classify: impl FnOnce(&[u8]) -> Record<T, E>) 
         RecordBytes::Missing => Record::Missing,
         RecordBytes::Unreadable(error) => Record::Unreadable(error),
         RecordBytes::Present(bytes) => classify(&bytes),
+        RecordBytes::TooLarge => Record::Malformed(MalformedRecord::TooLarge {
+            limit: RECORD_SIZE_LIMIT,
+        }),
     }
 }
 
@@ -80,6 +88,7 @@ pub(crate) enum RecordBytes {
     Missing,
     Unreadable(io::Error),
     Present(Vec<u8>),
+    TooLarge,
 }
 
 pub(crate) fn read_record_bytes(path: &Path) -> RecordBytes {
@@ -90,19 +99,36 @@ pub(crate) fn read_record_bytes(path: &Path) -> RecordBytes {
         use std::os::unix::fs::OpenOptionsExt;
         open.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
     }
-    let mut file = match open.open(path) {
+    let file = match open.open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return RecordBytes::Missing,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return RecordBytes::Missing;
+        }
         Err(error) => return RecordBytes::Unreadable(error),
     };
     match file.metadata() {
-        Ok(metadata) if metadata.is_file() => {}
+        Ok(metadata) if metadata.is_file() => {
+            if metadata.len() > RECORD_SIZE_LIMIT as u64 {
+                return RecordBytes::TooLarge;
+            }
+        }
         Ok(_) => return RecordBytes::Unreadable(io::Error::other("record is not a regular file")),
         Err(error) => return RecordBytes::Unreadable(error),
     }
     let mut bytes = Vec::new();
-    if let Err(error) = file.read_to_end(&mut bytes) {
+    if let Err(error) = file
+        .take(RECORD_SIZE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
         return RecordBytes::Unreadable(error);
+    }
+    if bytes.len() > RECORD_SIZE_LIMIT {
+        return RecordBytes::TooLarge;
     }
     RecordBytes::Present(bytes)
 }
@@ -146,6 +172,11 @@ fn classify_record<T, E>(
     schema_required: bool,
     validate: impl FnOnce(ImDocument<String>) -> Result<T, E>,
 ) -> Record<T, E> {
+    if bytes.len() > RECORD_SIZE_LIMIT {
+        return Record::Malformed(MalformedRecord::TooLarge {
+            limit: RECORD_SIZE_LIMIT,
+        });
+    }
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text,
         Err(error) => return Record::Malformed(MalformedRecord::Encoding(error)),

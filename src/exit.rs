@@ -1,12 +1,13 @@
 //! Process exit statuses. The failure status is provisional until report
-//! transport defines the full table.
+//! transport defines the full table. C9c will add a distinct partial-failure
+//! status; for now a published problem whose contest membership fails exits 1.
 
 /// Exit statuses used by `cpf`.
 ///
 /// | Variant | Code | Meaning |
 /// | --- | --- | --- |
 /// | `Success` | 0 | Successful completion, including help and version |
-/// | `Failure` | 1 | The command failed or refused; nothing further was done (provisional) |
+/// | `Failure` | 1 | The command failed or refused, possibly after partial progress (provisional) |
 /// | `Usage` | 2 | Invalid arguments or a missing command |
 /// | `Internal` | 70 | Bug or unexpected error |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

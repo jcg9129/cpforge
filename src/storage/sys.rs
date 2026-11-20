@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-pub(super) fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

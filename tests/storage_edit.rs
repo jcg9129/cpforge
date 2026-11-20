@@ -657,3 +657,151 @@ fn single_edit_child() {
     let guard = lock.acquire("single edit").unwrap();
     edit_toml(&guard, "record.toml", check, increment).unwrap();
 }
+
+#[test]
+fn unchanged_edit_does_not_replace_the_file() {
+    let dir = Directory::new();
+    let path = dir.path("record.toml");
+    fs::write(&path, ORIGINAL).unwrap();
+    let before = fs::metadata(&path).unwrap();
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (before.dev(), before.ino())
+    };
+    let lock = dir.lock();
+    let guard = lock.acquire("unchanged edit").unwrap();
+    let published = edit_toml(&guard, &path, check, |_| Ok(())).unwrap();
+    assert!(!published.committed);
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(identity, (after.dev(), after.ino()));
+    }
+    assert_eq!(fs::read(path).unwrap(), ORIGINAL.as_bytes());
+    assert_no_temps(&dir.0);
+}
+
+#[test]
+fn record_size_cap_is_malformed_and_non_directory_ancestors_are_missing() {
+    const LIMIT: usize = 1024 * 1024;
+    let dir = Directory::new();
+    let path = dir.path("record.toml");
+    let mut bytes = ORIGINAL.as_bytes().to_vec();
+    bytes.push(b'#');
+    bytes.resize(LIMIT, b'x');
+    fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        read_user_record(&path, 1, check),
+        Record::Valid(())
+    ));
+    bytes.push(b'x');
+    fs::write(&path, &bytes).unwrap();
+    let record = read_user_record(&path, 1, check);
+    assert!(matches!(
+        record,
+        Record::Malformed(MalformedRecord::TooLarge { limit: LIMIT })
+    ));
+    if let Record::Malformed(reason) = record {
+        assert!(reason.to_string().contains("1048576-byte size limit"));
+    }
+    assert!(matches!(
+        cpforge::storage::classify_user_record(&bytes, 1, check),
+        Record::Malformed(MalformedRecord::TooLarge { .. })
+    ));
+    let lock = dir.lock();
+    let guard = lock.acquire("oversize edit").unwrap();
+    assert!(matches!(
+        edit_toml(&guard, &path, check, |_| Ok(())),
+        Err(EditError::TooLarge { .. })
+    ));
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert!(matches!(
+        read_user_record(path.join("child.toml"), 1, check),
+        Record::Missing
+    ));
+}
+
+#[test]
+fn an_edit_cannot_grow_a_record_past_the_size_cap() {
+    let dir = Directory::new();
+    fs::write(dir.path("record.toml"), ORIGINAL).unwrap();
+    let lock = dir.lock();
+    let guard = lock.acquire("oversize output").unwrap();
+    let error = edit_toml(&guard, "record.toml", check, |document| {
+        document["large"] = toml_edit::value("x".repeat(1024 * 1024));
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(error, EditError::TooLarge { .. }));
+    assert_eq!(
+        fs::read(dir.path("record.toml")).unwrap(),
+        ORIGINAL.as_bytes()
+    );
+    assert_no_temps(&dir.0);
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn unchanged_edit_never_attempts_a_temp_write_or_publish() {
+    use cpforge::storage::{LockOptions, TestHooks};
+    let dir = Directory::new();
+    fs::write(dir.path("record.toml"), ORIGINAL).unwrap();
+    let lock = dir.lock();
+    let guard = lock
+        .acquire_with_options(
+            "no-op without write",
+            LockOptions {
+                test_hooks: TestHooks {
+                    fail_write_disk_full: true,
+                    fail_publish_permission_denied: true,
+                    ..TestHooks::default()
+                },
+                ..LockOptions::default()
+            },
+        )
+        .unwrap();
+    let published = edit_toml(&guard, "record.toml", check, |_| Ok(())).unwrap();
+    assert!(!published.committed);
+    assert_no_temps(&dir.0);
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn unchanged_edit_still_conflicts_and_can_replay_a_changed_baseline() {
+    use cpforge::storage::{LockOptions, TestHooks, edit_toml_replay};
+    fn save_once(path: &Path) {
+        if count(path) == 0 {
+            fs::write(path, "schema = 1\ncount = 1\n").unwrap();
+        }
+    }
+    let dir = Directory::new();
+    fs::write(dir.path("record.toml"), ORIGINAL).unwrap();
+    let lock = dir.lock();
+    let guard = lock
+        .acquire_with_options(
+            "no-op conflict",
+            LockOptions {
+                test_hooks: TestHooks {
+                    edit_after_read: Some(save_once),
+                    ..TestHooks::default()
+                },
+                ..LockOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        edit_toml(&guard, "record.toml", check, |_| Ok(())),
+        Err(EditError::Conflict { .. })
+    ));
+    fs::write(dir.path("record.toml"), ORIGINAL).unwrap();
+    assert!(
+        !edit_toml_replay(&guard, "record.toml", check, |_| Ok(()))
+            .unwrap()
+            .committed
+    );
+    assert_eq!(count(&dir.path("record.toml")), 1);
+    assert_no_temps(&dir.0);
+}

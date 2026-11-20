@@ -457,11 +457,12 @@ pub fn resolve_add(name: &Identifier, entries: &[ProblemEntry]) -> Resolution {
     }
 }
 
-/// Map exclusive-publication `Exists` after [`Resolution::Create`] to a collision.
+/// Map exclusive-publication `Exists` with no lexical match to a collision.
 ///
 /// The requested destination is the entry name available when an outside writer
 /// or an unmodelled filesystem alias defeats the lexical check. The caller must
-/// also retain and report the native publication error; this never means reuse.
+/// first reclassify entries with [`resolve_add`], then retain and report the
+/// native publication error if no matching entry was found.
 pub fn publication_exists(name: &Identifier) -> Resolution {
     Resolution::NameCollision {
         reason: CollisionReason::NativeExists,

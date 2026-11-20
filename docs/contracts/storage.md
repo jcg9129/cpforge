@@ -9,8 +9,9 @@ test-store interface (§8).
 **Managed-workspace amendment (v5): settled, implementation in progress.** The
 single-workspace rows of `../design-workspace.md` §9 cover admission sequence,
 source capture, run facts, adopt / clean / fsck / gitignore transactions.
-Amended content is marked *(draft)* below; init sequence bootstrap is implemented
-(C4c), while the remaining amended transactions are planned.
+Amended content is marked *(draft)* below; init sequence bootstrap (C4c) and
+local add with template provenance and contest membership (C4d) are implemented,
+while the remaining amended transactions are planned.
 References labelled *workspace design* point to `../design-workspace.md`.
 
 Related: design §4 and `execution.md`.
@@ -34,7 +35,8 @@ Related: design §4 and `execution.md`.
 ## 2. Paths
 
 - The workspace root is the nearest ancestor of the current directory
-  containing `cpforge.toml` (`--workspace` overrides); it may be reached
+  containing a regular file `cpforge.toml` (`--workspace` overrides; a
+  directory of that name is not a marker); it may be reached
   through a link and is canonicalised once.
 - Tool-written paths come from the root and sanitised identifiers (portable-name validation). Each
   component below the root is checked with `symlink_metadata` at use; a
@@ -146,9 +148,10 @@ native error, never treated as success.
   6. Its valid `id` differs from `local:<name>` → `IdentityMismatch`.
   7. Otherwise → `Exists`.
   Each `NameCollision` names the entry (or entries) and the reason. A
-  no-clobber publication that returns `Exists` although rule 1 applied
-  (concurrent creation outside cpf, or an alias the key missed) is
-  `NameCollision{reason: NativeExists}`, never `Exists`.
+  no-clobber publication that returns `Exists` although rule 1 applied is
+  reclassified by these same rules: an exact directory with the same identity
+  is `Exists`; other matching entries are refused. If no lexical match can
+  be found (an alias the key missed), it is `NameCollision{reason: NativeExists}`.
 - **Tests.** Pure unit tests:
   - every rule above with accepted and rejected examples;
   - reserved names: the accepted/rejected lists above, any case, trailing
@@ -308,7 +311,10 @@ Runs with a borrowed workspace guard (§4.5).
    **before** applying the command's **semantic operations** to this freshly
    read document. Untouched items, comments and formatting round-trip
    byte-for-byte.
-3. Write the temp file (§4.2 step 1).
+3. If the operation leaves the document unchanged, validate the baseline
+   once more and return without rewriting the file (`committed = false`,
+   no durability or cleanup warning); a changed baseline is `Conflict`.
+   Otherwise write the temp file (§4.2 step 1).
 4. **Validate before each publish attempt** (also every Windows retry):
    re-read and recheck bytes, length, SHA-256, identity, file type **and
    hard-link count**; any difference, disappearance or type change → temp
@@ -403,8 +409,41 @@ gitignore` and writes nothing else.
 4. Contest membership: edit transaction on `contest.toml` (created no-clobber
    when new), entry added only if absent.
 5. Step 4 failing after 3 committed → "problem created; contest membership
-   failed: <reason>", partial-failure exit code (report transport); rerunning
-   `cpf add --contest` completes it.
+   failed: <reason>", exit 1 until C9c adds a distinct partial-failure code;
+   rerunning `cpf add --contest` completes it without touching problem files.
+
+`contest.toml` schema 1 uses an ordered array of records (`[[problem]]`),
+with a string `id` (a problem identity, §2.1) and optional string `label`
+(1–16 ASCII letters, digits, `-`, `_`). Position in the file defines order:
+
+```toml
+schema = 1
+
+[[problem]]
+id = "local:two-sum"
+label = "A"
+```
+
+Unknown keys in each record, including future contest overrides such as
+`limits`, are preserved untouched. An existing `id` is a no-op; an explicitly
+supplied `--label` differing from its stored label (including a stored absent
+label) is a conflict. Omitting `--label` keeps any existing label. A label
+already used by another record is a conflict. Duplicate ids or labels and invalid record
+fields are `malformed`; malformed or newer-schema files are refused without
+mutation. Labels compare by exact spelling. New contest files are created
+no-clobber with `schema = 1` before the replayable membership edit.
+
+Before staging, `add` loads configuration without a problem layer. Only an
+explicit `--language` is recorded under `[config]`; the default remains
+inherited. An unresolved language or an absent template creates no solution.
+A configured template requires exactly one effective source, and must
+resolve to a regular file; it lies outside the workspace and is only read,
+so links are followed (§2). Validation and reading finish before
+publication. Every component of the solution destination must be a portable
+component (§2.1) and a single-component destination must not collide with
+`problem.toml`; otherwise `add` fails before staging. A copied solution is recorded as
+`[files] created = [{ path = "main.cpp", command = "add" }]` in the staged
+record, with the effective source path in place of `main.cpp`.
 
 ### 5.3 `cpf test add`
 
@@ -724,15 +763,20 @@ finalizes them (execution contract §6.2).
 ## 9. Schema versions
 
 - Governed formats: `cpforge.toml`, `problem.toml`, `tests.toml`,
-  `contest.toml` (user-editable); `state.toml`, `spec.json`, `record.json`,
-  `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
+  `contest.toml` (user-editable, ordered `[[problem]]` membership, §5.2);
+  `state.toml`, `spec.json`, `record.json`, `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
+- Records read or edited by these TOML primitives are capped at **1 MiB**
+  (1,048,576 bytes), including user-editable records. Larger input is
+  `malformed` with a size-limit reason, before parsing; reads are bounded
+  even if a file grows while being read. An edit may not grow past the cap.
 - Missing `schema`: user-editable → 1; tool-only → `SchemaMissing`.
 - Newer than supported: raw display only; no semantic use, mutation or
   execution based on it. A job directory with newer-schema metadata is
   never pruned (reported).
 - Errors: `SchemaMissing`, `SchemaMalformed`, `SchemaTooNew`, `SchemaTooOld`.
 - **User-editable record classification** (`problem.toml`, and the other
-  user-editable formats when a command reads them): `missing` (no file);
+  user-editable formats when a command reads them): `missing` (no file,
+  including a non-directory path component / ENOTDIR);
   `unreadable` (bytes cannot be read, or not a regular file); `malformed`
   (not TOML; `schema` present but not an integer; `SchemaTooOld`; a supported
   schema with a missing or invalid field, e.g. a `problem.toml` without a
@@ -789,7 +833,7 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 |---|---|
 | atomic replace, shared-record edit, file and directory publication primitives; lock/recovery boundaries | C4b (covered by library helper subprocesses) |
 | init, init job-seq (including primitive publication and lock/recovery boundaries) | C4c (covered) |
-| add directory + membership | C4c (pending) |
+| add directory + membership (including staging, publication, contest creation/edit and lock/recovery boundaries) | C4d (covered) |
 | test add | C6 |
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |

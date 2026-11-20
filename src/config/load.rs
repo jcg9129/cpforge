@@ -123,6 +123,15 @@ pub fn load(sources: &[LayerSource], env: &Environment, platform: Platform) -> V
         .iter()
         .map(|source| match storage::read_record_bytes(&source.file) {
             storage::RecordBytes::Present(bytes) => parse(&bytes, source, env, platform),
+            storage::RecordBytes::TooLarge => finish(
+                Record::Malformed(MalformedRecord::TooLarge {
+                    limit: storage::RECORD_SIZE_LIMIT,
+                }),
+                source,
+                env,
+                platform,
+                None,
+            ),
             storage::RecordBytes::Missing => finish(Record::Missing, source, env, platform, None),
             storage::RecordBytes::Unreadable(e) => {
                 finish(Record::Unreadable(e), source, env, platform, None)

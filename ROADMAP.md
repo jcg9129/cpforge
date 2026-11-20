@@ -52,6 +52,9 @@ Implemented: `cpf init [<path>]` creates the workspace directories and
 initial admission sequence before publishing config, preserves existing
 records, and reports recovery/publication warnings. C4c covers init with
 real-binary crash and rerun fixtures at command and primitive boundaries.
+`cpf add <name>` publishes local problems, copies configured templates with
+creation provenance, and appends ordered contest membership with optional
+labels. C4d covers add, membership, crash recovery and idempotent reruns.
 
 Planned:
 
@@ -62,9 +65,9 @@ Planned:
   C4a covers storage primitive fixtures; C4b covers publication and edit
   commit points with real library helper subprocesses (storage contract §10).
   Each command task additionally kills the actual `cpf` binary at its commit
-  points (init covered in C4c; add pending, test add in C6, job/fact work
+  points (init covered in C4c; add covered in C4d, test add in C6, job/fact work
   in C10/C15).
-- `cpf add`, current-problem selection and per-problem language;
+- Current-problem selection and switching;
   test discovery and `cpf test add/ls/enable/disable` through the test-store
   interface. Missing and empty answers stay distinct.
 - Byte-precise comparators and bounded diagnostics per the

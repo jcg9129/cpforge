@@ -154,19 +154,18 @@ fn every_commit_boundary_has_only_complete_allowed_states_and_recovers() {
                 );
             }
             "edit_toml" => {
-                assert!(
-                    edit_toml(
-                        &guard,
-                        "record.toml",
-                        |_| Ok::<_, ()>(()),
-                        |doc| {
-                            doc["count"] = toml_edit::value(1);
-                            Ok(())
-                        }
-                    )
-                    .unwrap()
-                    .committed
-                );
+                let published = edit_toml(
+                    &guard,
+                    "record.toml",
+                    |_| Ok::<_, ()>(()),
+                    |doc| {
+                        doc["count"] = toml_edit::value(1);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(published.committed, !committed);
+                assert_eq!(fs::read(dir.path("record.toml")).unwrap(), NEW);
             }
             "file_noclobber" => {
                 let result = publish_file_noclobber(&guard, "exclusive", NEW);
@@ -285,7 +284,10 @@ fn crash_child() {
                     "record.toml",
                     |_| Ok::<_, ()>(()),
                     |doc| {
-                        doc["count"] = toml_edit::value(1);
+                        // Each iteration must change the document so an nth
+                        // crash point still reaches an actual publication.
+                        let count = doc["count"].as_integer().unwrap();
+                        doc["count"] = toml_edit::value(count + 1);
                         Ok(())
                     },
                 )
