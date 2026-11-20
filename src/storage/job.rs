@@ -440,7 +440,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_rename_with_owner_and_independent_probe_handles() {
+    fn windows_rename_needs_every_handle_in_the_job_directory_closed() {
         use std::fs;
         let id = JobId::generate(SystemTime::now()).unwrap();
         let root = std::env::temp_dir().join(format!("cpforge-lease-{id}"));
@@ -448,25 +448,25 @@ mod tests {
         let original = root.join("job");
         fs::create_dir(&original).unwrap();
         let owner = JobLease::create_and_lock(&original).unwrap();
-        // Keep the independently opened probe handle alive even after its
-        // nonblocking attempt reports contention, to exercise both share modes.
+        // Owner and an independent probe handle coexist (compatible sharing),
+        // and the probe sees the owner's lock.
         let independent = sys::open_lease(&original.join("lease"), false).unwrap();
         assert!(!sys::try_lock(&independent).unwrap());
+        // Windows refuses to rename a directory while a file inside is open,
+        // whatever the sharing mode; pruning therefore closes its probe first.
         let renamed = root.join("renamed");
-        fs::rename(&original, &renamed).unwrap();
+        assert!(fs::rename(&original, &renamed).is_err());
+        drop(independent);
+        assert!(fs::rename(&original, &renamed).is_err());
         drop(owner);
-        assert!(sys::try_lock(&independent).unwrap());
-        let probe = ProbeLock {
-            _lease: JobLease { file: independent },
+        let lock = match super::probe(&original) {
+            ProbeOutcome::Acquired(lock) => lock,
+            other => panic!("expected an inactive lease, got {other:?}"),
         };
-        let reclaimed = root.join("reclaimed");
-        fs::rename(&renamed, &reclaimed).unwrap();
-        assert!(matches!(super::probe(&reclaimed), ProbeOutcome::Held));
-        drop(probe);
-        assert!(matches!(
-            super::probe(&reclaimed),
-            ProbeOutcome::Acquired(_)
-        ));
+        assert!(fs::rename(&original, &renamed).is_err());
+        drop(lock);
+        fs::rename(&original, &renamed).unwrap();
+        assert!(matches!(super::probe(&renamed), ProbeOutcome::Acquired(_)));
         fs::remove_dir_all(root).unwrap();
     }
 }

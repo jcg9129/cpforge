@@ -762,8 +762,9 @@ later prune.
   §4.5 backend (`flock(LOCK_EX | LOCK_NB)` on Unix; `LockFileEx` exclusive,
   fail-immediately, on a one-byte range on Windows). Owner and probe
   handles are opened independently and are not inherited by children; on
-  Windows both open with read, write and delete sharing so the directory can
-  be renamed while a probe or owner handle is open. Probe outcomes are kept
+  Windows both open with read, write and delete sharing (so neither blocks
+  the other); the job directory itself cannot be renamed while either is
+  open (§6.3 step 2 releases the probe first). Probe outcomes are kept
   distinct: `held` (skip), `acquired` (inactive), `absent` (interrupted
   admission, inactive), `failed(e)` (cannot open or lock for another
   reason: never treated as inactive; the directory stays and is reported).
@@ -807,10 +808,18 @@ It never touches anything else.
    (*default* 4 GiB). Measurement is `known bytes + incomplete: bool`; an
    incomplete measurement selects by `keep_jobs` only and is reported.
 2. For each candidate: try-lock its lease with a probe handle (held → skip;
-   absent → interrupted admission, proceed); rename the directory to
-   `runs/.reclaim-<job-id>` while holding the probe lock. A failed rename
-   leaves the directory in place (reported, retried next time).
-3. Release probe locks and the workspace lock; delete each `.reclaim-*` with
+   absent → interrupted admission, proceed); then **release the probe lock
+   and close its handle**, and rename the directory to
+   `runs/.reclaim-<job-id>`. Windows cannot rename a directory while any
+   file inside it is open, whatever its sharing mode (CI, 2026-11-20), so no
+   handle may stay open across the rename. Releasing first is safe: pruning
+   is serialised by the workspace lock, and a lease found free is never
+   taken again by an owner (leases are created only at admission, with
+   `create_new`); another lock-free probe holding it briefly only makes a
+   later prune skip the job. A failed rename (on Windows also caused by a
+   handle another process keeps open inside the directory) leaves the
+   directory in place (reported, retried next time).
+3. Release the workspace lock; delete each `.reclaim-*` with
    the no-follow walker (§2). Leftovers stay as `.reclaim-*` and are retried by the
    next prune. Two processes may delete the same `.reclaim-*` tree at once:
    an entry that disappears during deletion is success, never an error. A
@@ -1169,9 +1178,10 @@ create a new number and leave the earlier files unregistered.
   candidates cannot be enabled or selected.
 - Leases and pruning: held lease never pruned; killed job becomes prunable;
   directory without lease reclaimed; unreadable lease left and reported;
-  rename refused (Windows open handle without share-delete, injected
-  elsewhere) leaves the directory; `.reclaim-*` leftovers retried; Windows
-  rename with an open lease; `keep_jobs` and byte-target triggers;
+  rename refused (Windows: a handle open inside the job directory; injected
+  elsewhere) leaves the directory; `.reclaim-*` leftovers retried; the
+  probe is released before the rename (Windows: the rename succeeds with no
+  handle open and fails, reported, with the owner's lease open); `keep_jobs` and byte-target triggers;
   newer-schema job metadata never pruned.
 - Retention: per-job budget refusal (execution contract); `CwdOverflow`;
   `BuildOutputTooLarge` removes the build directory; a mount point inside a

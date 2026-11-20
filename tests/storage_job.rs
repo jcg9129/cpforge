@@ -312,6 +312,9 @@ fn spawned_child_does_not_retain_owner_or_probe_leases() {
     child.finish();
 }
 
+// Unix only: Windows cannot rename a directory with a file open inside it
+// (covered by `windows_rename_needs_every_handle_in_the_job_directory_closed`).
+#[cfg(unix)]
 #[test]
 fn directory_rename_keeps_owner_and_acquired_probe_protection() {
     let dir = Directory::new();
@@ -342,7 +345,7 @@ fn unreadable_metadata_and_lease_are_errors_without_proving_inactivity() {
     fs::write(dir.path("job.toml"), record(0).encode()).unwrap();
     fs::write(dir.path("lease"), b"").unwrap();
     for name in ["job.toml", "lease"] {
-        fs::set_permissions(dir.path(name), fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(dir.path(name), fs::Permissions::from_mode(0o000)).unwrap();
     }
     let metadata = read_job_record(dir.path("job.toml"));
     let lease = probe(&dir.0);
