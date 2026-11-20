@@ -158,9 +158,9 @@ fn decode(document: &ImDocument<String>, source: &LayerSource) -> Result<RawNode
     );
     if source.kind == LayerKind::Problem {
         let id = root.get("problem").and_then(|p| p.get("id"));
-        if !id
+        if id
             .and_then(RawNode::string)
-            .is_some_and(|s| crate::names::ProblemIdentity::parse(s).is_ok())
+            .is_none_or(|s| crate::names::ProblemIdentity::parse(s).is_err())
         {
             return Err(Box::new(Diagnostic {
                 severity: Severity::Error,
