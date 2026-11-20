@@ -524,7 +524,7 @@ fn prospective_problem_document_is_loaded_instead_of_the_existing_record() {
 fn problem_entry_is_available_to_preparation_without_a_language_entry() {
     use crate::exec::{
         Baseline, CommandBindings, Context, InvocationDirs, LanguageBinding, PreparedCommand,
-        ProgramRequest, TargetBindings, prepare,
+        ProblemBinding, ProgramRequest, TargetBindings, prepare,
     };
 
     let dir = Directory::new();
@@ -539,9 +539,18 @@ fn problem_entry_is_available_to_preparation_without_a_language_entry() {
         problem: None,
         workspace: None,
     };
+    // A problem's run stage needs the selected problem and its workspace.
+    let target_dirs = InvocationDirs {
+        run_cwd: dir.path("job/cwd"),
+        problem: Some(ProblemBinding {
+            dir: dir.path("ws/problems/sample"),
+            id: "local:sample".into(),
+        }),
+        workspace: Some(dir.path("ws")),
+    };
     let context = Context::target_run(
         &plan,
-        dirs.clone(),
+        target_dirs,
         TargetBindings {
             sources: vec![dir.path("job/inputs/src/main.py")],
             artifact: None,
