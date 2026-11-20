@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = Color::Auto)]
     pub color: Color,
 
+    /// Select a problem for this invocation (<name> or local:<name>).
+    #[arg(long, global = true)]
+    pub problem: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -19,6 +23,17 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print the problem selected for this invocation.
+    Current {
+        /// Print the absolute problem directory instead of its identity.
+        #[arg(long)]
+        path: bool,
+    },
+    /// Change the saved problem selection.
+    Switch {
+        /// Existing problem name or local:<name> identity.
+        reference: String,
+    },
     /// Add a local problem, optionally to a contest.
     Add {
         /// Problem name (the identity becomes `local:<name>`).

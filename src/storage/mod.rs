@@ -24,6 +24,7 @@ use std::io;
 use std::path::PathBuf;
 
 pub use edit::{EditError, edit_toml, edit_toml_replay};
+pub(crate) use lock::checked_path;
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
 pub use publish::{atomic_replace, publish_dir_noclobber, publish_file_noclobber};
 pub use record::{

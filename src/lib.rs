@@ -7,6 +7,7 @@ pub mod error;
 pub mod exec;
 pub mod exit;
 pub mod names;
+pub mod selection;
 pub mod storage;
 pub mod supervisor;
 mod workspace;
@@ -20,7 +21,16 @@ use crate::{
 
 /// Run the parsed CLI.
 pub fn run(cli: Cli) -> Result<(), Error> {
+    if cli.problem.is_some() && matches!(&cli.command, Some(Command::Switch { .. })) {
+        return Err(clap::Error::raw(
+            ErrorKind::ArgumentConflict,
+            "--problem cannot be used with switch",
+        )
+        .into());
+    }
     match cli.command {
+        Some(Command::Current { path }) => return selection::current(cli.problem.as_deref(), path),
+        Some(Command::Switch { reference }) => return selection::switch(&reference),
         Some(Command::Init { path }) => return workspace::init(&path),
         Some(Command::Add {
             name,

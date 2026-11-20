@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::storage::{
@@ -187,6 +187,26 @@ pub(crate) fn cleanup_warning(report: &mut Report, cleanup: &Cleanup) {
             .warnings
             .push(format!("cleanup pending: {}", path.display()));
     }
+}
+
+/// Find the nearest regular workspace marker; callers canonicalise the root at entry.
+pub(crate) fn find_root(current: &Path) -> Result<PathBuf, Error> {
+    for ancestor in current.ancestors() {
+        let marker = ancestor.join("cpforge.toml");
+        match fs::metadata(&marker) {
+            Ok(metadata) if metadata.is_file() => return Ok(ancestor.to_path_buf()),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) => {}
+            Err(error) => return Err(StorageError::io(marker, error).into()),
+        }
+    }
+    Err(Error::Failure(
+        "outside a workspace: no cpforge.toml found in this directory or its ancestors".into(),
+    ))
 }
 
 #[cfg(all(test, feature = "storage-test-hooks"))]

@@ -9,13 +9,12 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::config::{ConfigRequest, Environment, Operation, Severity, load_config};
 use crate::error::Error;
-use crate::names::{
-    self, EntryKind, Identifier, ProblemEntry, ProblemIdentity, ProblemMetadata, Resolution,
-};
+use crate::names::{self, Identifier, ProblemIdentity, Resolution};
+use crate::selection::record_result;
 use crate::storage::{
     self, Cleanup, ErrorKind, Record, StorageError, WorkspaceGuard, WorkspaceLock, crash,
 };
-use crate::workspace::{Report, cleanup_warning, publication_warnings};
+use crate::workspace::{Report, cleanup_warning, find_root, publication_warnings};
 
 pub(crate) fn add(
     name: &str,
@@ -63,25 +62,6 @@ pub(crate) fn add(
     result
 }
 
-fn find_root(current: &Path) -> Result<PathBuf, Error> {
-    for ancestor in current.ancestors() {
-        let marker = ancestor.join("cpforge.toml");
-        match fs::metadata(&marker) {
-            Ok(metadata) if metadata.is_file() => return Ok(ancestor.to_path_buf()),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) => {}
-            Err(error) => return Err(StorageError::io(marker, error).into()),
-        }
-    }
-    Err(Error::Failure(
-        "outside a workspace: no cpforge.toml found in this directory or its ancestors".into(),
-    ))
-}
-
 fn add_locked(
     guard: &WorkspaceGuard<'_>,
     name: &Identifier,
@@ -116,91 +96,22 @@ fn add_locked(
     Ok(())
 }
 
-fn identity(document: &DocumentMut) -> Result<String, String> {
-    let id = document
-        .get("problem")
-        .and_then(|item| item.get("id"))
-        .and_then(Item::as_str)
-        .ok_or_else(|| "[problem] id must be a string".to_owned())?;
-    ProblemIdentity::parse(id).map_err(|error| error.to_string())?;
-    Ok(id.to_owned())
-}
-
-fn record_result<T, E: std::fmt::Display>(record: Record<T, E>) -> Result<T, String> {
-    match record {
-        Record::Valid(value) => Ok(value),
-        Record::Missing => Err("missing".into()),
-        Record::Unreadable(error) => Err(format!("unreadable: {error}")),
-        Record::Malformed(error) => Err(format!("malformed: {error}")),
-        Record::TooNew { schema, supported } => {
-            Err(format!("too_new: schema {schema}, supported {supported}"))
-        }
-    }
-}
-
 fn problem_exists(guard: &WorkspaceGuard<'_>, name: &Identifier) -> Result<bool, Error> {
-    let directory = guard.check_path("problems")?;
-    let listing = match fs::read_dir(&directory) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(StorageError::io(directory, error).into()),
-    };
-    let mut entries: Vec<ProblemEntry> = Vec::new();
-    for entry in listing {
-        let entry = entry.map_err(|error| StorageError::io(&directory, error))?;
-        let entry_name = entry.file_name();
-        if names::collides_with_native(name.as_str(), &entry_name) {
-            entries.push(ProblemEntry {
-                name: entry_name,
-                kind: EntryKind::Other,
-                metadata: ProblemMetadata::Missing,
-            });
-        }
-    }
-    let mut detail = String::new();
-    // Several entries and different spellings take precedence over record I/O.
-    if let [entry] = entries.as_mut_slice() {
-        if entry.name == std::ffi::OsStr::new(name.as_str()) {
-            let path = directory.join(&entry.name);
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|error| StorageError::io(&path, error))?;
-            entry.kind = if storage::is_link(&metadata) {
-                EntryKind::Link
-            } else if metadata.is_dir() {
-                EntryKind::Directory
-            } else {
-                EntryKind::Other
-            };
-            if entry.kind == EntryKind::Directory {
-                let record = storage::read_user_record(path.join("problem.toml"), 1, identity);
-                entry.metadata = match record {
-                    Record::Valid(identity) => ProblemMetadata::Valid { identity },
-                    other => {
-                        let classification = match &other {
-                            Record::Missing => ProblemMetadata::Missing,
-                            Record::Unreadable(_) => ProblemMetadata::Unreadable,
-                            Record::Malformed(_) => ProblemMetadata::Malformed,
-                            Record::TooNew { .. } => ProblemMetadata::TooNew,
-                            Record::Valid(_) => unreachable!(),
-                        };
-                        detail = format!(
-                            "; {}: {}",
-                            path.join("problem.toml").display(),
-                            record_result(other).unwrap_err()
-                        );
-                        classification
-                    }
-                };
-            }
-        }
-    }
-    match names::resolve_add(name, &entries) {
+    let (resolution, detail) = crate::selection::inspect_problem(guard.root(), name)?;
+    match resolution {
         Resolution::Create => Ok(false),
         Resolution::Exists => Ok(true),
         Resolution::NameCollision { reason, entries } => {
             let entries = entries
                 .iter()
-                .map(|entry| directory.join(entry).display().to_string())
+                .map(|entry| {
+                    guard
+                        .root()
+                        .join("problems")
+                        .join(entry)
+                        .display()
+                        .to_string()
+                })
                 .collect::<Vec<String>>()
                 .join(", ");
             Err(Error::Failure(format!(

@@ -244,7 +244,11 @@ impl Drop for WorkspaceGuard<'_> {
     }
 }
 
-fn checked_path(root: &Path, path: &Path, allow_final_link: bool) -> Result<PathBuf, StorageError> {
+pub(crate) fn checked_path(
+    root: &Path,
+    path: &Path,
+    allow_final_link: bool,
+) -> Result<PathBuf, StorageError> {
     let relative = if path.is_absolute() {
         path.strip_prefix(root)
             .map_err(|_| StorageError::new(ErrorKind::InvalidPath { path: path.into() }))?

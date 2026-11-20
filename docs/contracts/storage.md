@@ -578,7 +578,9 @@ schema version. Classified with the tool-only record classification (§9).
 **`cpf current`** prints the identity of the problem this invocation would
 use (the precedence above), followed by a newline, and nothing else;
 `cpf current --path` prints its absolute directory instead (native bytes on
-Unix, the platform's string form on Windows), followed by a newline. A path
+Unix, the platform's string form on Windows, where the verbatim `\\?\`
+prefix of a drive or UNC path is removed so shells can use it), followed by
+a newline. A path
 that contains a newline is printed as is; line-oriented consumers are the
 target. On failure stdout is empty, the diagnostic goes to stderr, and the
 exit code is 1 (`NoSelection` included) until the report transport assigns
