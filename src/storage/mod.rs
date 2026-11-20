@@ -8,8 +8,9 @@
 //! Unix mode only; ownership, ACLs, extended attributes and Windows attributes
 //! are inherited from the destination directory rather than preserved.
 
-mod crash;
+pub(crate) mod crash;
 mod edit;
+pub mod job_seq;
 mod lock;
 mod publish;
 mod record;
@@ -24,7 +25,10 @@ use std::path::PathBuf;
 pub use edit::{EditError, edit_toml, edit_toml_replay};
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
 pub use publish::{atomic_replace, publish_dir_noclobber, publish_file_noclobber};
-pub use record::{MalformedRecord, Record, classify_user_record, read_user_record};
+pub use record::{
+    MalformedRecord, Record, classify_tool_record, classify_user_record, read_tool_record,
+    read_user_record,
+};
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 
 #[derive(Debug)]
@@ -111,11 +115,39 @@ impl StorageError {
 
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "storage operation did not commit: {:?}", self.kind)?;
+        write!(f, "{}", self.kind)?;
         if let Cleanup::Pending(path) = &self.cleanup {
             write!(f, "; cleanup pending: {}", path.display())?;
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Exists { path } => write!(f, "{} already exists", path.display()),
+            Self::CrossFilesystem { source, target } => write!(
+                f,
+                "{} and {} are on different filesystems",
+                source.display(),
+                target.display()
+            ),
+            Self::Unsupported { op, filesystem } => {
+                write!(f, "{op} is not supported on this filesystem ({filesystem})")
+            }
+            Self::PathTooLong { path } => write!(f, "path too long: {}", path.display()),
+            Self::LinkInPath { path } => {
+                write!(f, "refusing a link or junction at {}", path.display())
+            }
+            Self::InvalidPath { path } => write!(f, "invalid path: {}", path.display()),
+            Self::InvalidName(error) => write!(f, "invalid name: {error}"),
+            Self::Busy { op } => {
+                write!(f, "workspace is busy (another cpf holds the lock for {op})")
+            }
+            Self::Conflict(conflict) => write!(f, "{conflict}"),
+        }
     }
 }
 
@@ -169,6 +201,9 @@ pub struct TestHooks {
     pub fail_pre_commit_sync: bool,
     pub fail_write_disk_full: bool,
     pub fail_publish_permission_denied: bool,
+    /// Simulate an independent creator after temp preparation, before a file
+    /// no-clobber publication attempts to commit.
+    pub before_file_publish: Option<fn(&std::path::Path)>,
     /// Simulate an editor after the baseline read, before parsing/checking it.
     pub edit_after_read: Option<fn(&std::path::Path)>,
     /// Simulate an editor after a failed native replacement attempt.

@@ -41,13 +41,17 @@ pub fn publish_file_noclobber(
 ) -> Result<Published, StorageError> {
     let target = destination(guard, target.as_ref())?;
     let temp = prepare_temp(guard, &target, bytes, false)?;
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(hook) = guard.test_hooks.before_file_publish {
+        hook(&target);
+    }
     super::crash::point("file_noclobber.before_publish");
     #[cfg(feature = "storage-test-hooks")]
     let result = if guard.test_hooks.fail_publish_permission_denied {
         Err(io::Error::from(io::ErrorKind::PermissionDenied))
     } else if guard.test_hooks.force_cross_filesystem {
         Err(io::Error::from_raw_os_error(cross_device_code()))
-    } else if guard.test_hooks.force_link_fallback {
+    } else if guard.test_hooks.force_link_fallback || crash_link_fallback() {
         Err(io::Error::from_raw_os_error(unsupported_code()))
     } else {
         exclusive_attempts(&temp, &target)
@@ -82,6 +86,18 @@ pub fn publish_file_noclobber(
     let published = finish(guard, &target, temp.parent().expect("temp parent"), cleanup);
     super::crash::point("file_noclobber.directory_synced");
     Ok(published)
+}
+
+#[cfg(feature = "storage-test-hooks")]
+fn crash_link_fallback() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        super::crash::force_link_fallback()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// Publish a fully staged tree without clobbering even an empty directory.

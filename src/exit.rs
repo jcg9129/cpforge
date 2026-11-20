@@ -1,10 +1,12 @@
-//! Stable process exit statuses.
+//! Process exit statuses. The failure status is provisional until report
+//! transport defines the full table.
 
 /// Exit statuses used by `cpf`.
 ///
 /// | Variant | Code | Meaning |
 /// | --- | --- | --- |
 /// | `Success` | 0 | Successful completion, including help and version |
+/// | `Failure` | 1 | The command failed or refused; nothing further was done (provisional) |
 /// | `Usage` | 2 | Invalid arguments or a missing command |
 /// | `Internal` | 70 | Bug or unexpected error |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,6 +14,8 @@
 #[repr(u8)]
 pub enum ExitCode {
     Success = 0,
+    /// Provisional until the report-transport task fixes the full exit table.
+    Failure = 1,
     Usage = 2,
     Internal = 70,
 }
@@ -29,6 +33,7 @@ mod tests {
     #[test]
     fn exit_code_values_are_stable() {
         assert_eq!(ExitCode::Success as u8, 0);
+        assert_eq!(ExitCode::Failure as u8, 1);
         assert_eq!(ExitCode::Usage as u8, 2);
         assert_eq!(ExitCode::Internal as u8, 70);
     }

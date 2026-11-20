@@ -1,4 +1,4 @@
-//! Schema-first classification of user-editable TOML records (§9).
+//! Schema-first classification of user-editable and tool-only TOML records (§9).
 
 use std::fs::OpenOptions;
 use std::io::{self, Read};
@@ -19,9 +19,25 @@ pub enum Record<T, E> {
 pub enum MalformedRecord<E> {
     Encoding(std::str::Utf8Error),
     Toml(toml_edit::TomlError),
+    SchemaMissing,
     SchemaMalformed,
     SchemaTooOld { schema: i64, supported: i64 },
     Fields(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for MalformedRecord<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encoding(error) => write!(f, "not UTF-8: {error}"),
+            Self::Toml(error) => write!(f, "not TOML: {}", error.message()),
+            Self::SchemaMissing => write!(f, "`schema` is missing"),
+            Self::SchemaMalformed => write!(f, "`schema` is not an integer"),
+            Self::SchemaTooOld { schema, supported } => {
+                write!(f, "schema {schema} is older than supported {supported}")
+            }
+            Self::Fields(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 /// Read bytes from a regular file (read-only paths may be links), then classify
@@ -31,6 +47,25 @@ pub fn read_user_record<T, E>(
     supported: i64,
     validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
 ) -> Record<T, E> {
+    read_record(path.as_ref(), |bytes| {
+        classify_user_record(bytes, supported, validate)
+    })
+}
+
+/// Read and classify a tool-only record, requiring an explicit schema.
+/// Check tool-owned paths through the workspace guard before calling this;
+/// like other read-only record access, this reader may follow links.
+pub fn read_tool_record<T, E>(
+    path: impl AsRef<Path>,
+    supported: i64,
+    validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
+) -> Record<T, E> {
+    read_record(path.as_ref(), |bytes| {
+        classify_tool_record(bytes, supported, validate)
+    })
+}
+
+fn read_record<T, E>(path: &Path, classify: impl FnOnce(&[u8]) -> Record<T, E>) -> Record<T, E> {
     let mut open = OpenOptions::new();
     open.read(true);
     #[cfg(unix)]
@@ -52,7 +87,7 @@ pub fn read_user_record<T, E>(
     if let Err(error) = file.read_to_end(&mut bytes) {
         return Record::Unreadable(error);
     }
-    classify_user_record(&bytes, supported, validate)
+    classify(&bytes)
 }
 
 /// Parse TOML, read `schema` alone (absent means 1), then decode/validate the
@@ -60,6 +95,25 @@ pub fn read_user_record<T, E>(
 pub fn classify_user_record<T, E>(
     bytes: &[u8],
     supported: i64,
+    validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
+) -> Record<T, E> {
+    classify_record(bytes, supported, false, validate)
+}
+
+/// Parse TOML and require `schema` before validating any tool-only fields.
+/// Newer schemas are classified without invoking the format validator.
+pub fn classify_tool_record<T, E>(
+    bytes: &[u8],
+    supported: i64,
+    validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
+) -> Record<T, E> {
+    classify_record(bytes, supported, true, validate)
+}
+
+fn classify_record<T, E>(
+    bytes: &[u8],
+    supported: i64,
+    schema_required: bool,
     validate: impl FnOnce(&DocumentMut) -> Result<T, E>,
 ) -> Record<T, E> {
     let text = match std::str::from_utf8(bytes) {
@@ -71,6 +125,7 @@ pub fn classify_user_record<T, E>(
         Err(error) => return Record::Malformed(MalformedRecord::Toml(error)),
     };
     let schema = match document.get("schema") {
+        None if schema_required => return Record::Malformed(MalformedRecord::SchemaMissing),
         None => 1,
         Some(item) => match item.as_integer() {
             Some(schema) => schema,

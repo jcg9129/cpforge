@@ -6,10 +6,11 @@ Fetch, generation-based publication and archives are planned for later
 versions; the initial implementation reaches tests only through the
 test-store interface (§8).
 
-**Managed-workspace amendment (v5): settled, not yet implemented.** The
+**Managed-workspace amendment (v5): settled, implementation in progress.** The
 single-workspace rows of `../design-workspace.md` §9 cover admission sequence,
 source capture, run facts, adopt / clean / fsck / gitignore transactions.
-Amended content is marked *(draft)* below; it is settled but not yet implemented.
+Amended content is marked *(draft)* below; init sequence bootstrap is implemented
+(C4c), while the remaining amended transactions are planned.
 References labelled *workspace design* point to `../design-workspace.md`.
 
 Related: design §4 and `execution.md`.
@@ -373,15 +374,22 @@ An editor saving an older buffer after the tool overwrites the tool's change.
 
 ### 5.1 `cpf init`
 
-Creates missing `.cpforge/`, `runs/`, `staging/` and the lock file (refusing
-links) even when `cpforge.toml` exists; then creates `cpforge.toml`
-no-clobber if missing. An existing `cpforge.toml` is never changed.
+Targets an existing directory (default: current directory); never creates the
+root. Creates missing `.cpforge/`, `.cpforge/runs/`, `.cpforge/staging/` and
+the lock file (refusing links) even when `cpforge.toml` exists; then creates
+`cpforge.toml` no-clobber if missing. An existing `cpforge.toml` is never changed.
 
-*(draft)* If `cpforge.toml` was **absent when this `init` started**, it creates
-`.cpforge/job-seq` (fresh random 128-bit epoch, `next = 0`) no-clobber
+If `cpforge.toml` was **absent when checked under the lock**, it creates
+`.cpforge/job-seq` (fresh random 128-bit epoch, `next = "0"`) no-clobber
 **before** publishing `cpforge.toml`; an existing `job-seq` (from an
-interrupted initial `init`) is kept. A rerun **on an existing workspace**
-never creates or repairs `job-seq`; recovery is only by `cpf fsck --apply`
+interrupted initial `init`) is classified under §9 and kept byte-for-byte
+only if valid. An unreadable, malformed or too-new sequence is reported by
+classification and path; init fails without changing it or publishing
+`cpforge.toml`. A no-clobber collision on `job-seq` is reclassified in the
+same way; a collision on `cpforge.toml` reports already initialised.
+If the sequence disappears before reclassification after a collision, init
+refuses rather than retrying a changing record. A rerun **on an existing
+workspace** never creates or repairs `job-seq`; recovery is only by `cpf fsck --apply`
 (§5.6). When the root is inside a git work tree, `init` mentions `cpf
 gitignore` and writes nothing else.
 
@@ -768,7 +776,8 @@ finalizes them (execution contract §6.2).
 | *(draft)* `job.toml` publish (3a) | job dir without `job.toml`: interrupted admission | job dir with sequence, lease not yet locked: interrupted, reclaimable |
 | *(draft)* fact replace (§6.5) | previous fact | new fact, even if the lease was never released |
 | *(draft)* fact publication with another epoch or unavailable `job-seq` | previous fact, `NotPublished` reported | — (no commit) |
-| *(draft)* `init` `job-seq` (§5.1) | no `job-seq`, no `cpforge.toml`: rerun is initial | `job-seq` without `cpforge.toml`: rerun keeps it |
+| `init` `job-seq` (§5.1) | no `job-seq`, no `cpforge.toml`: rerun is initial | `job-seq` without `cpforge.toml`: rerun keeps it |
+| `init` `cpforge.toml` (§5.1) | valid `job-seq`, no `cpforge.toml`: rerun keeps the sequence and publishes config | complete workspace; rerun keeps both files |
 | *(draft)* `fsck` new epoch | `job-seq` missing or malformed, admission refused | new epoch; jobs of old epochs publish no fact |
 | *(draft)* `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
 | *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
@@ -779,7 +788,8 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | Rows / transaction | Task coverage |
 |---|---|
 | atomic replace, shared-record edit, file and directory publication primitives; lock/recovery boundaries | C4b (covered by library helper subprocesses) |
-| init, add directory + membership, init job-seq | C4c |
+| init, init job-seq (including primitive publication and lock/recovery boundaries) | C4c (covered) |
+| add directory + membership | C4c (pending) |
 | test add | C6 |
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |

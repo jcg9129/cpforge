@@ -48,6 +48,11 @@ only, which does not establish supervisor runtime support there.
 
 ## CLI workspace milestone
 
+Implemented: `cpf init [<path>]` creates the workspace directories and
+initial admission sequence before publishing config, preserves existing
+records, and reports recovery/publication warnings. C4c covers init with
+real-binary crash and rerun fixtures at command and primitive boundaries.
+
 Planned:
 
 - Configuration schema, strict validation, layered provenance, platform
@@ -57,8 +62,9 @@ Planned:
   C4a covers storage primitive fixtures; C4b covers publication and edit
   commit points with real library helper subprocesses (storage contract §10).
   Each command task additionally kills the actual `cpf` binary at its commit
-  points (init/add in C4c, test add in C6, job/fact work in C10/C15).
-- `cpf init`, `cpf add`, current-problem selection and per-problem language;
+  points (init covered in C4c; add pending, test add in C6, job/fact work
+  in C10/C15).
+- `cpf add`, current-problem selection and per-problem language;
   test discovery and `cpf test add/ls/enable/disable` through the test-store
   interface. Missing and empty answers stay distinct.
 - Byte-precise comparators and bounded diagnostics per the
@@ -78,9 +84,9 @@ Planned:
 The [managed-workspace design](docs/design-workspace.md) adds source capture,
 admission sequences, run facts and fingerprints, `cpf status`, `cpf adopt`,
 `cpf ignore`, plan-first `cpf clean`, offered `.gitignore` updates and
-`cpf fsck`. Its storage and configuration amendments are **settled, not yet
-implemented**; their crash and conflict fixtures are part of the
-implementation work.
+`cpf fsck`. Its storage and configuration amendments are **settled**;
+init sequence bootstrap is implemented, with the remaining transactions and
+their crash and conflict fixtures still planned.
 
 ## Initial feature release
 

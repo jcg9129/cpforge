@@ -11,10 +11,21 @@
 //! before unlink); `dir_noclobber.staging_synced`, `dir_noclobber.renamed`,
 //! `dir_noclobber.directories_synced`; `edit_toml.validated` (immediately
 //! before each replacement attempt), `edit_toml.published`;
-//! `lock.acquired` (before recovery), `lock.recovered`.
+//! `lock.acquired` (before recovery), `lock.recovered`;
+//! `init.locked` (after lock acquisition and recovery),
+//! `init.job_seq_published` (after publishing a new initial job-seq),
+//! `init.config_published` (after publishing cpforge.toml).
+//! Selecting `file_noclobber.linked` also forces the Linux link fallback in
+//! test builds, so real command subprocesses can exercise that boundary.
+
+#[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+pub(super) fn force_link_fallback() -> bool {
+    std::env::var("CPF_STORAGE_CRASH_AT")
+        .is_ok_and(|selected| selected.split('#').next() == Some("file_noclobber.linked"))
+}
 
 #[inline]
-pub(super) fn point(name: &'static str) {
+pub(crate) fn point(name: &'static str) {
     #[cfg(feature = "storage-test-hooks")]
     {
         use std::collections::HashMap;
