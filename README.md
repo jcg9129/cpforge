@@ -69,6 +69,43 @@ implemented.
 - [Storage contract](docs/contracts/storage.md)
 - [Configuration and commands contract](docs/contracts/config.md)
 
+## Test catalogs
+
+For an existing selected problem, `cpf test ls` lists registered tests, then
+unregistered `*.in` candidates and stray `*.ans` files. It reads without a
+workspace lock or recovery and reports invalid catalogs and unhealthy files.
+The output is for people and is not a stable machine format. A named answer
+is shown as `present` with a separate health error if it cannot be used;
+`empty` requires a healthy zero-byte file, and `absent` means no answer was
+registered.
+
+`cpf test register tests/example.in` registers an existing input, using its
+sibling `example.ans` if present and reporting that choice on stderr. Use
+`--no-answer` to omit it, `--answer <file>` to choose one, or `--id <id>` when
+the stem is invalid or already taken. Relative paths are resolved lexically
+from the **current directory**, including when `--problem` selects a
+different problem; absolute paths are also accepted for the same lexical
+destination. There is no fallback to paths relative to that problem:
+from the workspace root, for example, use
+`cpf --problem A test register problems/A/tests/example.in`. Files can be
+links to regular data; registration never copies or changes them.
+
+`cpf test enable <id>` and `cpf test disable <id>` change registered entries
+by exact id spelling. Discovery does not register or run files. Bare
+`cpf test` reports that running tests is not yet available. `cpf test add`
+and freezing inputs are reserved for later tasks.
+
+Catalogs use ordered `[[test]]` tables; omit the tables for an empty catalog.
+Discovery recognizes the literal lowercase `.in` and `.ans` suffixes and
+pairs siblings by exact stem spelling; `register` infers a sibling the same
+way and records every path with its exact on-disk spelling, refusing a name
+that a case-insensitive filesystem would only match by case. A sibling already
+named by an entry is not offered with a candidate. Collision keys still exclude paths
+already reserved by either catalog role and determine candidate ordering
+(with exact spelling breaking ties). Invalid portable filenames are reported
+as diagnostics instead of offered for registration. These spelling choices
+make discovery deterministic even on filesystems that distinguish case.
+
 ## License
 
 Licensed under either the [MIT License](LICENSE-MIT) or the

@@ -10,6 +10,8 @@ pub mod names;
 pub mod selection;
 pub mod storage;
 pub mod supervisor;
+mod test_commands;
+pub mod tests_store;
 mod workspace;
 
 use clap::{CommandFactory, error::ErrorKind};
@@ -29,6 +31,9 @@ pub fn run(cli: Cli) -> Result<(), Error> {
         .into());
     }
     match cli.command {
+        Some(Command::Test { command }) => {
+            return test_commands::run(cli.problem.as_deref(), command);
+        }
         Some(Command::Current { path }) => return selection::current(cli.problem.as_deref(), path),
         Some(Command::Switch { reference }) => return selection::switch(&reference),
         Some(Command::Init { path }) => return workspace::init(&path),

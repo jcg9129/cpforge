@@ -23,6 +23,11 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Manage the selected problem's test catalog.
+    Test {
+        #[command(subcommand)]
+        command: Option<TestCommand>,
+    },
     /// Print the problem selected for this invocation.
     Current {
         /// Print the absolute problem directory instead of its identity.
@@ -54,6 +59,29 @@ pub enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TestCommand {
+    /// List registered tests, candidates and strays (human-readable, unstable format).
+    Ls,
+    /// Register existing files; paths are relative to the current directory.
+    Register {
+        input: PathBuf,
+        /// Reference answer; otherwise use a sibling .ans if it exists.
+        #[arg(long, conflicts_with = "no_answer")]
+        answer: Option<PathBuf>,
+        /// Deliberately register without a reference answer.
+        #[arg(long)]
+        no_answer: bool,
+        /// Stable test id (defaults to a valid, available input stem).
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Enable a registered test.
+    Enable { id: String },
+    /// Disable a registered test.
+    Disable { id: String },
 }
 
 /// Requested output color policy (stored for future commands).
