@@ -90,10 +90,25 @@ from the workspace root, for example, use
 `cpf --problem A test register problems/A/tests/example.in`. Files can be
 links to regular data; registration never copies or changes them.
 
+`cpf test add --input <file> [--answer <file>]` copies a new custom test and
+prints its id (`custom-1`, `custom-2`, ...). Omit `--answer` for no reference
+answer; an empty answer file is a present, empty answer. Either source may
+be `-` for stdin, but both cannot be stdin. Paths are relative to the current
+directory and may name streams, including FIFOs and links. Both sources are
+captured with bounded memory in private OS temporary files before locking;
+read errors publish nothing. Captures are removed on normal exit, including
+failure; a crash can leave them for OS cleanup.
+
+Published test files are never overwritten or deleted. A failure after input
+publication reports the committed paths, that they are not registered, and
+the failing step and cause. `cpf test ls` shows unregistered inputs as
+candidates; a retry may allocate the next number. A durability warning means
+the publication committed and the transaction continued.
+
 `cpf test enable <id>` and `cpf test disable <id>` change registered entries
 by exact id spelling. Discovery does not register or run files. Bare
-`cpf test` reports that running tests is not yet available. `cpf test add`
-and freezing inputs are reserved for later tasks.
+`cpf test` reports that running tests is not yet available. Freezing inputs
+is reserved for a later task.
 
 Catalogs use ordered `[[test]]` tables; omit the tables for an empty catalog.
 Discovery recognizes the literal lowercase `.in` and `.ans` suffixes and

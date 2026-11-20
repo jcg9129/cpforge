@@ -455,8 +455,10 @@ The problem is resolved per §5.7. The catalog is §8.1.
 **`cpf test add --input <file> [--answer <file>]`.** `-` reads one of the
 two from stdin (both from stdin is a usage error); omitting `--answer`
 registers a test without a reference answer. Bytes are copied exactly, never
-linked or converted; test data has no size cap and is streamed. Both
-sources are read first, **before** the lock is taken (a slow stdin never
+linked or converted; test data has no size cap and is streamed. Explicitly
+named sources may be non-regular files, including FIFOs: they are read as
+streams (unlike registered test data, which must resolve to regular files).
+Both sources are read first, **before** the lock is taken (a slow stdin never
 holds it), into private temporary files in the operating system's temporary
 directory, never in a workspace recovery location: §4.5 recovery assumes
 every workspace temporary was created under the lock and would remove one

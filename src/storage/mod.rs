@@ -26,7 +26,11 @@ use std::path::PathBuf;
 pub use edit::{EditError, edit_toml, edit_toml_replay};
 pub(crate) use lock::checked_path;
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
-pub use publish::{atomic_replace, publish_dir_noclobber, publish_file_noclobber};
+pub(crate) use publish::copy_stream;
+pub use publish::{
+    atomic_replace, publish_dir_noclobber, publish_file_noclobber,
+    publish_file_noclobber_from_reader,
+};
 pub use record::{
     MalformedRecord, Record, classify_tool_record, classify_user_record,
     classify_user_record_spanned, read_tool_record, read_user_record,

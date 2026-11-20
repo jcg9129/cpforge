@@ -1731,3 +1731,57 @@ fn disk_full_and_failed_temp_removal_are_recovered_before_rerun() {
             .committed
     );
 }
+
+#[test]
+fn streaming_publication_retries_interrupted_reads_and_never_commits_a_read_error() {
+    struct Source {
+        step: u8,
+        fail: bool,
+    }
+    impl Read for Source {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            assert!(buffer.len() <= 64 * 1024);
+            self.step += 1;
+            match self.step {
+                1 => Err(std::io::ErrorKind::Interrupted.into()),
+                2 => {
+                    buffer[..5].copy_from_slice(b"\0\r\n\xffx");
+                    Ok(5)
+                }
+                _ if self.fail => Err(std::io::Error::other("source read failed")),
+                _ => Ok(0),
+            }
+        }
+    }
+    let directory = Directory::new();
+    let lock = directory.lock();
+    let guard = lock.acquire("streaming publication").unwrap();
+    let published = cpforge::storage::publish_file_noclobber_from_reader(
+        &guard,
+        "complete",
+        &mut Source {
+            step: 0,
+            fail: false,
+        },
+    )
+    .unwrap();
+    assert!(published.committed);
+    assert_eq!(
+        fs::read(directory.path("complete")).unwrap(),
+        b"\0\r\n\xffx"
+    );
+    let error = cpforge::storage::publish_file_noclobber_from_reader(
+        &guard,
+        "incomplete",
+        &mut Source {
+            step: 0,
+            fail: true,
+        },
+    )
+    .unwrap_err();
+    assert!(!error.committed());
+    assert_eq!(error.cleanup, Cleanup::Done);
+    assert!(error.to_string().contains("source read failed"));
+    assert!(!directory.path("incomplete").exists());
+    assert_no_temps(&directory.0);
+}

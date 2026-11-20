@@ -5,7 +5,7 @@ mod storage_support;
 use std::fs;
 
 use cpforge::storage::{Record, WorkspaceLock};
-use cpforge::tests_store::{Answer, Health, RegisterRequest, TestStore};
+use cpforge::tests_store::{Answer, CapturedFile, Health, Origin, RegisterRequest, TestStore};
 use storage_support::{Directory, assert_no_temps};
 
 fn setup(directory: &Directory) -> TestStore {
@@ -97,6 +97,7 @@ fn a_guard_for_another_workspace_cannot_mutate_this_store() {
     let directory = Directory::new();
     let other = Directory::new();
     let store = setup(&directory);
+    let capture = CapturedFile::from_reader(&mut &b"input"[..]).unwrap();
     let lock = WorkspaceLock::new(&other.0).unwrap();
     let guard = lock.acquire("wrong workspace").unwrap();
     assert!(
@@ -105,6 +106,8 @@ fn a_guard_for_another_workspace_cannot_mutate_this_store() {
             .is_err()
     );
     assert!(store.set_enabled(&guard, "one", true).is_err());
+    assert!(store.add(&guard, &capture, None, Origin::Custom).is_err());
+    assert!(!directory.path("problems/A/tests/custom-1.in").exists());
     assert!(!directory.path("problems/A/tests.toml").exists());
     assert_no_temps(&directory.path("problems/A"));
 }
@@ -365,4 +368,360 @@ fn catalog_read_links_are_not_writable() {
         text.as_bytes()
     );
     assert_no_temps(&directory.path("problems/A"));
+}
+
+#[cfg(feature = "storage-test-hooks")]
+mod add_transactions {
+    use super::*;
+    use cpforge::storage::{LockOptions, TestHooks};
+    use cpforge::tests_store::AddStep;
+    use std::path::Path;
+
+    fn capture(mut bytes: &[u8]) -> CapturedFile {
+        CapturedFile::from_reader(&mut bytes).unwrap()
+    }
+
+    fn collide_answer_and_edit_input(path: &Path) {
+        if path.extension().and_then(|extension| extension.to_str()) == Some("ans") {
+            fs::write(path.with_extension("in"), b"editor's input\0\r\n").unwrap();
+            fs::write(path, b"other creator's answer\0\r\n").unwrap();
+        }
+    }
+
+    #[test]
+    fn answer_exists_keeps_edited_input_and_reports_only_committed_paths() {
+        let directory = Directory::new();
+        let store = setup(&directory);
+        let original = "# keep catalog\nschema = 1\n";
+        fs::write(directory.path("problems/A/tests.toml"), original).unwrap();
+        let input = capture(b"input\0\r\n");
+        let answer = capture(b"answer\0\r\n");
+        let lock = directory.lock();
+        let guard = lock
+            .acquire_with_options(
+                "answer collision",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        before_file_publish: Some(collide_answer_and_edit_input),
+                        post_commit_sync_failure: true,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let outcome = store
+            .add(&guard, &input, Some(&answer), Origin::Custom)
+            .unwrap();
+        assert!(!outcome.registered);
+        assert_eq!(outcome.id.as_str(), "custom-1");
+        assert_eq!(
+            outcome.published,
+            [std::path::PathBuf::from("tests/custom-1.in")]
+        );
+        let failure = outcome.failure.unwrap();
+        assert_eq!(failure.step, AddStep::AnswerPublication);
+        assert!(failure.cause.contains("already exists"), "{failure:?}");
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("durability uncertain"))
+        );
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests/custom-1.in")).unwrap(),
+            b"editor's input\0\r\n"
+        );
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests/custom-1.ans")).unwrap(),
+            b"other creator's answer\0\r\n"
+        );
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests.toml")).unwrap(),
+            original.as_bytes()
+        );
+        assert_eq!(
+            store.list().unwrap().candidates[0].input,
+            "tests/custom-1.in"
+        );
+        assert_no_temps(&directory.path("problems/A/tests"));
+    }
+
+    fn take_id(path: &Path) {
+        fs::write(path, entry("CUSTOM-1", "editor.in")).unwrap();
+    }
+
+    fn take_input(path: &Path) {
+        fs::write(path, entry("editor", "CUSTOM-1.IN")).unwrap();
+    }
+
+    fn take_answer(path: &Path) {
+        fs::write(path, entry("editor", "CUSTOM-1.ANS")).unwrap();
+    }
+
+    #[test]
+    fn add_replay_rechecks_id_and_both_paths_and_keeps_all_published_bytes() {
+        for hook in [take_id as fn(&Path), take_input, take_answer] {
+            let directory = Directory::new();
+            let store = setup(&directory);
+            fs::write(directory.path("problems/A/tests.toml"), "schema = 1\n").unwrap();
+            let input = capture(b"input\0\r\n");
+            let answer = capture(b"answer\0\r\n");
+            let lock = directory.lock();
+            let guard = lock
+                .acquire_with_options(
+                    "add insertion replay",
+                    LockOptions {
+                        test_hooks: TestHooks {
+                            edit_after_read: Some(hook),
+                            ..TestHooks::default()
+                        },
+                        ..LockOptions::default()
+                    },
+                )
+                .unwrap();
+            let outcome = store
+                .add(&guard, &input, Some(&answer), Origin::Custom)
+                .unwrap();
+            assert!(!outcome.registered);
+            assert_eq!(outcome.published.len(), 2);
+            let failure = outcome.failure.unwrap();
+            assert_eq!(failure.step, AddStep::Registration);
+            assert!(failure.cause.contains("conflict"), "{failure:?}");
+            let expected = directory.path("expected.toml");
+            hook(&expected);
+            assert_eq!(
+                fs::read(directory.path("problems/A/tests.toml")).unwrap(),
+                fs::read(expected).unwrap()
+            );
+            assert_eq!(
+                fs::read(directory.path("problems/A/tests/custom-1.in")).unwrap(),
+                b"input\0\r\n"
+            );
+            assert_eq!(
+                fs::read(directory.path("problems/A/tests/custom-1.ans")).unwrap(),
+                b"answer\0\r\n"
+            );
+            assert_no_temps(&directory.path("problems/A"));
+            assert_no_temps(&directory.path("problems/A/tests"));
+        }
+    }
+
+    fn edit_input(path: &Path) {
+        fs::write(
+            path.parent().unwrap().join("tests/custom-1.in"),
+            b"editor's new bytes\0\r\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn user_edits_between_publication_and_registration_are_registered_as_is() {
+        let directory = Directory::new();
+        let store = setup(&directory);
+        let input = capture(b"captured input");
+        let lock = directory.lock();
+        let guard = lock
+            .acquire_with_options(
+                "edit published data",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        edit_after_read: Some(edit_input),
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(outcome.registered && outcome.failure.is_none());
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests/custom-1.in")).unwrap(),
+            b"editor's new bytes\0\r\n"
+        );
+        assert_eq!(store.list().unwrap().registered.len(), 1);
+    }
+
+    #[test]
+    fn uncertain_publication_and_pending_cleanup_continue_through_registration() {
+        for pending in [false, true] {
+            let directory = Directory::new();
+            let store = setup(&directory);
+            if pending {
+                // A pending link to a newly bootstrapped catalog would make it
+                // multiply linked, which the edit primitive correctly refuses.
+                fs::write(directory.path("problems/A/tests.toml"), "schema = 1\n").unwrap();
+            }
+            let input = capture(b"input");
+            let answer = capture(b"answer");
+            let lock = directory.lock();
+            let guard = lock
+                .acquire_with_options(
+                    "publication warnings",
+                    LockOptions {
+                        test_hooks: TestHooks {
+                            post_commit_sync_failure: true,
+                            force_link_fallback: pending && cfg!(target_os = "linux"),
+                            fail_unlink: pending,
+                            ..TestHooks::default()
+                        },
+                        ..LockOptions::default()
+                    },
+                )
+                .unwrap();
+            let outcome = store
+                .add(&guard, &input, Some(&answer), Origin::Custom)
+                .unwrap();
+            assert!(outcome.registered && outcome.failure.is_none());
+            assert_eq!(outcome.published.len(), 2);
+            assert_eq!(
+                outcome
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.contains("durability uncertain"))
+                    .count(),
+                if pending { 3 } else { 4 }
+            );
+            if pending && cfg!(target_os = "linux") {
+                assert_eq!(
+                    outcome
+                        .warnings
+                        .iter()
+                        .filter(|warning| warning.contains("cleanup pending"))
+                        .count(),
+                    2
+                );
+            }
+            drop(guard);
+            let _guard = lock.acquire("recover link temporaries").unwrap();
+            assert_no_temps(&directory.path("problems/A"));
+            assert_no_temps(&directory.path("problems/A/tests"));
+            assert_eq!(store.list().unwrap().registered.len(), 1);
+        }
+    }
+
+    #[test]
+    fn failed_first_publication_reports_no_paths_and_cleanup_warning() {
+        let directory = Directory::new();
+        let store = setup(&directory);
+        let input = capture(b"input");
+        let lock = directory.lock();
+        let guard = lock
+            .acquire_with_options(
+                "input failure",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        fail_write_disk_full: true,
+                        fail_unlink: true,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(outcome.published.is_empty() && !outcome.registered);
+        assert_eq!(outcome.failure.unwrap().step, AddStep::InputPublication);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cleanup pending"))
+        );
+        assert!(!directory.path("problems/A/tests/custom-1.in").exists());
+        assert!(!directory.path("problems/A/tests.toml").exists());
+        drop(guard);
+        let guard = lock.acquire("retry after input failure").unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(outcome.registered && outcome.failure.is_none());
+        assert_eq!(outcome.id.as_str(), "custom-1");
+        assert_no_temps(&directory.path("problems/A/tests"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pending_catalog_link_is_reported_as_partial_then_recovered_before_rerun() {
+        let directory = Directory::new();
+        let store = setup(&directory);
+        let input = capture(b"input");
+        let lock = directory.lock();
+        let guard = lock
+            .acquire_with_options(
+                "catalog pending link",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        force_link_fallback: true,
+                        fail_unlink: true,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(!outcome.registered);
+        let failure = outcome.failure.unwrap();
+        assert_eq!(failure.step, AddStep::Registration);
+        assert!(failure.cause.contains("one link"), "{failure:?}");
+        assert_eq!(outcome.published.len(), 1);
+        assert_eq!(
+            outcome
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("cleanup pending"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests.toml")).unwrap(),
+            b"schema = 1\n"
+        );
+        drop(guard);
+        let guard = lock.acquire("recover catalog pending link").unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(outcome.registered && outcome.failure.is_none());
+        assert_eq!(outcome.id.as_str(), "custom-2");
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests/custom-1.in")).unwrap(),
+            b"input"
+        );
+        assert_eq!(store.list().unwrap().candidates.len(), 1);
+        assert_no_temps(&directory.path("problems/A"));
+        assert_no_temps(&directory.path("problems/A/tests"));
+    }
+
+    #[test]
+    fn edit_failure_retains_first_attempt_cleanup_warning_on_replay_conflict() {
+        let directory = Directory::new();
+        let store = setup(&directory);
+        fs::write(directory.path("problems/A/tests.toml"), "schema = 1\n").unwrap();
+        let input = capture(b"input");
+        let lock = directory.lock();
+        let guard = lock
+            .acquire_with_options(
+                "edit cleanup warnings",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        edit_after_read: Some(take_id),
+                        fail_unlink: true,
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let outcome = store.add(&guard, &input, None, Origin::Custom).unwrap();
+        assert!(!outcome.registered);
+        assert_eq!(outcome.failure.unwrap().step, AddStep::Registration);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("cleanup pending"))
+        );
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests/custom-1.in")).unwrap(),
+            b"input"
+        );
+    }
 }

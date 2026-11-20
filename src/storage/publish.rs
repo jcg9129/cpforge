@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -12,11 +12,11 @@ use super::{
 pub fn atomic_replace(
     guard: &WorkspaceGuard<'_>,
     target: impl AsRef<Path>,
-    bytes: &[u8],
+    mut bytes: &[u8],
     mut validate: impl FnMut() -> Result<(), Conflict>,
 ) -> Result<Published, StorageError> {
     let target = destination(guard, target.as_ref())?;
-    let temp = prepare_temp(guard, &target, bytes, true)?;
+    let temp = prepare_temp(guard, &target, &mut bytes, true)?;
     super::crash::point("atomic_replace.temp_synced");
     let result = replace_attempts(guard, &temp, &target, &mut validate);
     if let Err(error) = result {
@@ -37,10 +37,20 @@ pub fn atomic_replace(
 pub fn publish_file_noclobber(
     guard: &WorkspaceGuard<'_>,
     target: impl AsRef<Path>,
-    bytes: &[u8],
+    mut bytes: &[u8],
+) -> Result<Published, StorageError> {
+    publish_file_noclobber_from_reader(guard, target, &mut bytes)
+}
+
+/// Streaming form of [`publish_file_noclobber`], with the same commit, cleanup
+/// and durability semantics. Read failures occur before the publication attempt.
+pub fn publish_file_noclobber_from_reader(
+    guard: &WorkspaceGuard<'_>,
+    target: impl AsRef<Path>,
+    reader: &mut impl Read,
 ) -> Result<Published, StorageError> {
     let target = destination(guard, target.as_ref())?;
-    let temp = prepare_temp(guard, &target, bytes, false)?;
+    let temp = prepare_temp(guard, &target, reader, false)?;
     #[cfg(feature = "storage-test-hooks")]
     if let Some(hook) = guard.test_hooks.before_file_publish {
         hook(&target);
@@ -203,7 +213,7 @@ fn destination(guard: &WorkspaceGuard<'_>, target: &Path) -> Result<PathBuf, Sto
 fn prepare_temp(
     guard: &WorkspaceGuard<'_>,
     target: &Path,
-    bytes: &[u8],
+    reader: &mut impl Read,
     copy_mode: bool,
 ) -> Result<PathBuf, StorageError> {
     let parent = target.parent().expect("destination parent");
@@ -274,8 +284,7 @@ fn prepare_temp(
             file.set_permissions(permissions.clone())
                 .map_err(|e| StorageError::io(&temp, e))?;
         }
-        file.write_all(bytes)
-            .map_err(|e| StorageError::io(&temp, e))?;
+        copy_stream(reader, &mut file).map_err(|e| StorageError::io(&temp, e))?;
         #[cfg(unix)]
         if let Some(permissions) = permissions {
             // Writing can clear special mode bits; restore them before syncing.
@@ -294,6 +303,21 @@ fn prepare_temp(
         return Err(clean_file(guard, error, &temp));
     }
     Ok(temp)
+}
+
+/// Copy exact bytes with fixed memory, including for explicitly named streams.
+pub(crate) fn copy_stream(reader: &mut impl Read, writer: &mut impl Write) -> io::Result<()> {
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let length = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if length == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buffer[..length])?;
+    }
 }
 
 // All Windows publication calls share the same monotonic two-second policy.

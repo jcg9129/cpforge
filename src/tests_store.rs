@@ -1,10 +1,11 @@
 //! User-editable test catalogs and read-only discovery.
 //!
-//! Mutations borrow the outer operation's guard. C6b can add `add(guard,
-//! input: &CapturedFile, answer: Option<&CapturedFile>, origin: Origin)` here:
-//! captures must be streamed from pre-lock private files, then publication can
-//! reuse `ensure_catalog` and `insert_entry` without republishing on replay.
+//! Mutations borrow the outer operation's guard. `add` publishes pre-lock
+//! captures, then replays only its catalog insertion, never its file publication.
 //! C10a will add `freeze_into(ids, job: &JobInputs)` once admission exists.
+
+mod capture;
+pub use capture::CapturedFile;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -421,6 +422,43 @@ fn mutation<T>(
     }
 }
 
+/// Steps after allocation; failures never roll back a published user file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddStep {
+    InputPublication,
+    AnswerPublication,
+    Registration,
+}
+
+impl fmt::Display for AddStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InputPublication => "step 2 (input publication)",
+            Self::AnswerPublication => "step 2 (answer publication)",
+            Self::Registration => "step 3 (registration)",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct AddFailure {
+    pub step: AddStep,
+    pub cause: String,
+}
+
+/// Once a number is allocated, even a failure returns this outcome. `published`
+/// lists only committed data paths, relative to the problem. A schema-only
+/// catalog creation does not count as registration. Earlier refusal/allocation
+/// errors return `StoreError` and have published no data.
+#[derive(Debug)]
+pub struct AddOutcome {
+    pub id: Identifier,
+    pub published: Vec<PathBuf>,
+    pub registered: bool,
+    pub failure: Option<AddFailure>,
+    pub warnings: Vec<String>,
+}
+
 impl TestStore {
     /// `problem_dir` is the canonical absolute directory from the shared resolver.
     pub fn new(problem_dir: PathBuf) -> Self {
@@ -565,7 +603,7 @@ impl TestStore {
         }
     }
 
-    /// Shared no-clobber bootstrap for register and C6b's publication transaction.
+    /// Shared no-clobber bootstrap for register and add.
     fn ensure_catalog(
         &self,
         guard: &WorkspaceGuard<'_>,
@@ -578,13 +616,164 @@ impl TestStore {
                 Err(error) if matches!(error.kind, ErrorKind::Exists { .. }) => {
                     cleanup_warning(report, &error.cleanup)
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    cleanup_warning(report, &error.cleanup);
+                    return Err(error.to_string());
+                }
             }
         }
         // A no-clobber collision is classified afresh, never overwritten.
         record_result(read_catalog(&path))
             .map_err(|reason| format!("{} is {reason}", path.display()))?;
         Ok(path)
+    }
+
+    /// Publish captures made before acquiring `guard`. Recovery belongs to the
+    /// outer lock acquisition, never to this nested operation.
+    pub fn add(
+        &self,
+        guard: &WorkspaceGuard<'_>,
+        input: &CapturedFile,
+        answer: Option<&CapturedFile>,
+        origin: Origin,
+    ) -> Result<AddOutcome, StoreError> {
+        storage::crash::point("test_add.locked");
+        let allocated = mutation(|_| {
+            let catalog = self.mutable_catalog(guard)?;
+            self.allocate(guard, &catalog, answer.is_some(), origin)
+        })
+        .map_err(|mut error| {
+            error.message = format!("step 1 (catalog and allocation) failed: {}", error.message);
+            error
+        })?;
+        let entry = allocated.value;
+        let mut outcome = AddOutcome {
+            id: entry.id.clone(),
+            published: Vec::new(),
+            registered: false,
+            failure: None,
+            warnings: Vec::new(),
+        };
+        let mut report = Report::default();
+        let mut step = AddStep::InputPublication;
+        let result = (|| {
+            guard
+                .create_dir_all(self.directory.join("tests"))
+                .map_err(|error| error.to_string())?;
+            for (path, capture, phase) in
+                std::iter::once((entry.input.as_str(), input, "test_add.input_published")).chain(
+                    match (&entry.answer, answer) {
+                        (Answer::Named(path), Some(capture)) => {
+                            Some((path.as_str(), capture, "test_add.answer_published"))
+                        }
+                        _ => None,
+                    },
+                )
+            {
+                if phase == "test_add.answer_published" {
+                    step = AddStep::AnswerPublication;
+                }
+                let mut reader = capture.reader().map_err(|error| error.to_string())?;
+                let published = storage::publish_file_noclobber_from_reader(
+                    guard,
+                    self.directory.join(path),
+                    &mut reader,
+                )
+                .map_err(|error| {
+                    cleanup_warning(&mut report, &error.cleanup);
+                    error.to_string()
+                })?;
+                outcome.published.push(path.into());
+                publication_warnings(&mut report, &self.directory.join(path), &published);
+                storage::crash::point(phase);
+            }
+            step = AddStep::Registration;
+            let path = self.ensure_catalog(guard, &mut report)?;
+            let published = storage::edit_toml_replay(
+                guard,
+                &path,
+                |document| check_catalog(document, &path),
+                |document| insert_entry(document, &path, &entry),
+            )
+            .map_err(|error| {
+                edit_cleanup_warnings(&mut report, &error);
+                format!("{}: {error}", path.display())
+            })?;
+            outcome.registered = published.committed;
+            publication_warnings(&mut report, &path, &published);
+            storage::crash::point("test_add.registered");
+            Ok::<(), String>(())
+        })();
+        if let Err(cause) = result {
+            outcome.failure = Some(AddFailure { step, cause });
+        }
+        outcome.warnings = report.warnings;
+        Ok(outcome)
+    }
+
+    fn allocate(
+        &self,
+        guard: &WorkspaceGuard<'_>,
+        catalog: &Catalog,
+        with_answer: bool,
+        origin: Origin,
+    ) -> Result<TestEntry, String> {
+        let directory = guard
+            .check_path(self.directory.join("tests"))
+            .map_err(|error| error.to_string())?;
+        let mut occupied = BTreeSet::new();
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|error| error.to_string())?;
+                    if let Some(name) = entry.file_name().to_str() {
+                        occupied.insert(collision_key(name));
+                    }
+                    // Generated ASCII names have no non-Unicode native spelling.
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", directory.display())),
+        }
+        let ids: BTreeSet<_> = catalog
+            .entries
+            .iter()
+            .map(|entry| collision_key(entry.id.as_str()))
+            .collect();
+        let paths: BTreeSet<_> = catalog
+            .entries
+            .iter()
+            .flat_map(TestEntry::paths)
+            .map(collision_key)
+            .collect();
+        for n in 1..=u64::MAX {
+            let id = format!("custom-{n}");
+            let input = format!("tests/{id}.in");
+            let answer = format!("tests/{id}.ans");
+            if ids.contains(&collision_key(&id))
+                || [&input, &answer].iter().any(|path| {
+                    paths.contains(&collision_key(path))
+                        || occupied.contains(&collision_key(
+                            path.strip_prefix("tests/").expect("generated path"),
+                        ))
+                })
+            {
+                continue;
+            }
+            return Ok(TestEntry {
+                id: Identifier::new(id).expect("generated identifier"),
+                input,
+                answer: if with_answer {
+                    Answer::Named(answer)
+                } else {
+                    Answer::Absent
+                },
+                origin,
+                enabled: true,
+                origin_location: location(&self.catalog_path(), String::new(), None, None),
+            });
+        }
+        Err("custom test number space exhausted".into())
     }
 
     pub fn register(
@@ -745,6 +934,25 @@ impl TestStore {
     }
 }
 
+fn edit_cleanup_warnings(report: &mut Report, error: &storage::EditError<String>) {
+    match error {
+        storage::EditError::Storage(error) => cleanup_warning(report, &error.cleanup),
+        storage::EditError::Conflict {
+            cleanup,
+            previous_cleanup,
+            ..
+        } => {
+            cleanup_warning(report, cleanup);
+            cleanup_warning(report, previous_cleanup);
+        }
+        storage::EditError::Replay { error, cleanup } => {
+            cleanup_warning(report, cleanup);
+            edit_cleanup_warnings(report, error);
+        }
+        _ => {}
+    }
+}
+
 fn lexical_absolute(cwd: &Path, path: &Path) -> Result<PathBuf, String> {
     if !cwd.is_absolute() {
         return Err("current directory must be absolute".into());
@@ -842,7 +1050,7 @@ fn available(catalog: &Catalog, entry: &TestEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Semantic insertion shared with C6b: availability is checked against this
+/// Semantic insertion shared by add and register: checked against this
 /// attempt's fresh document, including paths reserved by missing files.
 fn insert_entry(document: &mut DocumentMut, path: &Path, entry: &TestEntry) -> Result<(), String> {
     let catalog = fields(document.as_table(), path, None).map_err(|error| error.to_string())?;

@@ -63,6 +63,15 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum TestCommand {
+    /// Copy a new custom test; paths (including FIFOs) are read as streams.
+    Add {
+        /// Input path, or - for stdin (captured before locking).
+        #[arg(long)]
+        input: PathBuf,
+        /// Answer path, or - for stdin; omit for no reference answer.
+        #[arg(long)]
+        answer: Option<PathBuf>,
+    },
     /// List registered tests, candidates and strays (human-readable, unstable format).
     Ls,
     /// Register existing files; paths are relative to the current directory.

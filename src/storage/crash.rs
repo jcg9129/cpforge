@@ -19,6 +19,8 @@
 //! `add.published` (complete problem directory), `add.contest_created`
 //! (schema-only contest file published), `add.member_added` (membership edit
 //! completed, including an unchanged existing membership).
+//! `test_add.locked` (after recovery), `test_add.input_published`,
+//! `test_add.answer_published`, `test_add.registered` (catalog insertion).
 //! Selecting `file_noclobber.linked` also forces the Linux link fallback in
 //! test builds, so real command subprocesses can exercise that boundary.
 
