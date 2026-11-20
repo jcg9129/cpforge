@@ -1,0 +1,27 @@
+[languages.cpp]
+extensions = ["cpp", "cc", "cxx"]
+sources = ["main.cpp"]
+artifacts = { file = "main" }
+[languages.cpp.build]
+argv = ["g++", "-std=gnu++23", "-O2", "-Wall", "{sources}", "-o", "{artifact}"]
+[languages.cpp.run]
+argv = ["{artifact}"]
+
+[languages.python]
+extensions = ["py"]
+sources = ["main.py"]
+build = false
+[languages.python.run]
+argv = ["python3", "{source}"]
+[languages.python.run.windows]
+argv = ["python", "{source}"]
+
+[languages.java]
+extensions = ["java"]
+sources = ["Main.java"]
+entry = "Main"
+artifacts = { dir = true }
+[languages.java.build]
+argv = ["javac", "-d", "{artifact_dir}", "{sources}"]
+[languages.java.run]
+argv = ["java", "-cp", "{artifact_dir}", "{entry}"]

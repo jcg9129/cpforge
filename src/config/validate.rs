@@ -207,7 +207,7 @@ impl<'a> Validator<'a> {
                     | "workspace" | "hooks"
                         if problem =>
                     {
-                        self.error(n, "key is not allowed in the problem config layer")
+                        self.reject(n, "key is not allowed in the problem config layer")
                     }
                     _ => self.unknown(n),
                 }
@@ -268,7 +268,7 @@ impl<'a> Validator<'a> {
                 "needs_build" | "for_each_test" | "keep_going" if command => self.boolean(n),
                 "repeat" if command => self.integer(n, 1, 1000),
                 "stdin" if command => self.choice(n, &["null", "test"]),
-                "stdin" => self.error(n, "stdin is allowed only in commands"),
+                "stdin" => self.reject(n, "stdin is allowed only in commands"),
                 _ => self.unknown(n),
             },
             Context::Shell => match key {
@@ -337,7 +337,7 @@ impl<'a> Validator<'a> {
                 }
                 "enabled" | "trusted_workspaces" => {
                     if self.kind != LayerKind::DefaultUser {
-                        self.error(
+                        self.reject(
                             n,
                             "key is allowed only in the default user configuration file",
                         );
@@ -354,7 +354,13 @@ impl<'a> Validator<'a> {
     }
 
     fn unknown(&mut self, n: &mut RawNode) {
-        self.error(n, "unknown configuration key");
+        self.reject(n, "unknown configuration key");
+    }
+    /// The key itself is not accepted where it was written; composition never
+    /// uses its value.
+    fn reject(&mut self, n: &mut RawNode, message: &str) {
+        n.rejected = true;
+        self.error(n, message);
     }
     fn string(&mut self, n: &mut RawNode) -> Option<String> {
         if let Some(s) = n.string() {

@@ -144,6 +144,13 @@ are unknown keys in this version.
   `languages.cpp.unix` and `languages.cpp.<os>` merged over that result. So
   `languages.cpp.windows.run.argv` beats `languages.cpp.run.windows.argv`
   in the same layer.
+- **Overlay-only tables.** A table that holds only overlay keys contributes
+  nothing on a platform where none of its overlays is active: it behaves as
+  if absent, exactly like the `languages.<l>.<os>.build` spelling. So
+  `[languages.python.build.windows]` leaves Python build-free on Linux and
+  `[commands.x.windows]` defines no command `x` there. An explicitly written
+  empty table (`build = {}`, or a `[languages.python.build]` header with no
+  keys) is present.
 
 ### 2.1 Merge per precedence row
 

@@ -1,22 +1,56 @@
-//! Raw, independent configuration layers. No merging or tool probing happens here.
+//! Configuration loading and composition, without target resolution or tool probing.
 //!
-//! A table's membership is its explicit field presence. Generic tables and overlay
+//! In raw layers, table membership is explicit field presence. Generic tables and overlay
 //! sub-tables remain separate; consumers must carry `invalid` markers even when
 //! replacing values. `LayerState::Invalid` is a layer-wide unknown-input marker.
 //!
 //! `discover` accepts an injected environment/platform and an already discovered
-//! workspace root; `load` and `parse` return independent `RawLayer`s. For C1b,
-//! table membership records explicit presence, `RawValue` retains input values,
+//! workspace root; `load` and `parse` return independent `RawLayer`s.
+//! Table membership records explicit presence, `RawValue` retains input values,
 //! and `TypedValue` holds parsed quantities, paths, templates and comparators.
 //! Path normalization is performed only for generic and active overlay values;
 //! inactive branches retain their raw paths and structurally validated tokens.
 //! No completeness, reference or cross-layer checks are performed here.
+//!
+//! Composition: `built_in(platform)` exposes layer 0; `compose(&layers,
+//! platform)` includes it automatically, resolves each layer's nested overlays
+//! inner-first, and merges in layer order. Parse files for that same platform:
+//! inactive paths deliberately have no platform-specific interpretation.
+//! `MergedConfig::language`, `Language::profile`, global stages and `problem`
+//! keep precedence rows separate. Stage defaults and composition across rows
+//! belong to the consumer, including Java's derived required artifacts; rows
+//! are composed with `EffectiveNode::merge_from`, which applies the same §2
+//! rules (`ResetMode::Discard` within the build-existence rows 3 and 4,
+//! `ResetMode::Preserve` for the modifier rows), and values from outside the
+//! files (CLI flags, row-1 defaults, derived values) are built with
+//! `EffectiveNode::new`.
+//!
+//! Semantic accessors return `EffectiveNode`s so invalid and partial input
+//! remains inspectable. A node exists only where a source supplied it: `get`
+//! and `at` returning `None` means absent, and a table holding only overlays
+//! that are inactive on the platform is absent like the `<site>.<os>.<key>`
+//! spelling, while an explicitly empty table is present. Keys that phase 1
+//! rejected (unknown or misplaced) supply no value. Every node carries
+//! `provenance`, the supplying `overlay`, parsed `typed` data, `events` and
+//! the `markers` that apply to it. `reset_occurred` survives a later build
+//! table. Environment `false` values remain tombstones, not absent keys.
+//! `MergedConfig::history` also retains events for removed keys; paths are
+//! vectors of literal key segments; array indices are decimal segments.
+//! Windows environment maps and paths use the ASCII-lowercase name, while each
+//! node's `name` keeps the spelling of the source that set it
+//! (`Stage::env_entries`). `MergedConfig::markers` holds every marker; markers
+//! from inactive or forbidden branches (`applies == false`) are attached to no
+//! node, and a rejected key's marker only to its containers. `unknown_inputs`
+//! names each unreadable layer. Consumers must consult markers and unknown
+//! inputs before dependent checks.
 //!
 //! Non-float selectors are written `{ exact = true }`, `{ tokens = true }` or
 //! `{ lines = true }` (compare spec §5.1).
 //! Configuration names follow the configuration contract's letter-first rule,
 //! rather than the broader filesystem `Identifier` policy in `crate::names`.
 
+mod built_in;
+mod compose;
 mod load;
 mod syntax;
 mod validate;
@@ -26,6 +60,12 @@ use std::fmt;
 use std::ops::Range;
 use std::path::PathBuf;
 
+pub use built_in::built_in;
+pub use compose::{
+    CommandChoice, EffectiveNode, EffectiveValue, EventKind, Hooks, InvalidMarker, Language,
+    MergedConfig, NodeKind, Problem, Profile, Provenance, ProvenanceEvent, ResetMode, Retention,
+    Stage, UnknownInput, ValueSnapshot, compose,
+};
 pub use load::{DiscoveryError, DiscoveryOptions, Environment, LayerSource, discover, load, parse};
 pub use syntax::{Placeholder, Token, tokenize};
 
@@ -66,6 +106,7 @@ impl Platform {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerKind {
+    BuiltIn,
     DefaultUser,
     OverrideUser,
     Workspace,
@@ -157,6 +198,10 @@ pub struct RawNode {
     /// for a nested or misplaced one (already reported; never compose it).
     /// `None` for ordinary keys, e.g. a command or env name `linux`.
     pub overlay: Option<OverlayRole>,
+    /// Phase 1 rejected the key itself (unknown, or not allowed in this layer
+    /// or table). Its diagnostic and marker remain; it supplies no effective
+    /// value.
+    pub rejected: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,3 +306,6 @@ pub enum Combine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod compose_tests;

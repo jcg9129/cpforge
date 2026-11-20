@@ -315,6 +315,7 @@ fn table(t: &dyn TableLike, at: Origin, text: &str) -> RawNode {
         invalid: false,
         typed: None,
         overlay: None,
+        rejected: false,
     }
 }
 
@@ -342,6 +343,7 @@ fn node(item: &Item, at: Origin, text: &str) -> RawNode {
             invalid: false,
             typed: None,
             overlay: None,
+            rejected: false,
         };
     }
     match item.as_value() {
@@ -380,5 +382,6 @@ fn value(v: &Value, at: Origin, text: &str) -> RawNode {
         invalid: false,
         typed: None,
         overlay: None,
+        rejected: false,
     }
 }

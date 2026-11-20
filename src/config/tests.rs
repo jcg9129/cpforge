@@ -202,11 +202,27 @@ fn names_placement_and_nested_types() {
             &env(),
             Platform::Linux,
         );
-        assert_eq!(
-            layer.diagnostics.len(),
-            if kind == LayerKind::Problem { 1 } else { 2 }
-        );
-        assert!(layer.diagnostics.iter().all(|d| d.origin.line.is_some()));
+        let expected = if kind == LayerKind::Problem {
+            vec![(
+                "config.hooks",
+                Some(4),
+                "key is not allowed in the problem config layer",
+            )]
+        } else {
+            vec![
+                (
+                    "hooks.enabled",
+                    Some(2),
+                    "key is allowed only in the default user configuration file",
+                ),
+                (
+                    "hooks.trusted_workspaces",
+                    Some(3),
+                    "key is allowed only in the default user configuration file",
+                ),
+            ]
+        };
+        assert_eq!(errors(&layer), expected, "{kind:?}");
     }
     valid(&parse(
         b"[hooks]\nenabled = false\ntrusted_workspaces = ['/x']",
@@ -321,14 +337,40 @@ fn raw_choices_overlays_and_presence_are_preserved() {
         at(&layer, &["languages", "cpp", "build"]).value,
         RawValue::Boolean(false)
     );
-    for text in [
-        "build = false",
-        "[run]\nenv = false",
-        "[run]\nlimits = false",
-        "[run]\nenv = { X = true }",
+    for (text, key, line, message) in [
+        ("build = false", "build", 1, "expected a table"),
+        ("[run]\nenv = false", "run.env", 2, "expected a table"),
+        ("[run]\nlimits = false", "run.limits", 2, "expected a table"),
+        (
+            "[run]\nenv = { X = true }",
+            "run.env.X",
+            2,
+            "environment value must be a string or false",
+        ),
+        (
+            "[languages.cpp.profiles.p]\nrun = false",
+            "languages.cpp.profiles.p.run",
+            2,
+            "expected a table",
+        ),
+        ("[run]\ncwd = false", "run.cwd", 2, "expected a table"),
     ] {
-        assert_eq!(raw(text, Platform::Linux).diagnostics.len(), 1, "{text}");
+        assert_eq!(
+            errors(&raw(text, Platform::Linux)),
+            vec![(key, Some(line), message)],
+            "{text}"
+        );
     }
+    let problem = parse(
+        b"[problem]\nid = 'local:p'\n[config]\nbuild = false",
+        &source(LayerKind::Problem, Platform::Linux),
+        &env(),
+        Platform::Linux,
+    );
+    assert_eq!(
+        errors(&problem),
+        vec![("config.build", Some(4), "expected a table")]
+    );
 }
 
 #[test]
@@ -532,8 +574,12 @@ fn typed_paths_and_source_rules_on_each_platform() {
                 serde_json::to_string(source).unwrap()
             );
             assert_eq!(
-                raw(&text, platform).diagnostics.len(),
-                1,
+                errors(&raw(&text, platform)),
+                vec![(
+                    "languages.cpp.sources[0]",
+                    Some(2),
+                    "expected a non-empty problem-relative source with / components, without . or .."
+                )],
                 "{platform:?} {source:?}"
             );
         }
@@ -541,7 +587,14 @@ fn typed_paths_and_source_rules_on_each_platform() {
     for source in [r"a\b", "C:foo", "C:/foo"] {
         let text = format!("[languages.cpp]\nsources = ['{source}']");
         valid(&raw(&text, Platform::Linux));
-        assert_eq!(raw(&text, Platform::Windows).diagnostics.len(), 1);
+        assert_eq!(
+            errors(&raw(&text, Platform::Windows)),
+            vec![(
+                "languages.cpp.sources[0]",
+                Some(2),
+                "expected a non-empty problem-relative source with / components, without . or .."
+            )]
+        );
     }
     for output in ["../x", "/x", "a/../x", ""] {
         assert_eq!(
@@ -650,17 +703,31 @@ fn environment_names_values_and_platform_activity() {
     );
     valid(&layer);
     // Grammar, numeric validity and unknown keys are checked even when inactive.
-    for body in [
-        "argv = ['{bad}']",
-        "deadline_s = 0",
-        "limits = { job_commit = 0 }",
-        "unknown = 1",
+    for (body, key, message) in [
+        (
+            "argv = ['{bad}']",
+            "run.windows.argv[0]",
+            "unknown placeholder {bad}",
+        ),
+        (
+            "deadline_s = 0",
+            "run.windows.deadline_s",
+            "rounded duration must be in 1..=86400000 milliseconds",
+        ),
+        (
+            "limits = { job_commit = 0 }",
+            "run.windows.limits.job_commit",
+            "size must be in 1..=18446744073709551615 bytes",
+        ),
+        (
+            "unknown = 1",
+            "run.windows.unknown",
+            "unknown configuration key",
+        ),
     ] {
         assert_eq!(
-            raw(&format!("[run.windows]\n{body}"), Platform::Linux)
-                .diagnostics
-                .len(),
-            1
+            errors(&raw(&format!("[run.windows]\n{body}"), Platform::Linux)),
+            vec![(key, Some(2), message)]
         );
     }
     valid(&raw(
@@ -776,18 +843,19 @@ fn numeric_rounding_ranges_units_and_overflow() {
             at(&layer, &["run", "limits", key]).typed,
             Some(TypedValue::Bytes(u64::MAX / 1024 * 1024))
         );
-        for value in [
-            "0",
-            "-1",
-            "'18014398509481984KiB'",
-            "'18446744073709551616KiB'",
-            "'1.5MiB'",
+        for (value, message) in [
+            ("0", "size must be in 1..=18446744073709551615 bytes"),
+            ("-1", "size must not be negative"),
+            ("'18014398509481984KiB'", "size overflows u64"),
+            ("'18446744073709551616KiB'", "size overflows u64"),
+            ("'1.5MiB'", "size must be a whole number of units"),
         ] {
             assert_eq!(
-                raw(&format!("[run.limits]\n{key} = {value}"), Platform::Linux)
-                    .diagnostics
-                    .len(),
-                1
+                errors(&raw(
+                    &format!("[run.limits]\n{key} = {value}"),
+                    Platform::Linux
+                )),
+                vec![(format!("run.limits.{key}").as_str(), Some(2), message)]
             );
         }
         // No page rounding or platform maximum is applied at load.
@@ -815,11 +883,17 @@ fn numeric_rounding_ranges_units_and_overflow() {
             "1.0".into(),
             "'1'".into(),
         ] {
+            let message = if value == "1.0" || value == "'1'" {
+                "expected an integer".to_owned()
+            } else {
+                format!("integer must be in 1..={max}")
+            };
             assert_eq!(
-                raw(&format!("[{table}]\n{key} = {value}"), Platform::Linux)
-                    .diagnostics
-                    .len(),
-                1
+                errors(&raw(
+                    &format!("[{table}]\n{key} = {value}"),
+                    Platform::Linux
+                )),
+                vec![(format!("{table}.{key}").as_str(), Some(2), message.as_str())]
             );
         }
     }
@@ -875,6 +949,15 @@ fn ignore_pattern_syntax() {
 #[test]
 fn compare_configuration_rows_and_expanded_values() {
     for (text, abs, rel, ulps, base, combine, int_exact) in [
+        (
+            "{ float = 1 }",
+            Some(1.0),
+            Some(1.0),
+            None,
+            RelativeBase::Answer,
+            Combine::Either,
+            true,
+        ),
         (
             "{ float = 1e-6 }",
             Some(1e-6),
@@ -1599,4 +1682,49 @@ fn review_cases_cwd_interpreter_overlay_roles_and_key_quoting() {
     let layer = raw("[run.env]\n'A.B' = 1", Platform::Linux);
     assert_eq!(layer.diagnostics.len(), 1, "{:?}", layer.diagnostics);
     assert_eq!(layer.diagnostics[0].origin.key_path, "run.env.\"A.B\"");
+}
+
+#[test]
+fn review_template_trust_and_problem_overlay_diagnostics() {
+    for path in [r"C:foo", r"\foo", "/foo"] {
+        assert_eq!(
+            errors(&raw(
+                &format!("[languages.cpp]\ntemplate = {{ path = '{path}' }}"),
+                Platform::Windows
+            )),
+            vec![(
+                "languages.cpp.template.path",
+                Some(2),
+                "Windows drive-relative and root-relative paths are not allowed"
+            )]
+        );
+    }
+    let layer = parse(
+        b"[hooks]\ntrusted_workspaces = ['rel']",
+        &source(LayerKind::DefaultUser, Platform::Linux),
+        &env(),
+        Platform::Linux,
+    );
+    assert_eq!(
+        errors(&layer),
+        vec![(
+            "hooks.trusted_workspaces[0]",
+            Some(2),
+            "trusted workspace path must be absolute"
+        )]
+    );
+    let layer = parse(
+        b"[problem]\nid = 'local:p'\n[config.run.windows.linux]\nargv = ['x']",
+        &source(LayerKind::Problem, Platform::Linux),
+        &env(),
+        Platform::Linux,
+    );
+    assert_eq!(
+        errors(&layer),
+        vec![(
+            "config.run.windows.linux",
+            Some(3),
+            "platform overlays cannot be nested or used at this site"
+        )]
+    );
 }
