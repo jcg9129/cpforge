@@ -12,7 +12,8 @@
 //! [`PreparedStage`] is not launchable. [`resolve`] performs program lookup and
 //! launchability checks through [`Probe`], retaining diagnostics and launch kind.
 //! Generated programs yield a [`DeferredStage`] checked only after their producer
-//! succeeds. [`ResolvedStage`] still retains shell parts for C2c lowering. Job
+//! succeeds. [`ResolvedStage::launch_command`] validates and lowers shell parts
+//! to a [`LaunchCommand`] with literal positional arguments. Job
 //! admission later injects `CPF_*`, stdin, sinks and normalized limits. Neither
 //! preparation nor these types persist, hash or construct an execution spec.
 
@@ -21,6 +22,7 @@ mod error;
 mod prepare;
 mod probe;
 mod resolve;
+mod shell;
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -39,6 +41,7 @@ pub use resolve::{
     ResolutionTrace, ResolveError, ResolveErrorKind, ResolveErrors, ResolvedCommand,
     ResolvedProgram, ResolvedStage, SkippedCandidate, SkippedEntry, resolve,
 };
+pub use shell::{LaunchCommand, LowerError, LowerErrorKind};
 
 /// One ordered native environment snapshot, captured once by the job caller.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -69,7 +72,7 @@ pub enum ProgramRequest {
     Lookup(OsString),
 }
 
-/// Shell parts are retained literally for C2c's positional-argument adapter.
+/// Shell parts are retained literally for the positional-argument adapter.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)] // Preserve the original interpreter metadata.
 pub enum PreparedCommand {

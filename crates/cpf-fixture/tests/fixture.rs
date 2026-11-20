@@ -88,6 +88,15 @@ fn writes_exact_bytes_and_custom_byte() {
 }
 
 #[test]
+fn echo_argv_preserves_data_and_empty_elements() {
+    let mut fixture = spawn(&["echo-argv", "a b", "", "exit:9", "line1\nline2", "$x\\\"'"]);
+    let (status, stdout, stderr) = collect(&mut fixture);
+    assert!(status.success());
+    assert_eq!(stdout, b"a b\0\0exit:9\0line1\nline2\0$x\\\"'\0");
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn flood_drains_both_streams_concurrently() {
     let mut fixture = spawn(&["flood:1048576"]);
     let (status, stdout, stderr) = collect(&mut fixture);

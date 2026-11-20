@@ -48,6 +48,10 @@ grandchild. The harness can collect five identities when the root also executes
 semicolons are reserved syntax; there is no general-purpose backslash escaping.
 Quote spawn arguments in a shell so the shell does not interpret semicolons.
 
+When the first element is `echo-argv`, all remaining elements are UTF-8 data
+rather than steps. Each is written to stdout unchanged followed by one NUL,
+including empty elements. The `echo-argv` selector itself is not printed.
+
 The control channel is test-only, outside the supervisor's descriptor inheritance
 rules. On Unix, `CPF_FIXTURE_CTRL` and `CPF_FIXTURE_ACK` name the same inherited
 Unix datagram socket, half of a socketpair. Only that endpoint loses close-on-exec

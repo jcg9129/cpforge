@@ -13,6 +13,7 @@ pub(crate) enum Step {
     Write(Stream, usize, u8),
     Flood(usize),
     Echo,
+    EchoArgv(Vec<String>),
     PingPong(usize),
     Pong(usize),
     Drain,
@@ -53,6 +54,11 @@ fn stream(text: &str) -> Result<Stream, String> {
 pub(crate) fn parse(args: &[String], depth: usize) -> Result<Vec<Step>, String> {
     if args.is_empty() {
         return Err("expected at least one step".into());
+    }
+    // This mode treats every subsequent element as data, including empty
+    // strings and text that would otherwise be step syntax.
+    if args[0] == "echo-argv" {
+        return Ok(vec![Step::EchoArgv(args[1..].to_vec())]);
     }
     args.iter().map(|arg| parse_step(arg, depth)).collect()
 }
@@ -218,6 +224,14 @@ pub(crate) fn execute(steps: Vec<Step>) -> io::Result<()> {
                     output.write_all(&line)?;
                     output.flush()?;
                 }
+            }
+            Step::EchoArgv(args) => {
+                let mut output = io::stdout().lock();
+                for arg in args {
+                    output.write_all(arg.as_bytes())?;
+                    output.write_all(&[0])?;
+                }
+                output.flush()?;
             }
             Step::DefaultSigpipe => {
                 #[cfg(unix)]

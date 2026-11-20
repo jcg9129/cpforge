@@ -2,7 +2,7 @@
 //!
 //! These stages are not `ProgramSpec` or `ResolvedExecutionSpec`: admission
 //! still supplies CPF_* variables, stdin, sinks and normalized limits. Shell
-//! basename validation and positional-argument lowering belong to C2c; batch
+//! basename validation and positional-argument lowering live in `shell`; batch
 //! launch escaping and exact-path creation belong to B4a.
 //!
 //! Containment checks both raw and normalized components before rejecting dot
@@ -571,7 +571,7 @@ fn separator(byte: u8, platform: Platform) -> bool {
     byte == b'/' || (platform == Platform::Windows && byte == b'\\')
 }
 
-fn final_component(path: &OsStr, platform: Platform) -> &[u8] {
+pub(super) fn final_component(path: &OsStr, platform: Platform) -> &[u8] {
     path.as_encoded_bytes()
         .rsplit(|b| separator(*b, platform))
         .next()
