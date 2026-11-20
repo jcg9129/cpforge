@@ -38,6 +38,7 @@ pub use record::{
 pub(crate) use record::{RECORD_SIZE_LIMIT, RecordBytes, read_record_bytes};
 pub(crate) use sys::is_link;
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
+pub(crate) use walk::{measure_owned_tree, remove_owned_tree};
 
 #[derive(Debug)]
 pub struct Published {

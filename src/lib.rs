@@ -1,6 +1,7 @@
 //! CLI foundation for cpforge.
 
 mod add;
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod error;

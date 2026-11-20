@@ -88,8 +88,10 @@ struct Info {
     device: u64,
 }
 
-struct Walker<'a, 'g> {
-    guard: &'a WorkspaceGuard<'g>,
+struct Walker<'a> {
+    _scope: std::marker::PhantomData<&'a ()>,
+    #[cfg(feature = "storage-test-hooks")]
+    test_hooks: Option<&'a super::TestHooks>,
     action: Action,
     device: u64,
     mounts: HashSet<PathBuf>,
@@ -102,18 +104,58 @@ fn run(
     action: Action,
 ) -> Result<WalkReport, StorageError> {
     let path = guard.entry_path(path)?;
+    run_owned(
+        guard.root(),
+        &path,
+        action,
+        #[cfg(feature = "storage-test-hooks")]
+        Some(&guard.test_hooks),
+    )
+}
+
+/// The same walker for an exclusively owned disposable child of a caller's
+/// directory. No workspace discovery, lock acquisition or recovery is needed.
+pub(crate) fn measure_owned_tree(root: &Path, path: &Path) -> Result<WalkReport, StorageError> {
+    run_owned(
+        root,
+        path,
+        Action::Measure,
+        #[cfg(feature = "storage-test-hooks")]
+        None,
+    )
+}
+
+pub(crate) fn remove_owned_tree(root: &Path, path: &Path) -> Result<WalkReport, StorageError> {
+    run_owned(
+        root,
+        path,
+        Action::Remove,
+        #[cfg(feature = "storage-test-hooks")]
+        None,
+    )
+}
+
+fn run_owned(
+    root: &Path,
+    path: &Path,
+    action: Action,
+    #[cfg(feature = "storage-test-hooks")] test_hooks: Option<&super::TestHooks>,
+) -> Result<WalkReport, StorageError> {
+    let path = super::checked_path(root, path, true)?;
     // A capability to mutate below the root never grants removal of the root.
-    if path == guard.root() {
+    if path == root {
         return Err(StorageError::new(ErrorKind::InvalidPath { path }));
     }
     let parent = path.parent().expect("below root");
-    guard.check_path(parent)?;
+    super::checked_path(root, parent, false)?;
     let parent_handle = sys::open_dir(parent).map_err(|e| StorageError::io(parent, e))?;
     let name = path.file_name().expect("below root");
     let info = native::info(&parent_handle, name, &path).map_err(|e| StorageError::io(&path, e))?;
     let mounts = mount_points().map_err(|e| StorageError::io("/proc/self/mountinfo", e))?;
     let mut walker = Walker {
-        guard,
+        _scope: std::marker::PhantomData,
+        #[cfg(feature = "storage-test-hooks")]
+        test_hooks,
         action,
         device: info.device,
         mounts,
@@ -134,7 +176,7 @@ struct Frame {
     complete: bool,
 }
 
-impl Walker<'_, '_> {
+impl Walker<'_> {
     fn visit(&mut self, parent: File, name: &OsStr, path: &Path, info: Info) {
         let Ok(Some((mut directory, frame))) = self.enter(&parent, name, path, info, false) else {
             return;
@@ -225,9 +267,10 @@ impl Walker<'_, '_> {
         info: Info,
         repair_parent: bool,
     ) -> Result<Option<(File, Frame)>, ()> {
-        let _ = self.guard;
         #[cfg(feature = "storage-test-hooks")]
-        let device_boundary = self.guard.test_hooks.walker_device_boundary.as_deref() == Some(path);
+        let device_boundary = self
+            .test_hooks
+            .is_some_and(|hooks| hooks.walker_device_boundary.as_deref() == Some(path));
         #[cfg(not(feature = "storage-test-hooks"))]
         let device_boundary = false;
         if info.device != self.device || device_boundary {
@@ -238,7 +281,9 @@ impl Walker<'_, '_> {
             return Err(());
         }
         #[cfg(feature = "storage-test-hooks")]
-        let mount_point = self.guard.test_hooks.walker_mount_point.as_deref() == Some(path);
+        let mount_point = self
+            .test_hooks
+            .is_some_and(|hooks| hooks.walker_mount_point.as_deref() == Some(path));
         #[cfg(not(feature = "storage-test-hooks"))]
         let mount_point = false;
         if self.mounts.contains(path) || mount_point {

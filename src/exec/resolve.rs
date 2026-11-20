@@ -40,7 +40,7 @@ pub enum EntryReason {
 }
 
 /// An excluded environment segment, in its original order.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SkippedEntry {
     /// Original segment, including any quotes in Windows PATH.
     pub entry: OsString,
@@ -59,6 +59,23 @@ pub enum CandidateReason {
     Io(io::Error),
 }
 
+// Reusable stage recipes retain lookup diagnostics without probing again.
+impl Clone for CandidateReason {
+    fn clone(&self) -> Self {
+        match self {
+            Self::NotFound => Self::NotFound,
+            Self::Directory => Self::Directory,
+            Self::Other => Self::Other,
+            Self::NotExecutable => Self::NotExecutable,
+            Self::UnsupportedExtension => Self::UnsupportedExtension,
+            Self::Io(error) => Self::Io(match error.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code),
+                None => io::Error::new(error.kind(), error.to_string()),
+            }),
+        }
+    }
+}
+
 impl fmt::Display for CandidateReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -73,7 +90,7 @@ impl fmt::Display for CandidateReason {
 }
 
 /// An attempted absolute path and its rejection.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SkippedCandidate {
     pub path: PathBuf,
     pub reason: CandidateReason,
@@ -82,7 +99,7 @@ pub struct SkippedCandidate {
 /// Ordered diagnostics, also retained when no candidate is selected. Missing
 /// candidates are recorded too. Approximation covers all attempted checks,
 /// including a rejected candidate before the chosen one.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ResolutionTrace {
     pub skipped_path_entries: Vec<SkippedEntry>,
     pub skipped_pathext_entries: Vec<SkippedEntry>,
@@ -91,7 +108,7 @@ pub struct ResolutionTrace {
 }
 
 /// Selection and diagnostics for one original program request.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolutionRecord {
     pub request: ProgramRequest,
     pub chosen_path: PathBuf,
@@ -100,7 +117,7 @@ pub struct ResolutionRecord {
 }
 
 /// Absolute selected path and the launch strategy, with its audit record.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolvedProgram {
     pub path: PathBuf,
     pub launch_kind: LaunchKind,
@@ -108,7 +125,7 @@ pub struct ResolvedProgram {
 }
 
 /// Resolved program with unchanged arguments and literal shell parts.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Keep literal shell metadata directly accessible.
 pub enum ResolvedCommand {
     Argv {
@@ -124,7 +141,7 @@ pub enum ResolvedCommand {
 }
 
 /// Programs selected, shell parts preserved, admission still outstanding.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResolvedStage {
     pub kind: StageKind,
     pub command: ResolvedCommand,

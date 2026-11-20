@@ -204,7 +204,7 @@ pub(super) fn home_expand(
     }
 }
 
-pub(super) fn output_relative(text: &str, platform: Platform) -> bool {
+pub(crate) fn output_relative(text: &str, platform: Platform) -> bool {
     !text.is_empty()
         && !text.contains('\0')
         && !text.starts_with('/')
