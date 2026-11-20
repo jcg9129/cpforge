@@ -1,4 +1,4 @@
-//! Configuration loading and composition, without target resolution or tool probing.
+//! Configuration loading, stage composition and phases 1–2, without tool probing.
 //!
 //! In raw layers, table membership is explicit field presence. Generic tables and overlay
 //! sub-tables remain separate; consumers must carry `invalid` markers even when
@@ -10,20 +10,38 @@
 //! and `TypedValue` holds parsed quantities, paths, templates and comparators.
 //! Path normalization is performed only for generic and active overlay values;
 //! inactive branches retain their raw paths and structurally validated tokens.
-//! No completeness, reference or cross-layer checks are performed here.
+//! `parse` and `load` perform phase 1 only; `check` adds phase 2.
 //!
 //! Composition: `built_in(platform)` exposes layer 0; `compose(&layers,
 //! platform)` includes it automatically, resolves each layer's nested overlays
 //! inner-first, and merges in layer order. Parse files for that same platform:
 //! inactive paths deliberately have no platform-specific interpretation.
 //! `MergedConfig::language`, `Language::profile`, global stages and `problem`
-//! keep precedence rows separate. Stage defaults and composition across rows
-//! belong to the consumer, including Java's derived required artifacts; rows
-//! are composed with `EffectiveNode::merge_from`, which applies the same §2
-//! rules (`ResetMode::Discard` within the build-existence rows 3 and 4,
-//! `ResetMode::Preserve` for the modifier rows), and values from outside the
-//! files (CLI flags, row-1 defaults, derived values) are built with
-//! `EffectiveNode::new`.
+//! keep precedence rows separate. `check(&merged, &Selection)` composes all
+//! languages/profiles, commands, named hook commands and the selected problem,
+//! then returns all phase-1/2 diagnostics and the inspectable universe. Defaults
+//! retain BuiltIn/Derived provenance; `ComposedStage::explicitly_set` distinguishes
+//! supplied fields from defaults. Histories have paths relative to each stage;
+//! ignored build modifiers retain their document paths on `ComposedTarget`.
+//!
+//! C1d should wrap `resolve(&merged, &Selection)` for target operations, or use
+//! `CheckReport::executable` for command-only operations. Both capabilities are
+//! unavailable on any phase-1/2 error, while warnings remain reportable. Plan
+//! from `ResolvedTarget` and from `ExecutableStage` (`ExecutableConfig::command`
+//! or `hook`; `ResolvedTarget::executable` gives the same report for the hooks of
+//! a target operation), never from a bare `ComposedStage`. The run stage of
+//! `Operation::Run` (raw `cpf run`) gets 64 MiB caps on both streams. An unreadable
+//! problem file leaves the target unresolved. Pass
+//! `Selection::problem` even for a problem with no config table; language-only
+//! consumers can set `Selection::language`. Published limits use integer
+//! milliseconds; absent includes unlimited. Derived deadlines outside §7.1's
+//! range are refused unless a higher row supplies the deadline. Java required
+//! artifacts default only when `required` is absent; an explicit empty array
+//! stays empty and fails validation. Values retain typed text tokens and origins,
+//! and stages expose deferred occurrences and context requirements for C12a.
+//! The consumer remains responsible for phase-3 context, source existence,
+//! template/source cardinality, tool resolution, expansion and job allocation,
+//! and phase-4 outputs. No CLI, filesystem or trust checks occur in `check`.
 //!
 //! Semantic accessors return `EffectiveNode`s so invalid and partial input
 //! remains inspectable. A node exists only where a source supplied it: `get`
@@ -50,8 +68,10 @@
 //! rather than the broader filesystem `Identifier` policy in `crate::names`.
 
 mod built_in;
+mod check;
 mod compose;
 mod load;
+mod stages;
 mod syntax;
 mod validate;
 
@@ -61,12 +81,20 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 pub use built_in::built_in;
+pub use check::{
+    CheckReport, ComposedUniverse, ExecutableConfig, ExecutableStage, ResolvedTarget, check,
+    resolve,
+};
 pub use compose::{
     CommandChoice, EffectiveNode, EffectiveValue, EventKind, Hooks, InvalidMarker, Language,
     MergedConfig, NodeKind, Problem, Profile, Provenance, ProvenanceEvent, ResetMode, Retention,
     Stage, UnknownInput, ValueSnapshot, compose,
 };
 pub use load::{DiscoveryError, DiscoveryOptions, Environment, LayerSource, discover, load, parse};
+pub use stages::{
+    CapPolicy, ComposedStage, ComposedTarget, ContextRequirements, DeferredValue, Operation,
+    PublishedLimit, Selection, StageHistory, StageKind, TargetSettings,
+};
 pub use syntax::{Placeholder, Token, tokenize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,3 +337,6 @@ mod tests;
 
 #[cfg(test)]
 mod compose_tests;
+
+#[cfg(test)]
+mod check_tests;

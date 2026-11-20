@@ -281,7 +281,7 @@ impl EffectiveNode {
             replace_as_unit: self.kind.atomic(),
         }
     }
-    fn event(&self, kind: EventKind) -> ProvenanceEvent {
+    pub(super) fn event(&self, kind: EventKind) -> ProvenanceEvent {
         ProvenanceEvent {
             kind,
             provenance: self.provenance.clone(),
@@ -305,6 +305,8 @@ pub struct MergedConfig {
     pub unknown_inputs: Vec<UnknownInput>,
     /// Includes deleted/replaced descendants no longer in the effective tree.
     pub history: BTreeMap<Vec<String>, Vec<ProvenanceEvent>>,
+    /// Supplying file ranks for phase-2 unknown-input dependency analysis.
+    pub(super) layer_files: BTreeMap<PathBuf, LayerKind>,
 }
 
 impl MergedConfig {
@@ -798,6 +800,32 @@ fn lookup<'a>(node: &'a EffectiveNode, path: &[String]) -> Option<&'a EffectiveN
 }
 
 fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
+    merge_tree_mode(base, &mut incoming, path, ResetMode::Discard);
+}
+
+/// Compose a precedence row with the same history and replacement accounting
+/// as a file layer. Histories use paths relative to the stage root.
+pub(super) fn merge_stage_row(
+    base: &mut EffectiveNode,
+    history: &mut BTreeMap<KeyPath, Vec<ProvenanceEvent>>,
+    higher: EffectiveNode,
+    higher_history: BTreeMap<KeyPath, Vec<ProvenanceEvent>>,
+    resets: ResetMode,
+) {
+    let mut tree = Tree {
+        root: base.clone(),
+        history: std::mem::take(history),
+    };
+    let mut incoming = Tree {
+        root: higher,
+        history: higher_history,
+    };
+    merge_tree_mode(&mut tree, &mut incoming, &[], resets);
+    *base = tree.root;
+    *history = tree.history;
+}
+
+fn merge_tree_mode(base: &mut Tree, incoming: &mut Tree, path: &[String], mode: ResetMode) {
     // The first event of a precomposed layer still needs the inherited value.
     // Later events already describe its generic -> unix -> OS transitions.
     let resets: Vec<_> = incoming
@@ -806,12 +834,15 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
         .flat_map(|(key, events)| {
             events
                 .iter()
-                .filter(|e| e.kind == EventKind::Reset)
+                .filter(move |e| mode == ResetMode::Discard && e.kind == EventKind::Reset)
                 .map(move |e| (key.clone(), e.order))
         })
         .collect();
     let mut fresh_paths = BTreeSet::new();
     for (key, events) in &mut incoming.history {
+        if mode == ResetMode::Preserve && lookup(&incoming.root, &key[path.len()..]).is_none() {
+            continue;
+        }
         if events.first().is_some_and(|first| {
             resets.iter().any(|(ancestor, order)| {
                 key.len() > ancestor.len() && key.starts_with(ancestor) && first.order > *order
@@ -844,7 +875,7 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
             if let Some(reset) = events
                 .iter_mut()
                 .skip(1)
-                .find(|e| e.kind == EventKind::Reset)
+                .find(|e| mode == ResetMode::Discard && e.kind == EventKind::Reset)
             {
                 // A reset after a generic contribution discards the inherited
                 // fields as well as that layer's generic fields. Capture the
@@ -861,9 +892,23 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
                 }
                 reset.removed = vec![removed.snapshot()];
             }
-            let Some(first) = events.first_mut() else {
+            // Modifier rows never participate in the earlier row-3/4 resets.
+            // Bind their inherited value to the first surviving contribution,
+            // rather than to a historical value that a reset discarded.
+            let start = if mode == ResetMode::Preserve {
+                events
+                    .iter()
+                    .rposition(|e| matches!(e.kind, EventKind::Discarded | EventKind::Reset))
+                    .map_or(0, |i| i + 1)
+            } else {
+                0
+            };
+            let Some(first) = events.get_mut(start) else {
                 continue;
             };
+            if mode == ResetMode::Preserve && first.kind == EventKind::Reset {
+                continue;
+            }
             let replaces = first.value.as_ref().is_some_and(|value| {
                 value.replace_as_unit
                     || !matches!(value.value, EffectiveValue::Table(_))
@@ -877,19 +922,15 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
             }
         }
     }
-    let mut discarded = BTreeMap::new();
-    merge_node(
-        &mut base.root,
-        incoming.root,
-        path,
-        ResetMode::Discard,
-        &mut discarded,
-    );
+    let discarded = base.root.merge_from(incoming.root.clone(), path, mode);
     for (key, mut events) in discarded {
         // A precomposed history may already set and then discard this key.
         // Its first event now accounts for the inherited value. A field first
         // supplied after a reset still needs the earlier discard recorded.
-        if incoming.history.contains_key(&key) && !fresh_paths.contains(&key) {
+        if mode == ResetMode::Discard
+            && incoming.history.contains_key(&key)
+            && !fresh_paths.contains(&key)
+        {
             continue;
         }
         if let Some(reset) = incoming
@@ -897,7 +938,7 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
             .iter()
             .filter(|(ancestor, _)| key.starts_with(ancestor))
             .flat_map(|(_, events)| events)
-            .filter(|event| event.kind == EventKind::Reset)
+            .filter(|event| mode == ResetMode::Discard && event.kind == EventKind::Reset)
             .min_by_key(|event| event.order)
         {
             for event in &mut events {
@@ -909,7 +950,7 @@ fn merge_tree(base: &mut Tree, mut incoming: Tree, path: &[String]) {
         }
         base.history.entry(key).or_default().extend(events);
     }
-    append_history(&mut base.history, incoming.history);
+    append_history(&mut base.history, std::mem::take(&mut incoming.history));
 }
 
 /// Records `node` and its descendants as discarded by `supplier`.
@@ -1233,7 +1274,9 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
     let mut diagnostics = vec![];
     let mut markers = vec![];
     let mut unknown_inputs = vec![];
+    let mut layer_files = BTreeMap::new();
     for layer in ordered {
+        layer_files.insert(layer.file.clone(), layer.kind);
         assert_eq!(
             layer.platform, platform,
             "compose requires layers parsed for its platform"
@@ -1288,5 +1331,6 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
         markers,
         unknown_inputs,
         history: merged.history,
+        layer_files,
     }
 }

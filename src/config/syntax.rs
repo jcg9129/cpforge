@@ -18,6 +18,25 @@ pub enum Placeholder {
     Iteration,
 }
 
+impl Placeholder {
+    /// The name as written between braces, e.g. `test_input`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sources => "sources",
+            Self::Source => "source",
+            Self::Artifact => "artifact",
+            Self::ArtifactDir => "artifact_dir",
+            Self::Entry => "entry",
+            Self::ProblemDir => "problem_dir",
+            Self::ProblemId => "problem_id",
+            Self::Workspace => "workspace",
+            Self::TestInput => "test_input",
+            Self::TestAnswer => "test_answer",
+            Self::Iteration => "iteration",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Token {
     Literal(String),

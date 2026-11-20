@@ -552,6 +552,8 @@ configuration alone does not report it.
 - **Unset is distinct from a default.** Defaults per stage: run = published
   time limit × 2 + 1 s (checked; only when the problem publishes a finite
   limit), else 10 s; build 60 s; command 60 s; hook 30 s.
+  A derived run default that is unusable (above 24 h, or overflowing) is
+  an error only when no higher row sets `deadline_s`.
 - `--deadline` sets only the run stage of `cpf test` and `cpf run` (row 6,
   §6.1), not builds, commands or hooks.
 - The deadline starts when creation returns (execution contract §3.4); queued runs do not
