@@ -213,7 +213,7 @@ fn unreadable_initial_sequence_is_preserved() {
     let path = dir.path(".cpforge/job-seq");
     let bytes = b"schema = 1\nepoch = '0123456789abcdef0123456789abcdef'\nnext = '0'\n";
     fs::write(&path, bytes).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     let output = init(&dir.0);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -270,7 +270,7 @@ fn metadata_links_are_refused_and_root_links_work() {
     link_directory(&outside.0, &dir.path(".cpforge"));
     let output = init(&dir.0);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("LinkInPath"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing a link or junction"));
     assert!(!dir.path("cpforge.toml").exists());
     assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 1);
     assert_eq!(fs::read(outside.path("keep")).unwrap(), b"untouched");
