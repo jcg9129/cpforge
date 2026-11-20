@@ -67,7 +67,7 @@ impl Drop for Directory {
 }
 
 fn problem_text(config: &str) -> String {
-    format!("schema = 1\n[problem]\nid = 'sample'\n{config}")
+    format!("schema = 1\n[problem]\nid = 'local:sample'\n{config}")
 }
 
 fn clean(loaded: &LoadedConfig) {
