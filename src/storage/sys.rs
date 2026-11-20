@@ -156,6 +156,38 @@ pub(super) fn same_file(file: &File, path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Open a dedicated lease independently, without following a final link or
+/// blocking on a special file. std opens non-inheritable Windows handles; Unix
+/// explicitly requests atomic close-on-exec as well as std's default.
+pub(super) fn open_lease(path: &Path, create_new: bool) -> io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(create_new);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || is_link(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lease is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
 pub(super) fn try_lock(file: &File) -> io::Result<bool> {
     #[cfg(unix)]
     {

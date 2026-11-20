@@ -11,6 +11,7 @@
 
 pub(crate) mod crash;
 mod edit;
+pub mod job;
 pub mod job_seq;
 mod lock;
 mod publish;

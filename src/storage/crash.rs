@@ -15,6 +15,7 @@
 //! `init.locked` (after lock acquisition and recovery),
 //! `init.job_seq_published` (after publishing a new initial job-seq),
 //! `init.config_published` (after publishing cpforge.toml);
+//! `job.record_published` (after no-clobber publication of job.toml);
 //! `add.locked` (after recovery), `add.staged` (complete unpublished tree),
 //! `add.published` (complete problem directory), `add.contest_created`
 //! (schema-only contest file published), `add.member_added` (membership edit

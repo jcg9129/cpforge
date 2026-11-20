@@ -1,10 +1,52 @@
 //! The schema-1 admission sequence record and its §9 encodings.
 
+use std::fmt;
 use std::path::Path;
 
 use toml_edit::DocumentMut;
 
 use super::{Record, classify_tool_record, read_tool_record};
+
+/// A §9 epoch encoding: exactly 32 lowercase ASCII hex digits.
+/// Validation is shared by admission sequence and job metadata decoders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Epoch(String);
+
+impl Epoch {
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        if value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err("epoch must be exactly 32 lowercase hex digits")
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Epoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Decode the §9 canonical decimal-string encoding without signed TOML integers.
+pub(crate) fn parse_decimal_u64(value: &str) -> Option<u64> {
+    if !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+    {
+        value.parse().ok()
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobSequence {
@@ -27,25 +69,15 @@ fn validate_fields(document: &DocumentMut) -> Result<JobSequence, &'static str> 
     let epoch = document
         .get("epoch")
         .and_then(|item| item.as_str())
-        .filter(|epoch| {
-            epoch.len() == 32
-                && epoch
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
         .ok_or("epoch must be exactly 32 lowercase hex digits")?;
+    let epoch = Epoch::parse(epoch)?;
     let next = document
         .get("next")
         .and_then(|item| item.as_str())
-        .filter(|next| {
-            !next.is_empty()
-                && next.bytes().all(|byte| byte.is_ascii_digit())
-                && (*next == "0" || !next.starts_with('0'))
-        })
-        .and_then(|next| next.parse::<u64>().ok())
+        .and_then(parse_decimal_u64)
         .ok_or("next must be a canonical decimal string no greater than u64::MAX")?;
     Ok(JobSequence {
-        epoch: epoch.to_owned(),
+        epoch: epoch.0,
         next,
     })
 }
