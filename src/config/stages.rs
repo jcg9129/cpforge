@@ -471,7 +471,7 @@ pub(super) fn target(
     selection: Option<&Selection>,
 ) -> ComposedTarget {
     let problem = selection.is_some_and(|s| has_problem(merged, s));
-    let mut ignored = BTreeMap::new();
+    let mut ignored: StageHistory = BTreeMap::new();
     let mut build_history = BTreeMap::new();
     let mut compose_stage = |kind| {
         let key = if kind == StageKind::Build {
