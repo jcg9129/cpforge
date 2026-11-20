@@ -4,7 +4,10 @@ Status: v3 (v2 plus the schema amendment: key matrix §1.1, discovery §1.2,
 precedence-preserving merge §2.1, diagnostics §3.2, program-path rules §4.4,
 hook switch §8.3), with the expansion amendment of 2026-11-20 (Windows
 environment-name equality §4.3, resolver details and launch kinds §4.4,
-preparation states §4.5, expansion context §5.2, interpreter rules §5.3).
+preparation states §4.5, expansion context §5.2, interpreter rules §5.3)
+and the grader-target amendment of 2026-11-20 (file roles §6.2, problem
+`entry` §6.4, template destination §6.5, grader tasks §9), settled, not yet
+implemented.
 
 **Managed-workspace amendment (v4): settled, not yet implemented.**
 `[workspace] ignore` (§7.4) specifies the design in
@@ -54,6 +57,9 @@ and the problem record, not to configuration.
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
 | `config.sources` | array of paths | 3 | §6.2 |
+| `config.support_files` | array of paths | 3 | §6.2 file roles |
+| `config.solution_files` | array of paths | 3 | §6.2 file roles, §6.5 |
+| `config.entry` | non-empty string | 3 | §6.4; overrides the language's `entry` |
 | `config.compare` | comparator value | 3 | |
 | `config.build`, `config.run` | stage table | 3 | precedence row 5 |
 
@@ -437,7 +443,7 @@ may still fail at spawn.
 | `{source}` | scalar | as `{sources}`, with exactly one source |
 | `{artifact}` | scalar | build, run, command with `needs_build`; target has a `file` artifact |
 | `{artifact_dir}` | scalar | build, run, command with `needs_build`; target has a build |
-| `{entry}` | scalar | the language declares `entry` |
+| `{entry}` | scalar | the target has an effective `entry` (problem `config.entry`, else the language's) |
 | `{problem_dir}`, `{problem_id}` | scalar | a problem is selected (all stages, hooks) |
 | `{workspace}` | scalar | inside a workspace (all stages, hooks) |
 | `{test_input}` | scalar | command with `for_each_test` |
@@ -531,6 +537,29 @@ and limits.
   `inputs/src/` joined with the same components, so it stays inside the
   capture root; destinations are created exclusively (storage contract
   §7), so a remaining alias fails capture and never overwrites a copy.
+- **File roles** (grader-linked targets, e.g. a contestant `solution.cpp`
+  compiled with a provided `grader.cpp` that includes `grader.h`). Three
+  problem-layer lists, all ordered problem-relative paths with the same
+  phase-1 rules as `sources`:
+  - `sources`: the **tool inputs**, the only files `{sources}` / `{source}`
+    expand to (compilation units; for a build-free Python target, the
+    script to execute, e.g. the grader).
+  - `support_files` (default `[]`): files the target needs beside its
+    sources but never passed as tool inputs (headers, imported modules).
+    The **captured files** are `sources` followed by `support_files`; both
+    get the phase-3 checks above (existing regular file, no link component,
+    outside reserved trees, same-file aliases), and a path in both lists,
+    compared as for duplicates, is a phase-2 error, never silently merged.
+  - `solution_files` (default: `sources` followed by `support_files`): the
+    files the contestant edits; every member must be one of the captured
+    files (phase 2) and duplicates are an error. It names no extra
+    capture and makes no file read-only: files outside it are **provided**
+    files, a convention used by `cpf add` (§6.5) and importers, not
+    enforced. An explicitly empty `solution_files` is valid; a template
+    then cannot be materialised.
+  Roles live only in the problem layer: a language cannot know which files
+  a judge provides. They change neither placeholder meaning nor cardinality:
+  `{source}` still requires exactly one member of `sources`.
 - *(draft)* In a managed workspace, sources are **captured** into the job
   (storage contract §7) and every `{sources}` / `{source}` expansion names
   the copy; outside the amendment they are read in place. Test data is
@@ -568,9 +597,9 @@ extensions = ["py"]
 sources = ["main.py"]
 build = false
 [languages.python.run]
-argv = ["python3", "{source}"]
+argv = ["python3", "-B", "{source}"]
 [languages.python.run.windows]
-argv = ["python", "{source}"]
+argv = ["python", "-B", "{source}"]
 
 [languages.java]
 extensions = ["java"]
@@ -583,10 +612,53 @@ argv = ["javac", "-d", "{artifact_dir}", "{sources}"]
 argv = ["java", "-cp", "{artifact_dir}", "{entry}"]
 ```
 
-For Java, `required` defaults to the class file derived from `entry` (dots →
-path separators, plus `.class`: `a/b/Main.class`). All other classes the
+The **effective entry** is problem `config.entry` if set, else the
+language's `entry`; `config.entry` has the language `entry` rules (phase 1:
+non-empty, no NUL). For Java, `required` defaults to the class file derived
+from the effective entry (dots →
+path separators, plus `.class`: `a/b/Main.class`). The derived path must
+satisfy the output-relative rules (§4.2: relative, no empty, `.` or `..`
+component, no root or drive prefix); otherwise a phase-2 error located at
+the effective entry, so `entry = "/tmp/Grader"` is refused before any build. All other classes the
 compiler writes (inner, auxiliary, other packages) stay in the output root,
-which is the class path.
+which is the class path. Python's `-B` keeps ordinary imports from writing
+bytecode beside the captured files; it does not stop a program from writing.
+
+Grader-linked targets with the built-ins, no stage overrides needed:
+
+```toml
+# C++: grader.cpp holds main and includes grader.h
+[config]
+sources = ["solution.cpp", "grader.cpp"]
+support_files = ["grader.h"]
+solution_files = ["solution.cpp"]
+
+# Python: the grader runs and imports solution.py from its own directory
+[config]
+language = "python"
+sources = ["grader.py"]
+support_files = ["solution.py"]
+solution_files = ["solution.py"]
+
+# Java: the grader's class is the entry; required becomes Grader.class
+[config]
+language = "java"
+sources = ["Solution.java", "Grader.java"]
+solution_files = ["Solution.java"]
+entry = "Grader"
+```
+
+Captured files keep their relative layout. That makes a C/C++ quoted
+`#include` of a sibling (searched first in the including file's directory)
+and a Python import of a module beside the executed script (`sys.path[0]` is
+the script's directory) resolve as in the problem directory. It does not
+make Java dependencies discoverable: `javac` and `java` search only their
+source and class paths, so **every Java compilation unit must be listed in
+`sources`**, and `support_files` holds only non-source resources there. A
+grader that reaches files by
+other paths (an include directory elsewhere, a path relative to the working
+directory) needs its own stage settings, and the run's cwd is never switched
+to the problem directory to make it work.
 
 ### 6.5 Profiles and templates
 
@@ -594,9 +666,17 @@ which is the class path.
 `--profile`; unknown → phase-2 error; the record names it. `template = { path
 = … }` per language (config-relative), used by `cpf add` without overwriting
 (storage contract §5.2). The template is copied to the target's single
-source path: `cpf add` with a template requires exactly one effective
-source, and zero or several are an error before anything is published (a
-mapping of several template files is a later design). Checking
+**solution file**: `cpf add` with a template requires exactly one effective
+`solution_files` member (§6.2; by default the sources, so a plain target
+needs exactly one source), and zero or several are an error before
+anything is published (a mapping of several template files is a later
+design). The destination is resolved from the configuration the new
+problem will have: the inherited layers plus the prospective record's
+`[config]` (for local `cpf add`, only what `add` itself writes, i.e.
+`--language`, so its solution file is the language's single default source;
+an importer writes the file roles into the record first). Importers that
+supply a contestant stub write the stub there instead of the template: one
+producer per destination, never a second write. Checking
 configuration alone does not report it.
 
 ## 7. Deadlines, limits, retention
@@ -800,7 +880,10 @@ enabled = true                         # master switch, default true
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-Refused operations say "unsupported in this version". Unknown kind strings
+Refused operations say "unsupported in this version". A grader-linked task
+whose local grader is one ordinary program (§6.2 file roles) is `batch`:
+the contestant implements an interface, but execution is batch. `multi-file`
+stays refused and is not reinterpreted. Unknown kind strings
 are preserved in `problem.toml`, never rewritten. `check` compares the
 user-recorded candidate answer with the recorded reference; no build or run
 is involved.
@@ -970,6 +1053,22 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
 - Generated program checked only after its build; batch argument refused
   (`UnsafeBatchArgument`) and a batch name with trailing dot or space on
   Windows CI.
+- Grader amendment: C++ solution + grader + header builds with the
+  built-in command and the header is captured but not passed to `g++`;
+  Python grader in `sources` imports the captured `solution.py` from a fresh
+  cwd and creates no `__pycache__`; Java `entry = "judge.Grader"` derives
+  `judge/Grader.class`; a path in both `sources` and `support_files` →
+  phase-2 error; a `solution_files` member outside the captured files →
+  phase-2 error; a missing support file → phase-3 error and nothing runs;
+  a materialisation whose prospective record has
+  `solution_files = ["solution.cpp"]` and two sources writes the template
+  to `solution.cpp`; empty or two-member `solution_files` with a template →
+  fails before publication; moving a file between `sources` and
+  `support_files`, or changing `config.entry`, changes the `source`
+  fingerprint without a byte change; `config.entry = "/tmp/Grader"` for
+  Java → phase-2 error; a Java sibling only in `support_files` is not
+  compiled (documented limitation, not a fixture of success); single-file
+  targets unchanged.
 - Expansion amendment: Windows environment names differing only outside
   ASCII case (e.g. `Ä`/`ä`) are one name; `PATH` set in a stage's `env` is
   the one searched; `tool.` and `tool.cmd ` refused on Windows; malformed

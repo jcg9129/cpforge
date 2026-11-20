@@ -433,10 +433,13 @@ fields are `malformed`; malformed or newer-schema files are refused without
 mutation. Labels compare by exact spelling. New contest files are created
 no-clobber with `schema = 1` before the replayable membership edit.
 
-Before staging, `add` loads configuration without a problem layer. Only an
+Before staging, `add` loads configuration with the prospective record's
+`[config]` as the problem layer (configuration contract §6.5): for local
+`add` only an explicit `--language`. Only an
 explicit `--language` is recorded under `[config]`; the default remains
 inherited. An unresolved language or an absent template creates no solution.
-A configured template requires exactly one effective source, and must
+A configured template requires exactly one effective solution file
+(configuration contract §6.5; by default the sources), and must
 resolve to a regular file; it lies outside the workspace and is only read,
 so links are followed (§2). Validation and reading finish before
 publication. Every component of the solution destination must be a portable
@@ -679,8 +682,9 @@ It never touches anything else.
 - *(draft)* **Source capture**. A job's **admission is complete
   only after its freeze**: the §6.2 workspace-lock section (steps 1–5) ends
   with the lease held and the lock released; the freeze then runs outside
-  the lock: tests (above), then the selected solution target's source files
-  (build planning target resolution) copied into `inputs/src/` with their
+  the lock: tests (above), then the selected solution target's **captured
+  files** (its `sources` followed by its `support_files`, configuration
+  contract §6.2; build planning target resolution) copied into `inputs/src/` with their
   problem-relative paths (same copy rules, regular files only, counted in
   the job budget). Each destination file is created **exclusively**
   (`create_new`); an existing destination (a filesystem alias the plan's

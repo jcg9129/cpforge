@@ -120,7 +120,7 @@ workspace arrive with the registry (§6.1).
   (S §5.6). A sequence is never rebuilt from surviving records,
   so `(epoch, n)` is never reused.
 - **Source capture:** at admission the job copies the solution target's
-  source files into its job directory (`inputs/src/`, like frozen tests,
+  captured files (`sources` then `support_files`, C §6.2) into its job directory (`inputs/src/`, like frozen tests,
   S §7), and every expansion of `{sources}` / `{source}` in that job, in any
   stage, names the copy. The `source` fingerprint therefore names the bytes
   **cpf handed to the job**. cpf does not sandbox builds: a build that reads
@@ -149,7 +149,13 @@ workspace arrive with the registry (§6.1).
     equivalent build output or execution behaviour. Encoded:
     first the target's **source list in configured order** (C §6.2: count,
     each problem-relative path as a byte string), since it fixes the order
-    in which `{sources}` expands; then
+    in which `{sources}` expands; then its `support_files` list the same
+    way (count 0 when none), so moving a file between the two roles changes
+    the fingerprint although no byte changes; then the **effective entry**
+    (C §6.4) as a tag byte `0` = none or `1` followed by the entry as a
+    byte string, since a build may expand `{entry}` and Java's required
+    output derives from it (`solution_files` is not covered: it changes no
+    build input); then
     one tag byte `0` = build-free target (nothing follows) or `1` = build
     stage, followed by the stage **as merged and validated but not
     expanded**: placeholders stay as their literal text (`{sources}`,

@@ -666,7 +666,7 @@ changes the stored result.
 | Multi-case persistent session | | ✓ | |
 | Run-twice / communication | | ✓ | |
 | Multi-party (manager + several S) | | | ✓ until designed |
-| Grader-linked, extra sources | ✓ via build config | callbacks per language | |
+| Grader-linked, extra sources | ✓ as `batch` with file roles (`support_files`, `solution_files`, problem `entry`; configuration contract §6.2) when the local grader is one ordinary program | callbacks per language, interface-aware stubs | |
 | Byte-stream / protocol-aware replay | | ✓ | |
 | Kattis validators, DMOJ checkers | | adapters (§2.4) | |
 
