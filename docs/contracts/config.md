@@ -2,7 +2,9 @@
 
 Status: v3 (v2 plus the schema amendment: key matrix §1.1, discovery §1.2,
 precedence-preserving merge §2.1, diagnostics §3.2, program-path rules §4.4,
-hook switch §8.3).
+hook switch §8.3), with the expansion amendment of 2026-11-20 (Windows
+environment-name equality §4.3, resolver details and launch kinds §4.4,
+preparation states §4.5, expansion context §5.2, interpreter rules §5.3).
 
 **Managed-workspace amendment (v4): settled, not yet implemented.**
 `[workspace] ignore` (§7.4) specifies the design in
@@ -290,9 +292,10 @@ string or `false`); `env_remove` (array of names); `deadline_s` (§7.1);
 
 ### 4.3 Environment
 
-Built once per run, in this order:
+Built for each run from one baseline, in this order:
 
-1. **Baseline:** `cpf`'s own environment, captured once at job start.
+1. **Baseline:** `cpf`'s own environment, captured once at job start and
+   shared by every run of the job.
 2. Remove every name in the effective `env_remove` (case-insensitive on
    Windows).
 3. Apply the effective `env` map: set each name; a `false` value (tombstone,
@@ -301,6 +304,18 @@ Built once per run, in this order:
    case-insensitively on Windows; two keys of **one** map differing only in
    case on Windows are an error.
 4. Inject `CPF_*` variables (§8.3) last; configuration cannot override them.
+
+**Windows name equality.** Wherever this section compares names on Windows
+(removal, tombstones, later-wins override, same-map duplicates), it uses the
+operating system's ordinal case-insensitive comparison, the comparison
+Windows and Rust's `Command` apply when installing an environment, not an
+ASCII-only fold; the winning spelling is installed. Only the reserved `CPF_`
+prefix check below stays ASCII case-insensitive. Unix compares names
+byte-exactly.
+
+Program resolution (§4.4) reads `PATH` and, on Windows, `PATHEXT` from the
+run's environment after steps 1–3, so a stage's `env` edits decide where its
+program is searched.
 
 Names containing NUL or `=` (Windows: also empty names), and values containing
 NUL, are errors, and so is a name in `env` or `env_remove` that starts with
@@ -342,27 +357,61 @@ Windows drive-relative and root-relative forms are phase-3 errors.
 | Windows name without an extension | each `PATHEXT` extension in order (bare name not tried) |
 | Windows explicit path without an extension | as is, then each `PATHEXT` extension |
 | Windows launchable | only `.exe`, `.com`, `.bat`, `.cmd` (case-insensitive) |
-| Unix launchable | regular file with execute permission for the effective user |
+| Windows program name ending in `.` or a space (`tool.`, `tool.cmd `), as written or after expansion | phase-3 error; never trimmed |
+| Windows malformed `PATHEXT` entry (empty, or not `.` followed by a non-empty name without separators) | skipped and recorded |
+| Unix launchable | regular file (symlinks followed) with execute permission for the **effective** user, checked for the effective credentials and honouring ACLs, not merely any execute bit: when real and effective IDs are equal, `access(X_OK)`; otherwise Linux `faccessat2(…, X_OK, AT_EACCESS)` and macOS `faccessat(…, AT_EACCESS)`; where only an emulation is available (older Linux without `faccessat2`, whose `AT_EACCESS` emulation ignores ACLs) the mode-bit result is used and recorded as approximate |
 | candidate that exists but is not launchable (directory, no permission, other extension such as `.ps1`) | skipped, search continues; if no launchable match is found, the error names the skipped candidates and why |
 | several matches | first launchable match wins |
 | nothing found | phase-3 error; no fallback, Rust's search never used |
 
-The absolute result goes into the spec and the record.
+The absolute result goes into the spec and the record, together with the
+skipped `PATH` entries and candidates. A resolved program also carries its
+**launch kind**: `native`, or on Windows `batch` for a `.bat`/`.cmd`
+result (case-insensitive). Launch kind is independent of whether the program
+is external or generated (§4.5): a generated program can be a batch file.
+
 - `.bat`/`.cmd`: launched through Rust's batch escaping (the Rust 1.81 fixes
   are within MSRV 1.85). An argument it refuses is the launch failure
-  `UnsafeBatchArgument`, never passed unescaped. Batch execution runs
-  `cmd.exe` internally: the one documented exception to "no implicit shell".
+  `UnsafeBatchArgument`, never passed unescaped; a launch error is classified
+  as `UnsafeBatchArgument` only when argument rejection is established (for
+  example a CR or LF in an argument, checked before spawn), never from an
+  `InvalidInput` error alone. Batch execution runs `cmd.exe` internally: the
+  one documented exception to "no implicit shell".
+- The launcher must start exactly the resolved path. Rust's own resolution
+  may append `.exe` to an explicit path that lacks it (with both `tool.cmd`
+  and `tool.cmd.exe` present, Rust 1.85 can start the latter); the Windows
+  launcher (gate task B4a) must prevent this while keeping Rust's batch
+  escaping and creation-time containment, and its tests include that
+  collision. Configuration expansion only selects the path and launch kind.
 
 ### 4.5 Staged materialisation
 
 Plans are symbolic until each launch. Phase 3 resolves external programs and
 allocates output paths. A **generated** program is any expanded program path
 under the run's artifact directory (`{artifact}`, or a path built from
-`{artifact_dir}`); it is checked (exists, regular file, launchable per §4.4)
-after its producer succeeded (phase 4) and before its consumer launches.
-Every other program is resolved in phase 3, before anything runs. A fully
-resolved `ResolvedExecutionSpec` exists at each launch boundary (execution contract §3.4).
-Preflight does not guarantee that files stay unchanged until spawn.
+`{artifact_dir}`), decided by lexical component-wise containment after
+expansion (`.` and `..` components are an error in a generated path; Windows
+components compare case-insensitively; never a string-prefix test). This is
+scheduling classification, not a security boundary. A generated program
+needs a known producer (the target's build) and a stage cannot be its own
+producer. It is checked (exists, regular file, launchable and launch kind per
+§4.4) after its producer succeeded (phase 4) and before its consumer
+launches; a successful producer exit alone is not enough, and the build's
+declared-output check (§6.3) is a separate check. Every other program is
+resolved in phase 3, **for every stage of the job before anything runs**.
+A shell interpreter is never generated (§5.3).
+
+Expansion yields a **prepared stage**, which cannot be launched; resolving its
+program (at once, or after the producer for a generated program) yields a
+**resolved stage**: program path, launch kind, argv, absolute cwd, the
+environment after §4.3 steps 1–3, and the resolution record. Job admission
+adds the `CPF_*` variables, stdin, output sinks and normalised limits to form
+the immutable `ResolvedExecutionSpec` (execution contract §2), computes its
+digest and enforces its size limit; a prepared stage is never persisted or
+hashed as a spec. A fully resolved `ResolvedExecutionSpec` exists at each
+launch boundary (execution contract §3.4). Preflight does not guarantee that
+files stay unchanged until spawn: an executable checked during preparation
+may still fail at spawn.
 
 ## 5. Placeholders
 
@@ -373,8 +422,9 @@ Preflight does not guarantee that files stay unchanged until spawn.
 - Expanded in `argv` elements, shell `args` and `cwd.path`; **never** in env
   values, the shell interpreter or script, or CLI extra args (appended
   verbatim, §8.1).
-- Program position (`argv[0]`) must expand to exactly one scalar; multi
-  placeholders there are an error.
+- Program position (`argv[0]`) and `cwd.path` must expand to exactly one
+  scalar; multi placeholders there are an error (phase 1), even when one
+  source exists.
 - A **multi** placeholder must be a whole element and expands to 0…n
   elements; scalars may be embedded (`-o{artifact}`). Single pass, never
   rescanned; values are native strings; a NUL after expansion is an error.
@@ -398,7 +448,24 @@ In **build**, `{artifact}` and `{artifact_dir}` are the allocated output paths
 the build writes; **path availability ≠ output existence**: outputs are checked
 only in phase 4.
 
-Unavailable → phase-3 error naming the stage and placeholder.
+A placeholder whose **declaration** is missing is a phase-2 error (§8.1),
+because it is decided by the configuration alone: in a command, `{sources}`,
+`{source}`, `{artifact}` and `{artifact_dir}` without `needs_build`,
+`{test_input}` and `{test_answer}` without `for_each_test`, `{iteration}`
+without `repeat`; in a hook, anything but `{problem_dir}`, `{problem_id}` and
+`{workspace}`. Every other unavailability (it depends on the invocation, the
+target or the test) → phase-3 error naming the stage and placeholder.
+
+Availability comes from what the invocation **declares**, never from which
+values the caller happens to supply: the stage kind and, for a command, its
+`needs_build`, `for_each_test` and `repeat`. A value supplied for an
+undeclared placeholder does not make it available. Distinct causes stay
+distinct in errors: no selected problem, not inside a workspace, a target
+without a `file` artifact, a test without an answer. `{source}` is derived
+from `{sources}`; an empty `sources` list is available and expands
+`{sources}` to zero elements, while `{source}` then fails. *(draft)* In a
+managed workspace the source values are the captured copies supplied by job
+admission; expansion never falls back to the originals.
 
 ### 5.3 Shell adapter
 
@@ -412,7 +479,11 @@ shell = { interpreter = ["bash", "-c"], script = 'for i in 1 2 3; do "$1" < "$2"
 - `interpreter` must be exactly `[<p>, "-c"]` where `<p>` resolves (§4.4) to a
   program whose basename (without `.exe`) is `sh`, `bash`, `dash`, `zsh` or
   `ksh`; anything else is an error (phase 1 for the form, phase 3 for the
-  resolved name).
+  resolved name). The check uses the basename of the selected path, without
+  following symlinks (`/bin/sh` linked to `dash` is `sh`); on Windows it is
+  case-insensitive and a trailing `.exe` is stripped. The interpreter is an
+  external program resolved in phase 3; one under the artifact directory is a
+  phase-3 error.
 - The argv is `<p> -c <script> cpf <args…>`: `$0 = cpf`, `$1…` the expanded
   args. `script` is literal; values reach it only as positional parameters,
   which the script must quote. This prevents substitution into the script
@@ -627,8 +698,12 @@ repeat = 5
   engine and supervisor, never under the workspace lock; extra args are
   appended verbatim (to `argv`, or to shell `args`).
 - `needs_build = true` (default false): the job builds the selected target
-  once first (outside the test × repeat product); only then are the artifact
-  placeholders available; using them without it is a phase-2 error.
+  once first (outside the test × repeat product). The target placeholders
+  (`{sources}`, `{source}`, `{artifact}`, `{artifact_dir}`) are available
+  for planning at once: their paths are allocated before the build and the
+  command's stage is prepared with them (§4.5); only the outputs' existence
+  and a generated program's check wait for the build to succeed. Using them
+  without `needs_build` is a phase-2 error (§5.2).
 - `for_each_test = true`: one run per enabled test; stdin defaults to the
   test's frozen input (storage contract §7), `stdin = "null"` overrides. `stdin = "test"`
   without `for_each_test` is an error.
@@ -895,6 +970,17 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
 - Generated program checked only after its build; batch argument refused
   (`UnsafeBatchArgument`) and a batch name with trailing dot or space on
   Windows CI.
+- Expansion amendment: Windows environment names differing only outside
+  ASCII case (e.g. `Ä`/`ä`) are one name; `PATH` set in a stage's `env` is
+  the one searched; `tool.` and `tool.cmd ` refused on Windows; malformed
+  `PATHEXT` entries skipped; a Unix file executable only by another user is
+  not launchable; a generated batch program has launch kind `batch`; a
+  generated path with `..` refused; a placeholder value supplied for an
+  undeclared placeholder is still unavailable; empty `sources` expands
+  `{sources}` to nothing and refuses `{source}`; an interpreter symlink
+  named `sh` is accepted; an interpreter under the artifact directory
+  refused; with `tool.cmd` and `tool.cmd.exe` both present the launcher
+  starts `tool.cmd` (B4a).
 - Placeholders: multi in program position refused; missing answer;
   `{artifact}` for a directory target; shell positional args with spaces,
   quotes, backslashes, `$` and newlines; CLI extra args verbatim.
