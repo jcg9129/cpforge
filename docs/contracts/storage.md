@@ -448,15 +448,78 @@ component (§2.1) and a single-component destination must not collide with
 `[files] created = [{ path = "main.cpp", command = "add" }]` in the staged
 record, with the effective source path in place of `main.cpp`.
 
-### 5.3 `cpf test add`
+### 5.3 Test commands
 
-1. Lock. Next `n` with neither `custom-<n>.in` nor `custom-<n>.ans` present.
+The problem is resolved per §5.7. The catalog is §8.1.
+
+**`cpf test add --input <file> [--answer <file>]`.** `-` reads one of the
+two from stdin (both from stdin is a usage error); omitting `--answer`
+registers a test without a reference answer. Bytes are copied exactly, never
+linked or converted; test data has no size cap and is streamed. Both
+sources are read first, **before** the lock is taken (a slow stdin never
+holds it), into private temporary files in the operating system's temporary
+directory, never in a workspace recovery location: §4.5 recovery assumes
+every workspace temporary was created under the lock and would remove one
+created before it. These captures are removed when the command ends; a
+crash can leave them for the operating system to clean. Under the lock the
+bytes are published from them with the §4.3 primitive. Then:
+
+1. Lock (leftover recovery first). Classify `tests.toml` (§8.1): `missing` or
+   `valid` continue; anything else refuses before anything is published.
+   Choose the smallest `n ≥ 1` such that no catalog id has the collision key
+   of `custom-<n>`, no catalog `input` or `answer` path has the key of
+   `tests/custom-<n>.in` or `tests/custom-<n>.ans` (even when that file is
+   missing: a registered path is reserved), and no entry of `tests/` has the
+   key of `custom-<n>.in` or `custom-<n>.ans` (any entry type: a directory or
+   link occupies a name).
 2. `publish_file_noclobber` the `.in`, then the `.ans` if any.
-3. Edit transaction on `tests.toml` adding the entry with its hashes.
+3. Edit transaction on `tests.toml` (created no-clobber with `schema = 1`
+   when missing) appending the entry `{ id = "custom-<n>", input, answer?,
+   origin = "custom", enabled = true }`. A replay revalidates the fresh
+   document and reapplies only this insertion; it never republishes files
+   or chooses another `n`. The id and path availability is checked again
+   inside the insertion on every replay; if a concurrent edit took the id or
+   a path, the edit fails with a conflict (the files stay, step 4).
 4. **Published files are never deleted.** If the `.ans` publish fails
    (`Exists` from a concurrent creator, I/O error) or step 3 fails, the
-   published files stay, discovery shows them as *unregistered*, and the
-   command reports the partial result. A retry may choose a new `n`.
+   published files stay and the command reports exactly which paths were
+   published, that registration did not commit, the failing step and any
+   warnings; `ls` shows them as unregistered. A retry may choose a new
+   `n`. A file edited by the user between publication and registration is
+   registered as it is (no hash pins its content). `Durability::Uncertain`
+   after a publish means it happened: the sequence continues with a warning.
+
+Output: the new id on stdout.
+
+**`cpf test register <input> [--answer <file> | --no-answer] [--id <id>]`.**
+Registers existing files without copying or changing them. `<input>` and
+`--answer` name files in the problem's `tests/` (a path relative to the
+current directory, which must resolve lexically to `tests/<name>` of the
+selected problem). Without `--answer` or `--no-answer`, the sibling
+`<stem>.ans` is used **if it exists**, and the output says so; `--no-answer`
+ignores it. The id defaults to the input's stem when that is a valid
+Identifier (§2.1) not taken in the catalog, else `--id` is required. Under
+the lock: classify the catalog, check the files (§8.1 health rules), refuse
+paths already named by an entry, then one edit transaction appending `{ id,
+input, answer?, origin = "custom", enabled = true }`. As for `add`, the id
+and path availability is checked again **inside** the insertion on every
+replay, against the fresh document; if an editor took either meanwhile, the
+command fails with a conflict and the catalog is unchanged.
+
+**`cpf test enable <id>` / `cpf test disable <id>`.** Registered ids only (an
+unregistered file must be registered first). Under the lock, an edit
+transaction that changes only that entry's `enabled`, located by id on every
+replay (never by position); an id gone during replay is reported, nothing
+else changes. Already in the requested state → nothing is written.
+
+**`cpf test ls`.** Lock-free reader (§8). One line per registered entry in
+catalog order (id, enabled, answer absent / present, health), then the
+unregistered candidates (§8.1) in collision-key order, then diagnostics.
+Human-readable only; a stable machine format comes with `--json`.
+
+A bare `cpf test` runs tests (later task); selecting a case there uses an
+option (`--case <id>`), never a positional id, so it cannot collide with
+these subcommands.
 
 ### 5.4 `cpf adopt <path>` *(draft)*
 
@@ -855,7 +918,8 @@ It never touches anything else.
 ```rust
 pub trait TestStore {
     fn list(&self) -> Result<Vec<TestEntry>, StorageError>;   // tests.toml + discovery
-    fn add(&mut self, g: &WorkspaceGuard, input: &[u8], answer: Option<&[u8]>, origin: Origin) -> Result<AddOutcome, StorageError>;
+    fn add(&mut self, g: &WorkspaceGuard, input: &CapturedFile, answer: Option<&CapturedFile>, origin: Origin) -> Result<AddOutcome, StorageError>;
+    // CapturedFile: a pre-lock capture (§5.3) read as a stream, never as one buffer
     fn set_enabled(&mut self, g: &WorkspaceGuard, id: &TestId, enabled: bool) -> Result<(), StorageError>;
     fn freeze_into(&self, ids: &[TestId], job: &JobInputs) -> Result<FrozenManifest, StorageError>;
 }
@@ -863,6 +927,69 @@ pub trait TestStore {
 
 `TestEntry` distinguishes answer absent / present-empty / present and
 registered / unregistered; `AddOutcome` reports partial results (§5.3).
+The trait above is the target shape; `freeze_into` arrives with job
+admission (it needs `JobInputs`), and the CLI foundation may grow the store
+in that order.
+
+### 8.1 Test catalog (`tests.toml`)
+
+User-editable (§3, §9; classification, 1 MiB cap, unknown keys and comments
+preserved by edits):
+
+```toml
+schema = 1
+
+[[test]]
+id = "custom-1"
+input = "tests/custom-1.in"
+answer = "tests/custom-1.ans"   # omitted: the test has no reference answer
+origin = "custom"               # "sample" | "custom" | "stress" | "imported"
+enabled = true
+```
+
+- `id`, `input`, `origin`, `enabled` are required; `answer` is optional.
+  `id` is an Identifier (§2.1), unique within the problem by collision key;
+  it is stable: editing an entry's paths keeps it, and renaming a file on
+  disk does not change the catalog (the entry then reports a missing file).
+- `input` and `answer` are `tests/<name>` with `<name>` a portable component
+  (§2.1), `/` as separator; anything else (absolute, `..`, nested
+  directories, `\`) is `malformed`. No two entries, and not an entry's input
+  and answer, may name paths with equal collision keys. Order of `[[test]]`
+  is the catalog order.
+- **Answers:** `answer` omitted means deliberately absent; an `answer`
+  naming a zero-byte file is present and empty; an `answer` naming a missing
+  file is an entry error. A registered entry's answer is never inferred from
+  a sibling file. Whether a test without an answer can pass is decided by
+  the comparator and job tasks.
+- No hashes for `custom` tests: the current file is the content, and job
+  admission hashes the bytes it copies (§7). Download hashes arrive with
+  fetch and mean "content at download time".
+- Per-test checker overrides are a later design; until then such keys are
+  preserved as unknown keys, and a recognised execution-affecting key that
+  the running version does not support is a planning error, never ignored.
+- **Classification** (§9 user-editable): `missing` (no file: an empty
+  catalog; `add` and `register` create it), `unreadable`, `malformed`
+  (including any invalid known field or duplicate), `too_new` (raw display
+  only), `valid`. Only `missing` and `valid` permit mutation; the others
+  refuse every command but `ls`, which reports the classification and still
+  lists discovery candidates.
+- **Entry health** (checked at use, reported by `ls`, never a catalog
+  error): the files must exist and resolve to regular files; test data is
+  read-only, so links are followed (§2), FIFOs, sockets, devices and
+  directories are refused. A file is opened **non-blocking** (Unix
+  `O_NONBLOCK | O_CLOEXEC`; Windows opens never block on these types) and
+  the type is validated on the **opened handle** before any read, so a
+  regular file replaced by a FIFO between inspection and use is refused,
+  never waited on. A disabled entry's health is reported
+  but never blocks anything; a selected enabled entry that is unhealthy
+  stops the job before any run.
+- **Discovery** (read-only, never writes the catalog): entries of `tests/`
+  (no recursion) named `<stem>.in` that no catalog entry names in either
+  role are **unregistered candidates**, shown with their sibling
+  `<stem>.ans` if present. A `.ans` no entry names and without a candidate
+  `.in` is reported as a stray file. Candidates are never run, including
+  through an explicit selector; `cpf test register` turns one into an entry.
+  `.cpf-tmp-*` names are never candidates.
 The CLI foundation implements it over `tests.toml` + `tests/`; the initial feature release may use
 generations behind it. Lock-free readers of metadata tolerate absence,
 replacement between reads and malformed hand edits (reported with location);
@@ -922,7 +1049,7 @@ finalizes them (execution contract §6.2).
 | shared-record edit (§4.4) | old content; temp may remain | new content complete |
 | file no-clobber publish | target absent; temp may remain | target complete (link fallback: temp may remain) |
 | dir publish (`add`) | no `problems/<name>`; staging may remain | complete problem; membership may be missing (§5.2 step 5) |
-| `test add` | files absent, or published but unregistered | entry registered |
+| `test add` | files absent, or published but unregistered (`ls` shows them as candidates) | entry registered |
 | job admission (lease locked) | no dir; dir without lease; or dir with a lease file not yet locked (both interrupted, inactive, reclaimable) | job dir with lease: inactive orphan once `cpf` is dead, reclaimable |
 | prune rename | job dir intact | `.reclaim-*`, deleted by a later prune |
 | *(draft)* `job-seq` replace (admission 2a) | old counter | counter advanced; no job dir yet = an unused number (gap) |
@@ -943,7 +1070,7 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | atomic replace, shared-record edit, file and directory publication primitives; lock/recovery boundaries | C4b (covered by library helper subprocesses) |
 | init, init job-seq (including primitive publication and lock/recovery boundaries) | C4c (covered) |
 | add directory + membership (including staging, publication, contest creation/edit and lock/recovery boundaries) | C4d (covered) |
-| test add | C6 |
+| test add, register, enable/disable (§5.3) | C6 |
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |
 
@@ -967,7 +1094,21 @@ create a new number and leave the earlier files unregistered.
 - Composition: nested operations never re-acquire the lock; leftover recovery
   runs before the current transaction creates files.
 - `test add`: `.ans` `Exists` after `.in` published, and an editor modifying
-  the `.in` before that: the `.in` is kept, reported unregistered.
+  the `.in` before that: the `.in` is kept, reported unregistered; a
+  registered entry whose `tests/custom-1.in` is missing makes `add` choose
+  `custom-2`; an editor taking the id or a path during the replay → conflict,
+  catalog unchanged.
+- Test commands (C6): `register` uses an existing sibling `.ans` and says
+  so, `--no-answer` ignores it, the stem default id and `--id` when the stem
+  is taken or invalid; `register` of a path already named → refused;
+  `enable`/`disable` after an editor reordered entries changes the right one,
+  after the entry was removed reports it and changes nothing, an unchanged
+  state writes nothing; `ls` leaves the workspace byte-identical (no lock
+  file created) and lists candidates and strays; a malformed or `too_new`
+  catalog refuses every mutation and `ls` reports it; absent, empty and
+  missing answers; a FIFO in place of an input is refused without blocking
+  (Unix), including one swapped in after inspection; unregistered
+  candidates cannot be enabled or selected.
 - Leases and pruning: held lease never pruned; killed job becomes prunable;
   directory without lease reclaimed; unreadable lease left and reported;
   rename refused (Windows open handle without share-delete, injected

@@ -105,8 +105,10 @@ several contests is one directory.
 `tests.toml` lists each test: input path, optional answer path, origin
 (`sample`, `custom`, `stress`, `imported`), enabled flag, per-test checker
 override, and for downloaded tests the content hash at download time.
-Filename discovery (`*.in` with sibling `*.ans`) is a convenience that adds
-entries; an absent answer and an empty answer are different. `.ans` is the
+Filename discovery (`*.in` with sibling `*.ans`) is read-only: such files
+are listed as unregistered and become tests only through `cpf test register`
+(storage contract §8.1), so a half-finished `test add` never turns into a
+runnable test; an absent answer and an empty answer are different. `.ans` is the
 reference answer, `.out` a produced output.
 
 ### 4.3 Fetch and update safety
