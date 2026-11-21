@@ -323,6 +323,18 @@ impl<'probe> Engine<'probe> {
         persistence: &mut dyn Persistence,
         hooks: &mut dyn PhaseHooks,
     ) -> Arc<FinalizedReport> {
+        // The job state machine's future is large; keep it on the heap so
+        // callers on small thread stacks (test threads, runtime workers) do
+        // not overflow.
+        Box::pin(self.run_phases(executor, persistence, hooks)).await
+    }
+
+    async fn run_phases(
+        self,
+        executor: &mut dyn Executor,
+        persistence: &mut dyn Persistence,
+        hooks: &mut dyn PhaseHooks,
+    ) -> Arc<FinalizedReport> {
         let Self {
             ready,
             plan,
