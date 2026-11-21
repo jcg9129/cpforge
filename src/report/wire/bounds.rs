@@ -1,7 +1,7 @@
 //! Structural maxima use the field maxima in §3.2, including token slots at
 //! 32 bytes. This deliberately over-approximates today's shorter enum tokens.
 //! The same ordered writer encodes these and the actual engine fixtures below.
-use super::{value::*, *};
+use super::*;
 use crate::{jobs::engine as e, report as r, supervisor as p};
 use std::path::PathBuf;
 use std::time::Duration;
