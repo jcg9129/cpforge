@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod exec;
 pub mod exit;
+mod hooks;
 pub mod job_command;
 pub mod jobs;
 pub mod names;
@@ -50,28 +51,31 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             machine,
             extra,
         }) => {
-            return job_command::run(
+            return job_command::run_with_config(
                 &job_command::NamedCommand { name, extra },
                 cli.problem.as_deref(),
                 profile,
                 machine,
+                cli.config,
             );
         }
         Some(Command::Build { profile, machine }) => {
-            return job_command::run(
+            return job_command::run_with_config(
                 &job_command::BuildCommand,
                 cli.problem.as_deref(),
                 profile,
                 machine,
+                cli.config,
             );
         }
         Some(Command::Run { profile, deadline }) => {
             // Raw mode does not flatten machine options: clap rejects them (2).
-            return job_command::run(
+            return job_command::run_with_config(
                 &job_command::RunCommand { deadline },
                 cli.problem.as_deref(),
                 profile,
                 transport::MachineArgs::default(),
+                cli.config,
             );
         }
         Some(Command::Test {
@@ -93,14 +97,20 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                     .map(|()| exit::ExitCode::Success);
             }
             let command = job_command::TestRunCommand::new(cases, deadline)?;
-            return job_command::run(&command, cli.problem.as_deref(), profile, machine);
+            return job_command::run_with_config(
+                &command,
+                cli.problem.as_deref(),
+                profile,
+                machine,
+                cli.config,
+            );
         }
         Some(Command::Current { path }) => {
             return selection::current(cli.problem.as_deref(), path)
                 .map(|()| exit::ExitCode::Success);
         }
         Some(Command::Switch { reference }) => {
-            return selection::switch(&reference).map(|()| exit::ExitCode::Success);
+            return selection::switch(&reference, cli.config);
         }
         Some(Command::Init { path }) => {
             return workspace::init(&path).map(|()| exit::ExitCode::Success);

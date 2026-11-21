@@ -888,7 +888,9 @@ enabled = true                         # master switch, default true
   Cancelling the triggering command cancels hooks not yet started.
 - `CPF_HOOK_DEPTH=1` is injected last (§4.3); a `cpf` started with depth ≥ 1
   or a malformed value runs no hooks. This prevents accidental recursion;
-  hook code can remove the variable, so it is not a guarantee.
+  hook code can remove the variable, so it is not a guarantee. Hooks also
+  receive the captured identity, injected the same way: `CPF_WORKSPACE`,
+  `CPF_JOB_ID`, and for a problem `CPF_PROBLEM_ID` and `CPF_PROBLEM_DIR`.
 - Read-only commands (`ls`, `current`, `config`, `doctor`, `status`) never
   run hooks.
 

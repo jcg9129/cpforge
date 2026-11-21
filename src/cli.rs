@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub problem: Option<String>,
 
+    /// Replace the default user configuration for this invocation (disables hooks).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

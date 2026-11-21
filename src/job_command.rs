@@ -367,7 +367,7 @@ impl JobCommand for TestRunCommand {
 }
 
 /// Configuration contract §8.2: builds + tests × repeats + hooks, at most
-/// 10 000. Test jobs have one execution per test and no planned hooks yet.
+/// 10 000. Test jobs have one execution per test, plus eligible hooks.
 fn exceeds_run_cap(tests: usize, build: bool) -> bool {
     tests
         .checked_add(usize::from(build))
@@ -382,6 +382,16 @@ pub fn run(
     problem: Option<&str>,
     profile: Option<String>,
     machine: MachineArgs,
+) -> Result<ExitCode, Error> {
+    run_with_config(command, problem, profile, machine, None)
+}
+
+pub fn run_with_config(
+    command: &impl JobCommand,
+    problem: Option<&str>,
+    profile: Option<String>,
+    machine: MachineArgs,
+    config_path: Option<PathBuf>,
 ) -> Result<ExitCode, Error> {
     let kind = command.kind();
     let mode = machine.mode();
@@ -401,7 +411,15 @@ pub fn run(
             .map_err(|e| Error::Workspace(format!("cannot read current directory: {e}")))?;
         let root = crate::workspace::find_root(&cwd)?;
         refusal.workspace = Some(root.clone());
-        let plan = plan_invocation(command, &root, &cwd, problem, profile, &mut refusal)?;
+        let plan = plan_invocation(
+            command,
+            &root,
+            &cwd,
+            problem,
+            profile,
+            config_path,
+            &mut refusal,
+        )?;
         let InvocationPlan {
             config,
             selected,
@@ -411,6 +429,38 @@ pub fn run(
             tests,
             baseline,
         } = plan;
+        let hook_plans = if kind == JobKind::Test {
+            config
+                .hooks()
+                .map_err(|e| Error::Config(e.to_string()))?
+                .after_test
+        } else {
+            Vec::new()
+        };
+        let hook_reason = crate::hooks::authorize(config.hook_settings(), &root, &baseline).err();
+        if !hook_plans.is_empty() && hook_reason.is_none() {
+            let selected = selected.as_ref().expect("test selection");
+            let job = root.join(".cpforge/runs/00000000000000000-0000000000000000");
+            crate::hooks::prepare(
+                &hook_plans,
+                "after_test",
+                &job,
+                &root,
+                problem_binding(selected),
+                &baseline,
+            )?;
+            let build = usize::from(target.as_ref().is_some_and(|t| t.build.is_some()));
+            if tests
+                .len()
+                .saturating_add(build)
+                .saturating_add(hook_plans.len())
+                > 10_000
+            {
+                return Err(Error::Config(
+                    "planned runs exceed the 10 000 execution cap".into(),
+                ));
+            }
+        }
         let retention = config
             .retention()
             .map_err(|e| Error::Config(e.to_string()))?;
@@ -539,10 +589,35 @@ pub fn run(
         };
         let mut persistence = JobPersistence::for_execution(&ready)
             .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
-        let engine = Engine::with_cancellation(ready, request, cancel.clone())
+        let after_test = if hook_reason.is_none() && !hook_plans.is_empty() {
+            crate::hooks::prepare(
+                &hook_plans,
+                "after_test",
+                &ready.dir,
+                &root,
+                ready.problem.clone().expect("test problem"),
+                &baseline,
+            )?
+        } else {
+            Vec::new()
+        };
+        let mut engine = Engine::with_cancellation(ready, request, cancel.clone())
             .map_err(|e| Error::Config(e.to_string()))?
             .progress(progress.as_ref().expect("stderr writer").queue())
             .output_events(mode.output_chunks());
+        if kind == JobKind::Test {
+            if let Some(reason) = hook_reason {
+                engine = engine.disabled_hooks(
+                    hook_plans.iter().map(|p| p.name.value.clone()).collect(),
+                    "after_test",
+                    reason,
+                );
+            } else {
+                engine = engine
+                    .after_test(after_test)
+                    .map_err(|e| Error::Config(e.to_string()))?;
+            }
+        }
         if let MachineMode::Events { output } = mode {
             let receiver = engine.events().subscribe().expect("first event subscriber");
             events = Some(
@@ -677,6 +752,7 @@ fn plan_invocation(
     cwd: &Path,
     problem: Option<&str>,
     profile: Option<String>,
+    config_path: Option<PathBuf>,
     refusal: &mut wire::Refusal,
 ) -> Result<InvocationPlan, Error> {
     let mut request = ConfigRequest {
@@ -687,6 +763,7 @@ fn plan_invocation(
             appdata: std::env::var_os("APPDATA"),
         },
         workspace_root: Some(root.to_owned()),
+        config_path,
         current_dir: cwd.to_owned(),
         platform: Platform::host(),
         operation: command.operation(),
@@ -1318,6 +1395,154 @@ fn build_summary(report: &FinalizedReport) -> Vec<String> {
     }
     lines.push(parts.join(" | "));
     lines
+}
+
+/// Execute the captured on-switch plan after the selection transaction ended.
+/// Selection is already committed: ordinary admission/execution failures warn.
+pub(crate) fn switch_hooks(selected: &Selected, config: LoadedConfig) -> ExitCode {
+    let cancel = CancelState::new();
+    let mut signals = None;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<Option<Arc<FinalizedReport>>, Error> {
+            let plans = config
+                .hooks()
+                .map_err(|e| Error::Config(e.to_string()))?
+                .on_switch;
+            if plans.is_empty() {
+                return Ok(None);
+            }
+            let baseline = Baseline::capture();
+            if let Err(reason) =
+                crate::hooks::authorize(config.hook_settings(), &selected.root, &baseline)
+            {
+                eprintln!("cpf: warning: hooks_disabled: {reason}");
+                return Ok(None);
+            }
+            if !cfg!(any(target_os = "linux", target_os = "macos")) {
+                eprintln!("cpf: warning: hooks are unsupported on this platform");
+                return Ok(None);
+            }
+            let dummy = selected
+                .root
+                .join(".cpforge/runs/00000000000000000-0000000000000000");
+            crate::hooks::prepare(
+                &plans,
+                "on_switch",
+                &dummy,
+                &selected.root,
+                problem_binding(selected),
+                &baseline,
+            )?;
+            let retention = config
+                .retention()
+                .map_err(|e| Error::Config(e.to_string()))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| Error::Infrastructure(format!("hook runtime: {e}")))?;
+            signals = Some(
+                CancelSignals::install(cancel.clone())
+                    .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
+            );
+            check_cancel(&cancel)?;
+            let lock = WorkspaceLock::new(&selected.root)?;
+            let registered = register_job(
+                lock.acquire("switch hooks")?,
+                PrunePolicy::new(retention.keep_jobs.value, retention.workspace_bytes.value),
+                retention.job_bytes.value,
+                SystemTime::now(),
+            )
+            .map_err(|e| Error::Workspace(e.to_string()))?;
+            let mut ready = crate::jobs::prepare_command_job(
+                registered,
+                selected.root.clone(),
+                Some((problem_binding(selected), presentation(selected)?)),
+                &[],
+            )
+            .map_err(ready_error)?;
+            ready.cwd_bytes = Some(retention.cwd_bytes.value);
+            let iterations = crate::hooks::prepare(
+                &plans,
+                "on_switch",
+                &ready.dir,
+                &selected.root,
+                problem_binding(selected),
+                &baseline,
+            )?;
+            let request = JobRequest::Iterations {
+                kind: crate::jobs::engine::CommandKind::Hook,
+                iterations,
+                needs_build: false,
+                keep_going: true,
+            };
+            let mut persistence = JobPersistence::for_execution(&ready)
+                .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
+            let engine = Engine::with_cancellation(ready, request, cancel.clone())
+                .map_err(|e| Error::Config(e.to_string()))?;
+            execute(engine, &runtime, &mut persistence, &mut NoHooks).map(Some)
+        },
+    ));
+    let status = match outcome {
+        Ok(Ok(Some(report))) => {
+            crate::process::freeze_report();
+            // Replay retained streams only to stderr. Both stream budgets and
+            // supervisor deadlines remain those of the hook's execution spec.
+            let mut stderr = io::stderr().lock();
+            for execution in &report.data().executions {
+                if let Some(ExecutionRecord::Started(root)) = execution.evidence.as_deref() {
+                    for capture in [root.stdout.as_ref(), root.stderr.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(file) = capture
+                            .sink
+                            .as_ref()
+                            .and_then(|path| std::fs::File::open(path).ok())
+                        {
+                            let _ = io::copy(&mut file.take(capture.stored), &mut stderr);
+                        } else {
+                            let _ = stderr.write_all(&capture.retained);
+                        }
+                    }
+                }
+            }
+            for line in final_warnings(&report) {
+                let _ = writeln!(stderr, "{line}");
+            }
+            let _ = writeln!(
+                stderr,
+                "cpf: switch hooks: {}",
+                report.data().result.verdict.wire_token()
+            );
+            exit_status(&ExitInputs {
+                failure: report
+                    .post_freeze_internal()
+                    .then_some(crate::error::FailureClass::Internal),
+                verdict: Some(report.data().result.verdict),
+                cancellation: report.data().result.cancellation.is_some(),
+                switch_hook: true,
+                ..ExitInputs::default()
+            })
+        }
+        Ok(Ok(None)) => ExitCode::Success,
+        Ok(Err(error)) => {
+            eprintln!("cpf: warning: switch hook job: {error}");
+            exit_status(&ExitInputs {
+                failure: Some(error.class()),
+                cancellation: cancel.cancellation().is_some(),
+                switch_hook: true,
+                ..ExitInputs::default()
+            })
+        }
+        Err(_) => {
+            eprintln!("cpf: error: internal failure in switch hook job");
+            ExitCode::Internal
+        }
+    };
+    if status != ExitCode::Success {
+        eprintln!("cpf: note: selection was committed before switch hooks");
+    }
+    signals.map_or(status, |signals| signals.finish(status))
 }
 
 #[cfg(test)]

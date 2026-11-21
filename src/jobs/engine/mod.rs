@@ -125,6 +125,7 @@ pub enum Point {
     BeforeSummary(u32),
     BeforeTestVerdict(u32),
     AfterPrimaryFreeze,
+    BeforeHookStart(u32),
     Settlement,
     Closure,
     BeforeSnapshot,
@@ -137,6 +138,8 @@ type Observer = dyn Fn(Point) + Send + Sync;
 pub struct Engine<'probe> {
     ready: ReadyExecutionJob<'probe>,
     plan: Vec<PlannedExecution>,
+    after_test: Vec<PlannedExecution>,
+    disabled_hooks: Vec<Hook>,
     kind: JobKind,
     comparator: Option<Comparator>,
     keep_going: bool,
@@ -303,6 +306,8 @@ impl<'probe> Engine<'probe> {
         Ok(Self {
             ready,
             plan,
+            after_test: Vec::new(),
+            disabled_hooks: Vec::new(),
             kind,
             comparator,
             keep_going,
@@ -314,6 +319,60 @@ impl<'probe> Engine<'probe> {
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer: None,
         })
+    }
+
+    /// Attach already prepared hooks to phase H, sharing this job's resources.
+    pub fn after_test(mut self, iterations: Vec<Iteration>) -> Result<Self, PlanError> {
+        if self.kind != JobKind::Test {
+            return Err(PlanError::InvalidIteration);
+        }
+        if self
+            .plan
+            .len()
+            .saturating_add(self.after_test.len())
+            .saturating_add(iterations.len())
+            > MAX_EXECUTIONS
+        {
+            return Err(PlanError::TooManyExecutions);
+        }
+        for iteration in iterations {
+            if !matches!(&iteration.role, Role::Hook { name, trigger }
+                if crate::names::Identifier::new(name.clone()).is_ok() && trigger == "after_test")
+                || iteration.depends_on_build
+                || iteration.stdin.is_some()
+                || !matches!(&iteration.recipe, Recipe::Resolved(_))
+            {
+                return Err(PlanError::InvalidIteration);
+            }
+            self.after_test.push(PlannedExecution {
+                index: (self.plan.len() + self.after_test.len()) as u32,
+                stage: Stage::Hook,
+                role: iteration.role,
+                recipe: iteration.recipe,
+                depends_on_build: false,
+                stdin: None,
+                test: None,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn disabled_hooks(
+        mut self,
+        names: Vec<String>,
+        trigger: &'static str,
+        reason: &'static str,
+    ) -> Self {
+        self.disabled_hooks = names
+            .into_iter()
+            .map(|name| Hook {
+                name,
+                trigger,
+                execution: None,
+                outcome: HookResult::NotPlanned { reason },
+            })
+            .collect();
+        self
     }
 
     /// Attach the invocation's stderr queue before running. It is closed at E.
@@ -364,6 +423,8 @@ impl<'probe> Engine<'probe> {
         let Self {
             ready,
             plan,
+            after_test,
+            disabled_hooks,
             kind,
             comparator,
             keep_going,
@@ -378,6 +439,17 @@ impl<'probe> Engine<'probe> {
         let started_at = ready.started_at;
         let mut warnings = warnings::admission(&ready.prune_report);
         let mut details = report_details(&ready, capture_enabled, comparator.clone(), kind);
+        if let Some(Hook {
+            outcome: HookResult::NotPlanned { reason },
+            ..
+        }) = disabled_hooks.first()
+        {
+            details.warnings.push(WireWarning {
+                kind: WarningKind::HooksDisabled { reason },
+                message: format!("hooks_disabled: {reason}"),
+            });
+        }
+        details.hooks = disabled_hooks;
         let mut target = TargetState {
             pending: None,
             free: None,
@@ -390,6 +462,9 @@ impl<'probe> Engine<'probe> {
         }
         let context = Context {
             dir: &ready.dir,
+            workspace: &ready.workspace,
+            problem: ready.problem.as_ref(),
+            job_id: ready.id.as_str(),
             owner: &ready.owner,
             budget: &ready.budget,
             platform: ready.platform,
@@ -405,16 +480,16 @@ impl<'probe> Engine<'probe> {
             kind,
             sequence: ready.sequence.clone(),
         });
-        let mut executions = Vec::with_capacity(plan.len());
+        let mut executions = Vec::with_capacity(plan.len() + after_test.len());
         let mut tests = Vec::new();
         let mut build = None;
         let mut admission_closed = false;
         let mut stopped = false;
         // Reserve report + replacement temporary before admitting any run.
-        let report_bytes = (64 * 1024 + 12 * 1024 * plan.len() as u64) * 2;
+        let report_bytes = (64 * 1024 + 12 * 1024 * (plan.len() + after_test.len()) as u64) * 2;
         let report_reservation = ready.budget.reserve(report_bytes).ok();
         let report_refused = report_reservation.is_none();
-        let planned_count = plan.len() as u32;
+        let planned_count = (plan.len() + after_test.len()) as u32;
         let generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
@@ -676,32 +751,10 @@ impl<'probe> Engine<'probe> {
                     planned_count
                 ));
             }
-            executions.push(execution);
-        }
-        if let Some(warning) = warnings::cleanup(&executions) {
-            warnings.push(warning);
-        }
-        for execution in &executions {
-            if let Some(bytes) = execution
-                .summary
-                .as_ref()
-                .and_then(|s| s.cwd_overflow_bytes)
-            {
-                if details.warnings.len() == 24 {
-                    details.warnings_dropped += 1;
-                    continue;
-                }
-                details.warnings.push(WireWarning {
-                    kind: WarningKind::Retention {
-                        detail: "cwd_overflow",
-                        run: execution.run.as_ref().map(|r| r.as_str().to_owned()),
-                        bytes,
-                    },
-                    message: format!(
-                        "CwdOverflow: working directory exceeded its byte limit ({bytes} bytes)"
-                    ),
-                });
+            if kind == JobKind::Hook {
+                record_hook(&mut details, &execution);
             }
+            executions.push(execution);
         }
         let primary: Vec<_> = executions.iter().map(|e| e.result.clone()).collect();
         let test_verdicts: Vec<_> = tests.iter().filter_map(|t| t.verdict.clone()).collect();
@@ -770,7 +823,82 @@ impl<'probe> Engine<'probe> {
                     InternalLocus::Phase { phase: "hooks" },
                 );
             }
+            for planned in after_test {
+                #[cfg(any(test, feature = "storage-test-hooks"))]
+                context.phase_point(Point::BeforeHookStart(planned.index));
+                let skip = start();
+                let mut execution = if let Some(reason) = skip {
+                    skipped(planned, reason)
+                } else if admission_closed {
+                    skipped(planned, SkipReason::AdmissionClosed)
+                } else {
+                    context
+                        .execute(
+                            planned,
+                            &mut target,
+                            executor,
+                            persistence,
+                            report_refused,
+                            &mut admission_closed,
+                        )
+                        .await
+                };
+                execution.result = report::validate_execution(
+                    execution.result,
+                    &report::SkipConditions {
+                        job: kind,
+                        depends_on_unsucceeded_build: false,
+                        earlier_retention_refusal: admission_closed,
+                        keep_going: true,
+                        earlier_primary_failed: false,
+                        intent_before_admission: cancel.lock().intent.is_some(),
+                        after_test_hook: true,
+                        hooks_eligible: skip != Some(SkipReason::JobNotEligible),
+                    },
+                );
+                if let Some(invariant) = report::execution_invariant(&execution.result) {
+                    execution.result.invariant = Some(invariant);
+                    record_internal(
+                        &cancel,
+                        invariant,
+                        InternalLocus::Execution {
+                            index: execution.plan.index,
+                        },
+                    );
+                }
+                record_hook(&mut details, &execution);
+                events.offer(EventPayload::Progress {
+                    done: executions.len() as u32 + 1,
+                    total: planned_count,
+                });
+                executions.push(execution);
+            }
             cancel.lock().phase = CancelPhase::Settlement;
+        }
+        if let Some(warning) = warnings::cleanup(&executions) {
+            warnings.push(warning);
+        }
+        for execution in &executions {
+            if let Some(bytes) = execution
+                .summary
+                .as_ref()
+                .and_then(|s| s.cwd_overflow_bytes)
+            {
+                if details.warnings.len() == 24 {
+                    details.warnings_dropped += 1;
+                    continue;
+                }
+                details.warnings.push(WireWarning {
+                    kind: WarningKind::Retention {
+                        detail: "cwd_overflow",
+                        run: execution.run.as_ref().map(|r| r.as_str().to_owned()),
+                        bytes,
+                    },
+                    message: format!(
+                        "CwdOverflow: working directory exceeded its byte limit ({bytes} bytes)"
+                    ),
+                });
+            }
         }
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::Settlement);
@@ -805,7 +933,16 @@ impl<'probe> Engine<'probe> {
         }
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::BeforeSnapshot);
-        let counts = report::coverage_counts(&primary, &[], &test_verdicts);
+        let hook_results: Vec<_> = executions
+            .iter()
+            .skip(primary.len())
+            .map(|e| e.result.clone())
+            .collect();
+        let counts = report::coverage_counts(&primary, &hook_results, &test_verdicts);
+        details.hooks_dropped = details.hooks.len().saturating_sub(32) as u32;
+        details.hooks.truncate(32);
+        details.warnings_dropped += details.warnings.len().saturating_sub(24) as u32;
+        details.warnings.truncate(24);
         let aggregates = if kind == JobKind::Cmd {
             aggregate(&executions)
         } else {
@@ -924,7 +1061,37 @@ struct TargetState<'probe> {
     free: Option<build::PreflightedBuildFree>,
     validated: Option<ValidatedBuild>,
 }
+fn record_hook(details: &mut ReportDetails, execution: &ExecutionReport) {
+    let Role::Hook { name, trigger } = &execution.plan.role else {
+        return;
+    };
+    let outcome = report::hook_outcome(&execution.result);
+    let result = HookResult::Planned(outcome.clone());
+    if outcome != report::HookOutcome::Succeeded {
+        details.warnings.push(WireWarning {
+            kind: WarningKind::Hook {
+                name: name.clone(),
+                outcome: result.clone(),
+            },
+            message: format!("hook {name}: {}", outcome.wire_token()),
+        });
+    }
+    details.hooks.push(Hook {
+        name: name.clone(),
+        trigger: if trigger == "after_test" {
+            "after_test"
+        } else {
+            "on_switch"
+        },
+        execution: Some(execution.plan.index),
+        outcome: result,
+    });
+}
+
 struct Context<'a> {
+    workspace: &'a Path,
+    problem: Option<&'a crate::exec::ProblemBinding>,
+    job_id: &'a str,
     dir: &'a Path,
     owner: &'a JobOwner,
     budget: &'a Arc<JobBudget>,
@@ -994,7 +1161,7 @@ impl Context<'_> {
                 break;
             }
         }
-        let stage = catch_unwind(AssertUnwindSafe(|| -> Result<_, ()> {
+        let mut stage = catch_unwind(AssertUnwindSafe(|| -> Result<_, ()> {
             if plan.stage == Stage::Build {
                 target
                     .pending
@@ -1039,6 +1206,31 @@ impl Context<'_> {
         }))
         .ok()
         .and_then(Result::ok);
+        if plan.stage == Stage::Hook {
+            if let Some(stage) = &mut stage {
+                let mut injected = vec![
+                    ("CPF_HOOK_DEPTH", std::ffi::OsString::from("1")),
+                    ("CPF_WORKSPACE", self.workspace.as_os_str().to_owned()),
+                    ("CPF_JOB_ID", std::ffi::OsString::from(self.job_id)),
+                ];
+                if let Some(problem) = self.problem {
+                    injected.push(("CPF_PROBLEM_ID", std::ffi::OsString::from(&problem.id)));
+                    injected.push(("CPF_PROBLEM_DIR", problem.dir.as_os_str().to_owned()));
+                }
+                for (name, value) in injected {
+                    // Last, never overridable (config §4.3); Windows names
+                    // compare ASCII case-insensitively like the reserved prefix.
+                    stage.environment.retain(|(key, _)| {
+                        if cfg!(windows) {
+                            !key.as_encoded_bytes().eq_ignore_ascii_case(name.as_bytes())
+                        } else {
+                            key != name
+                        }
+                    });
+                    stage.environment.push((name.into(), value));
+                }
+            }
+        }
         let command = stage
             .as_ref()
             .and_then(|s| s.launch_command(self.platform).ok());

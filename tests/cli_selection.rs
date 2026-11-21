@@ -877,3 +877,27 @@ fn current_path_uses_canonical_structural_directory_spelling_on_windows() {
     assert_eq!(output.stdout, expected);
     selected(&workspace.run("PROBLEMS/A", &["current"]), "A");
 }
+
+#[cfg(windows)]
+#[test]
+fn trusted_switch_warns_without_running_hooks_on_windows() {
+    let workspace = Workspace::new();
+    workspace.problem("A");
+    fs::write(workspace.path("cpforge.toml"), "schema = 1\n[commands.h]\nargv = ['cmd.exe', '/c', 'echo unexpected']\n[hooks]\non_switch = ['h']\n").unwrap();
+    let trusted = serde_json::to_string(workspace.0.to_str().unwrap()).unwrap();
+    fs::write(
+        workspace.path("user/cpforge/config.toml"),
+        format!("schema = 1\n[hooks]\ntrusted_workspaces = [{trusted}]\n"),
+    )
+    .unwrap();
+    let output = workspace.run("", &["switch", "A"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"local:A\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hooks are unsupported"));
+    assert_eq!(
+        fs::read_dir(workspace.path(".cpforge/runs"))
+            .unwrap()
+            .count(),
+        0
+    );
+}

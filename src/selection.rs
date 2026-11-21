@@ -453,7 +453,10 @@ pub(crate) fn current(problem_flag: Option<&str>, path: bool) -> Result<(), Erro
         .map_err(|error| Error::Workspace(format!("cannot write selection: {error}")))
 }
 
-pub(crate) fn switch(reference: &str) -> Result<(), Error> {
+pub(crate) fn switch(
+    reference: &str,
+    config_path: Option<PathBuf>,
+) -> Result<crate::exit::ExitCode, Error> {
     let (root, cwd) = invocation_paths()?;
     let lock = WorkspaceLock::new(root)?;
     let guard = lock.acquire("switch")?;
@@ -468,9 +471,30 @@ pub(crate) fn switch(reference: &str) -> Result<(), Error> {
     let problem = lookup(guard.root(), reference)?;
     // Reject a link in a tool-written path, even on a same-selection no-op.
     guard.check_path(".cpforge/state.toml")?;
+    let selected = Selected {
+        root: guard.root().to_path_buf(),
+        dir: problem.dir,
+        identity: problem.identity,
+        source: Source::Saved,
+    };
+    // Capture configuration and context during the metadata operation. A
+    // configuration refusal belongs to the later hook job, not this commit.
+    let config = crate::config::load_config(
+        &selected.config_request(ConfigRequest {
+            config_path,
+            current_dir: cwd.clone(),
+            environment: crate::config::Environment {
+                home: std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                    .map(PathBuf::from),
+                xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+                appdata: std::env::var_os("APPDATA"),
+            },
+            ..ConfigRequest::default()
+        }),
+    );
     let state = saved_state(guard.root())?;
-    if state.current_problem.as_ref() != Some(&problem.identity) {
-        let published = write_state(&guard, &problem.identity)?;
+    if state.current_problem.as_ref() != Some(&selected.identity) {
+        let published = write_state(&guard, &selected.identity)?;
         let mut report = Report::default();
         publication_warnings(
             &mut report,
@@ -481,14 +505,7 @@ pub(crate) fn switch(reference: &str) -> Result<(), Error> {
             eprintln!("cpf: warning: {warning}");
         }
     }
-    let selected = Selected {
-        root: guard.root().to_path_buf(),
-        dir: problem.dir,
-        identity: problem.identity,
-        source: Source::Saved,
-    };
     drop(guard);
-    on_switch_after_success(&selected);
     match canonical(&cwd) {
         Ok(physical_cwd) => {
             if let Some(name) = cwd_name(&selected.root, &physical_cwd) {
@@ -507,11 +524,9 @@ pub(crate) fn switch(reference: &str) -> Result<(), Error> {
         Err(error) => eprintln!("cpf: note: this directory could not be resolved: {error}"),
     }
     writeln!(io::stdout().lock(), "{}", selected.identity)
-        .map_err(|error| Error::Workspace(format!("cannot write selection: {error}")))
+        .map_err(|error| Error::Workspace(format!("cannot write selection: {error}")))?;
+    Ok(crate::job_command::switch_hooks(&selected, config))
 }
-
-/// C12c seam: execute on_switch after success, with captured selection and no lock.
-fn on_switch_after_success(_selected: &Selected) {}
 
 #[cfg(test)]
 mod tests {

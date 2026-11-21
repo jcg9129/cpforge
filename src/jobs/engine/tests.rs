@@ -1972,3 +1972,85 @@ fn cancelled_command_iteration_marks_remaining_iterations_cancelled() {
         }
     });
 }
+
+fn with_after_test(engine: Engine<'static>, count: usize) -> Engine<'static> {
+    let Some(PlannedTarget::BuildFree(free)) = &engine.ready.planned_target else {
+        panic!("fixture requires a build-free target")
+    };
+    let stage = free.run(engine.ready.dir.join("hook/cwd")).unwrap();
+    let iterations = (0..count)
+        .map(|index| Iteration {
+            role: Role::Hook {
+                name: format!("h{index}"),
+                trigger: "after_test".into(),
+            },
+            recipe: Recipe::Resolved(Box::new(stage.clone())),
+            stdin: None,
+            depends_on_build: false,
+        })
+        .collect();
+    engine.after_test(iterations).unwrap()
+}
+
+#[test]
+fn after_test_internal_error_preserves_primary_and_skips_later_hooks() {
+    let f = Fixture::new();
+    let engine = with_after_test(test_engine(&f, "python", 1), 2);
+    let report = runtime(engine.run(
+        &mut Fake::with([Behavior::Exit(0), Behavior::Panic]),
+        &mut MemoryPersistence::default(),
+        &mut NoHooks,
+    ));
+    let data = report.data();
+    assert_eq!(data.result.primary_verdict, JobVerdict::Passed);
+    assert_eq!(data.result.verdict, JobVerdict::InternalError);
+    assert_eq!(data.details.pre_delivery_exit.code, 70);
+    assert!(matches!(
+        data.details.hooks[0].outcome,
+        HookResult::Planned(report::HookOutcome::InternalError { .. })
+    ));
+    assert!(matches!(
+        data.details.hooks[1].outcome,
+        HookResult::Planned(report::HookOutcome::Skipped {
+            reason: SkipReason::JobNotEligible
+        })
+    ));
+    assert_eq!(data.result.counts.primary.planned, 1);
+    assert_eq!(data.result.counts.hooks.planned, 2);
+    assert_eq!(data.result.counts.hooks.skipped, 1);
+}
+
+#[test]
+fn after_test_checks_intent_before_each_hook_and_keeps_primary_counts_separate() {
+    let f = Fixture::new();
+    let engine = with_after_test(test_engine(&f, "python", 1), 3);
+    let cancel = engine.cancellation();
+    let engine = engine.observe(move |point| {
+        if point == Point::BeforeHookStart(2) {
+            cancel.request_cancel(CancelSource::Api);
+        }
+    });
+    let mut fake = Fake::with([Behavior::Exit(0), Behavior::Exit(19)]);
+    let report = runtime(engine.run(&mut fake, &mut MemoryPersistence::default(), &mut NoHooks));
+    let data = report.data();
+    assert_eq!(data.result.verdict, JobVerdict::Passed);
+    assert_eq!(data.result.primary_verdict, JobVerdict::Passed);
+    assert_eq!(data.details.pre_delivery_exit.code, 6);
+    assert_eq!(data.result.cancellation.unwrap().phase, CancelPhase::Hooks);
+    assert_eq!(fake.runs.len(), 2);
+    assert!(matches!(
+        data.details.hooks[0].outcome,
+        HookResult::Planned(report::HookOutcome::Failed { .. })
+    ));
+    for hook in &data.details.hooks[1..] {
+        assert!(matches!(
+            hook.outcome,
+            HookResult::Planned(report::HookOutcome::Skipped {
+                reason: SkipReason::Cancelled
+            })
+        ));
+    }
+    assert_eq!(data.result.counts.primary.planned, 1);
+    assert_eq!(data.result.counts.hooks.started, 1);
+    assert_eq!(data.result.counts.hooks.skipped, 2);
+}
