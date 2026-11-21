@@ -300,7 +300,6 @@ fn held_workspace_lock_is_a_warning_outcome() {
     let _guard = lock.acquire("hold").unwrap();
     let options = LockOptions {
         timeout: Duration::ZERO,
-        ..LockOptions::default()
     };
     let result = publish_fact_with_options(
         &f.0,
