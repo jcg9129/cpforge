@@ -2,10 +2,12 @@
 //!
 //! Mutations borrow the outer operation's guard. `add` publishes pre-lock
 //! captures, then replays only its catalog insertion, never its file publication.
-//! C10a will add `freeze_into(ids, job: &JobInputs)` once admission exists.
+//! Freezing borrows a registered job's inputs capability, outside the workspace lock.
 
 mod capture;
+mod freeze;
 pub use capture::CapturedFile;
+pub use freeze::{FreezeError, FrozenAnswer, FrozenManifest, FrozenTest, TestId, TestSettings};
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -285,7 +287,7 @@ fn file_kind(kind: fs::FileType) -> &'static str {
 
 /// Open first, then inspect that handle. Links to regular data are allowed.
 /// Nonblocking open prevents even a FIFO swapped in just before open from waiting.
-pub fn file_health(path: &Path) -> Health {
+pub(crate) fn open_regular(path: &Path) -> Result<fs::File, Health> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -299,32 +301,45 @@ pub fn file_health(path: &Path) -> Health {
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
         options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }
-    match options.open(path).and_then(|file| file.metadata()) {
-        Ok(metadata) if metadata.is_file() => Health::Ok {
-            length: metadata.len(),
-        },
-        Ok(metadata) => Health::NotRegular {
+    match options
+        .open(path)
+        .and_then(|file| file.metadata().map(|metadata| (metadata, file)))
+    {
+        Ok((metadata, file)) if metadata.is_file() => Ok(file),
+        Ok((metadata, _)) => Err(Health::NotRegular {
             kind: file_kind(metadata.file_type()),
-        },
+        }),
         Err(error)
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
             ) =>
         {
-            Health::Missing
+            Err(Health::Missing)
         }
         Err(error) => {
             // Some types (notably sockets) cannot be opened as files. This
             // fallback only explains a refusal; healthy status always requires
             // metadata from the successfully opened handle above.
-            match fs::metadata(path) {
+            Err(match fs::metadata(path) {
                 Ok(metadata) if !metadata.is_file() => Health::NotRegular {
                     kind: file_kind(metadata.file_type()),
                 },
                 _ => Health::Unreadable(error),
-            }
+            })
         }
+    }
+}
+
+pub fn file_health(path: &Path) -> Health {
+    match open_regular(path) {
+        Ok(file) => match file.metadata() {
+            Ok(metadata) => Health::Ok {
+                length: metadata.len(),
+            },
+            Err(error) => Health::Unreadable(error),
+        },
+        Err(health) => health,
     }
 }
 

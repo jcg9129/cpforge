@@ -34,6 +34,8 @@ pub struct RegisteredJob {
     pub owner: JobOwner,
     pub budget: Arc<JobBudget>,
     pub prune_report: AdmissionReport,
+    // Freeze failures survive a new borrow of the inputs capability.
+    pub(crate) inputs_failed: std::sync::atomic::AtomicBool,
 }
 
 /// Preserve warnings and committed changes even when a later step fails.
@@ -201,6 +203,7 @@ fn register_locked(
         owner,
         budget,
         prune_report: AdmissionReport::default(),
+        inputs_failed: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
