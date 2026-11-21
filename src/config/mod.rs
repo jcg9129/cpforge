@@ -313,6 +313,9 @@ pub enum TypedValue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedText {
+    /// Phase-1 spelling, including lexical path joining and home expansion,
+    /// before placeholder expansion or executable resolution.
+    pub unexpanded: std::ffi::OsString,
     pub tokens: Vec<Token>,
     /// Expanded home and lexical config-relative path, when resolved at load.
     /// Placeholder-led and absolute placeholder paths remain in `tokens`.

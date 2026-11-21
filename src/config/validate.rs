@@ -537,6 +537,7 @@ impl<'a> Validator<'a> {
         }
         let has_placeholder = tokens.iter().any(|t| matches!(t, Token::Placeholder(_)));
         let mut parsed = ParsedText {
+            unexpanded: text.clone().into(),
             tokens,
             path: None,
             lookup: false,
@@ -609,6 +610,15 @@ impl<'a> Validator<'a> {
                         )
                     });
                 }
+            }
+        }
+        if let Some(path) = &parsed.path {
+            parsed.unexpanded = path.as_os_str().to_owned();
+        } else if parsed.expanded_home.is_some() {
+            // Keep placeholders and brace escapes literal, using the validation
+            // platform rather than the host platform of a config inspector.
+            if let Ok(expanded) = syntax::home_expand(&text, self.env.home.as_deref(), platform) {
+                parsed.unexpanded = expanded;
             }
         }
         n.typed = Some(TypedValue::Text(parsed));

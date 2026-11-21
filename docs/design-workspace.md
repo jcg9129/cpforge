@@ -139,8 +139,10 @@ workspace arrive with the registry (§6.1).
   byte string length-prefixed (`u64` length, then bytes); paths relative to
   the problem directory, components joined by `/`, as raw bytes on Unix and
   WTF-8 on Windows; order by ascending byte order of the encoded path or id.
-  - `source`: `"cpf-fp-source-v1"`, file count, then per file of
-    `inputs/src/` its path and content; then the build profile name; then
+  - `source`: `"cpf-fp-source-v1"` (as a byte string), file count, then
+    per file of `inputs/src/` its path and content (each a byte string);
+    then the build profile name (a byte string, empty when no profile is
+    selected); then
     the **resolved build command**, encoded here and not by reference:
     these **covered build settings** after config resolution (C §2, §4): whether a build stage exists, its command (`argv` or
     `shell`), `cwd`, `env_remove` and `env`. Not covered: `deadline_s`,
@@ -212,6 +214,20 @@ workspace arrive with the registry (§6.1).
   script or one of its args changes it; an edit to an original file after
   capture does not change the job's fingerprint but makes `status` report
   `source changed`.
+
+The current configuration model has one unnamed solution target. Its fact
+key is `solution`, independent of the selected language or profile; those
+settings describe inputs to that same target. The problem directory key is
+the validated local problem name (without `local:`).
+
+Schema-1 fact fields are `schema`, `epoch`, `n`, `job`, `finished_at`,
+`verdict`, `source`, `tests`, and `[capture_check]`. The capture check uses
+`kind = "checked"` or `kind = "unchecked"` with `reasons = ["shell_stage"]`,
+matching report vocabulary. `finished_at` uses the report's UTC millisecond
+timestamp format and records completion of the primary work at phase A;
+after-test hooks and report settlement may finish later. Verdict summaries
+use the report's primary test-job verdict token. Extra fields in supported
+schemas are ignored, as with the other tool-only record codecs.
 
 ### 3.3 Commands
 

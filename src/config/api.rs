@@ -105,6 +105,9 @@ fn built_in<T>(key: &str, value: T) -> Sourced<T> {
 /// copied from phase 1 without converting them through UTF-8.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextValue {
+    /// Phase-1 text for input fingerprints: joined paths and expanded home,
+    /// retaining literal placeholders and brace escaping before phase 3.
+    pub unexpanded: std::ffi::OsString,
     pub tokens: Vec<Token>,
     pub path: Option<PathBuf>,
     pub lookup: bool,
@@ -119,6 +122,7 @@ fn text(node: &EffectiveNode) -> TextValue {
         unreachable!("validated execution text has parsed tokens")
     };
     TextValue {
+        unexpanded: parsed.unexpanded.clone(),
         tokens: parsed.tokens.clone(),
         path: parsed.path.clone(),
         lookup: parsed.lookup,

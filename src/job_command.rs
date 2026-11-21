@@ -255,6 +255,13 @@ impl TestRunCommand {
     }
 }
 impl JobCommand for TestRunCommand {
+    fn phase_hooks(
+        &self,
+        ready: &crate::jobs::ReadyJob<'_>,
+        _config: &LoadedConfig,
+    ) -> Result<Box<dyn PhaseHooks>, Error> {
+        Ok(Box::new(crate::jobs::facts::TestFacts::new(ready)))
+    }
     fn kind(&self) -> JobKind {
         JobKind::Test
     }

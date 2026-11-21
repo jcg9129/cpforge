@@ -440,6 +440,13 @@ mod execution {
             let output = w.run(&["test", "--json"]);
             status(&output, 0);
             assert_eq!(verdicts(&document(&output)), ["passed"]);
+            let report = document(&output);
+            assert_eq!(report["fact"]["outcome"]["kind"], "published");
+            assert!(report["fingerprints"]["source"].as_str().is_some());
+            assert!(report["fingerprints"]["tests"].as_str().is_some());
+            let fact = cpforge::storage::facts::read_fact(w.path(".cpforge/facts/A/solution.toml"));
+            assert!(matches!(fact, cpforge::storage::Record::Valid(record)
+                if record.verdict == cpforge::report::JobVerdict::Passed));
         }
         let w = Workspace::new(Some("python"));
         w.write("problems/A/main.py", "pass\n");
@@ -539,6 +546,10 @@ mod execution {
         let (_, report) = w.report();
         assert_eq!(verdicts(&report), ["passed", "cancelled", "cancelled"]);
         assert_eq!(report["result"]["verdict"], "cancelled");
+        assert_eq!(report["fact"]["outcome"]["kind"], "not_attempted");
+        assert_eq!(report["fact"]["outcome"]["reason"], "not_completed");
+        assert!(!w.path(".cpforge/facts/A/solution.toml").exists());
+        assert!(report["fingerprints"]["source"].as_str().is_some());
         assert_eq!(report["result"]["pre_delivery_exit"]["reraise"], "sigint");
         assert_eq!(delivered["result"], report["result"]);
         assert!(stderr(&output).contains("one  OK"));
@@ -610,6 +621,107 @@ mod execution {
         assert!(stderr(&output).contains("10 000"));
         assert!(w.jobs().is_empty());
         assert_eq!(w.sequence(), before);
+    }
+
+    #[test]
+    fn other_job_kinds_leave_fact_slots_untouched() {
+        // Raw `run` refuses --json, so every kind is read from its report.json.
+        for args in [vec!["build"], vec!["run"], vec!["cmd", "noop"]] {
+            let w = Workspace::new(Some("python"));
+            w.write("problems/A/main.py", "pass\n");
+            w.write(
+                "cpforge.toml",
+                "schema = 1\n[commands.noop]\nargv = ['python3', '-c', 'pass']\n",
+            );
+            let output = w.run(&args);
+            status(&output, 0);
+            let (_, report) = w.report();
+            assert!(report["fact"].is_null());
+            assert!(report["fingerprints"].is_null());
+            assert!(!w.path(".cpforge/facts/A/solution.toml").exists());
+        }
+    }
+
+    #[test]
+    fn unavailable_sequence_at_completion_warns_without_changing_passed_verdict() {
+        let w = Workspace::new(Some("python"));
+        let marker = w.path("started");
+        let release = w.path("release");
+        w.write("problems/A/main.py", &format!("import pathlib, time\npathlib.Path({marker:?}).write_text('ready')\nwhile not pathlib.Path({release:?}).exists(): time.sleep(0.01)\nprint(input())\n"));
+        w.cases(&[("one", "5\n", Some("5\n"), true)]);
+        let mut child = w.command(&["test", "--json"]).spawn().unwrap();
+        wait_for_marker(&w, &marker, &mut child);
+        w.write(".cpforge/job-seq", "schema = 99\n");
+        w.write("release", "go");
+        let output = wait(child);
+        status(&output, 0);
+        let report = document(&output);
+        assert_eq!(report["result"]["verdict"], "passed");
+        assert_eq!(report["fact"]["outcome"]["kind"], "not_published");
+        assert_eq!(report["fact"]["outcome"]["reason"], "sequence_unavailable");
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["kind"] == "fact")
+        );
+        assert!(!w.path(".cpforge/facts/A/solution.toml").exists());
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn signal_on_either_side_of_fact_cutoff_preserves_frozen_primary_and_commit_rule() {
+        use std::io::{BufRead, BufReader, Write};
+        for (barrier, expected) in [
+            ("fact.cutoff", "not_attempted"),
+            ("fact.after_cutoff", "published"),
+            ("fact.after_replace", "published"),
+        ] {
+            let w = Workspace::new(Some("python"));
+            w.cases(&[("one", "5\n", Some("5\n"), true)]);
+            status(&w.run(&["test", "--json"]), 0);
+            let path = w.path(".cpforge/facts/A/solution.toml");
+            let old = fs::read(&path).unwrap();
+            let mut child = w
+                .command(&["test", "--json"])
+                .env("CPF_STORAGE_PAUSE_AT", barrier)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            let mut marker = String::new();
+            stdout.read_line(&mut marker).unwrap();
+            assert_eq!(marker.trim(), format!("CPF-PAUSED {barrier}"));
+            // SAFETY: signal the live child process owned by this test. The
+            // verdict lock incorporates the handler notification itself.
+            assert_eq!(
+                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+                0
+            );
+            child.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(stdout.buffer().is_empty());
+            child.stdout = Some(stdout.into_inner());
+            let output = wait(child);
+            assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
+            let report = document(&output);
+            assert_eq!(report["result"]["primary_verdict"], "passed");
+            assert_eq!(report["result"]["cancellation"]["phase"], "fact");
+            assert_eq!(report["fact"]["outcome"]["kind"], expected);
+            if expected == "not_attempted" {
+                assert_eq!(report["fact"]["outcome"]["reason"], "cancelled");
+                assert_eq!(fs::read(&path).unwrap(), old);
+            } else {
+                assert_ne!(fs::read(&path).unwrap(), old);
+                assert!(
+                    report["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|w| w["kind"] == "late_cancellation")
+                );
+            }
+        }
     }
 }
 

@@ -49,6 +49,7 @@ use crate::storage::{StorageError, checked_path};
 use crate::tests_store::FrozenManifest;
 
 pub use guard::{CaptureCheck, CaptureCheckReason, GuardError};
+pub(crate) mod facts;
 
 /// No source-path parameter: managed planning always obtains bindings from the
 /// completed captured sources. Cwds and build allocations are job-owned.

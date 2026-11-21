@@ -93,6 +93,14 @@ impl std::error::Error for PlanError {}
 /// first invocation; repeats return the same snapshot. `start` must be checked
 /// separately immediately before each hook start, and returns a skip reason.
 pub trait PhaseHooks {
+    /// Phase A computes input evidence even for ineligible test jobs.
+    fn fingerprints(&mut self) -> Option<([u8; 32], [u8; 32])> {
+        None
+    }
+    /// Publication evidence is copied before hooks, settlement and closure.
+    fn fact_evidence(&self) -> Option<(Fact, Vec<WireWarning>)> {
+        None
+    }
     fn fact<'a>(
         &'a mut self,
         _primary: JobVerdict,
@@ -786,6 +794,16 @@ impl<'probe> Engine<'probe> {
         context.phase_point(Point::AfterPrimaryFreeze);
         if kind == JobKind::Test {
             let eligible = eligible(result.primary_verdict);
+            if caught(async { details.fingerprints = hooks.fingerprints() })
+                .await
+                .is_err()
+            {
+                record_internal(
+                    &cancel,
+                    Invariant::JobEvidence,
+                    InternalLocus::Phase { phase: "fact" },
+                );
+            }
             if eligible && cancel.lock().internal.is_none() {
                 let mut snapshot = None;
                 let mut cutoff = || *snapshot.get_or_insert_with(|| cancel.lock().intent.is_some());
@@ -799,6 +817,21 @@ impl<'probe> Engine<'probe> {
                         InternalLocus::Phase { phase: "fact" },
                     );
                 }
+            }
+            if caught(async {
+                if let Some((fact, warnings)) = hooks.fact_evidence() {
+                    details.fact = Some(fact);
+                    details.warnings.extend(warnings);
+                }
+            })
+            .await
+            .is_err()
+            {
+                record_internal(
+                    &cancel,
+                    Invariant::JobEvidence,
+                    InternalLocus::Phase { phase: "fact" },
+                );
             }
             cancel.lock().phase = CancelPhase::Hooks;
             let start = || {

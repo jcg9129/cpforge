@@ -13,6 +13,7 @@ pub mod admission;
 pub mod budget;
 pub(crate) mod crash;
 mod edit;
+pub mod facts;
 pub mod inputs;
 pub mod job;
 pub mod job_seq;

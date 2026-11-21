@@ -15,6 +15,7 @@
 //! `init.locked` (after lock acquisition and recovery),
 //! `init.job_seq_published` (after publishing a new initial job-seq),
 //! `init.config_published` (after publishing cpforge.toml);
+//! `fact.before_replace`, `fact.after_replace` (fact commit boundaries);
 //! `job.record_published` (after no-clobber publication of job.toml);
 //! `admission.job_seq_replaced` (job-seq advanced, no job directory yet),
 //! `admission.directory_created`, `admission.job_record_published`,
@@ -33,6 +34,7 @@
 //! Pause barriers: set `CPF_STORAGE_PAUSE_AT=<name>` to print
 //! `CPF-PAUSED <name>` to stdout and block until one byte arrives on stdin.
 //! Barriers: `inputs.source_copied` (after the first captured source copy),
+//! `fact.cutoff`, `fact.after_cutoff`, `fact.after_replace`;
 //! `command.between_iterations` (after the first command job execution).
 
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
