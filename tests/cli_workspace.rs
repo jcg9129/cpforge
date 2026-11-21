@@ -520,6 +520,27 @@ fn gitignore_refuses_multiple_hard_links_and_nonregular_files() {
     }
 }
 
+// Unix: Rust's stdout treats EBADF as success, so a read-only descriptor
+// would not fail; a stdout closed at startup is the undeliverable case.
+#[cfg(unix)]
+#[test]
+fn status_json_delivery_failure_exits_eleven() {
+    use std::os::unix::process::CommandExt;
+    let workspace = Workspace::new();
+    let mut command = workspace.command();
+    command.args(["status", "--json"]);
+    // SAFETY: only closes the child's stdout before exec; cpf repairs it at startup.
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(1);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(11), "{output:?}");
+}
+
+#[cfg(windows)]
 #[test]
 fn status_json_delivery_failure_exits_eleven() {
     let workspace = Workspace::new();
