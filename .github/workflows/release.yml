@@ -1,0 +1,98 @@
+name: release
+
+# Builds release binaries of `cpf`.
+# - A pushed tag `v<version>` (matching Cargo.toml) builds every target and
+#   creates a **draft** GitHub release with the archives and checksums; a
+#   maintainer reviews and publishes it by hand.
+# - A manual run (workflow_dispatch) only builds and uploads the archives as
+#   workflow artifacts, for trying a build without any release.
+# Windows is not built while its supervisor is unavailable: job commands
+# refuse on Windows.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Check the tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "cpforge") | .version')"
+          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match crate version ${version}" >&2
+            exit 1
+          fi
+      - name: Build
+        run: cargo build --release --locked --bin cpf --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="cpf-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/cpf" "dist/${name}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          if command -v sha256sum > /dev/null; then
+            (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpf-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  draft-release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Draft: review the archives, then publish." \
+            dist/*.tar.gz dist/*.tar.gz.sha256
