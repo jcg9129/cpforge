@@ -91,6 +91,32 @@ answer comparison.
 
 Cancellation exits by the signal on Unix (status 6 otherwise).
 
+# Interrupting jobs
+
+This applies to `cpf build`, `cpf test`, `cpf run`, `cpf cmd` and the
+`on_switch` hooks of `cpf switch`, on Linux and macOS.
+
+- **First Ctrl-C (`SIGINT`) or `SIGTERM`**: the job is cancelled. Running
+  programs, including `after_test` and `on_switch` hooks, are stopped with
+  their process groups, and runs not yet started are reported as `cancelled`.
+  The report is still saved, `--json` still prints it, and the summary is still
+  shown on stderr. `cpf` then exits by the same signal (a shell shows 130 or
+  143). If the output cannot be written, the status is 11 instead.
+- **A second signal at least 100 ms after the first** forces exit: `cpf` kills
+  every running program's process group and exits at once by that signal,
+  without waiting for the report. Records already saved remain.
+- **During planning** (reading configuration and selecting the problem), a
+  signal refuses the job before it is created: nothing is written under
+  `.cpforge/runs/` and `--json` prints a refusal of class `cancelled`.
+- **After the report has been delivered**, a single signal no longer changes
+  the result or the status; a second one still forces exit.
+- `cpf switch` itself, and commands that only read (`current`, `status`,
+  `config`, and similar), keep the default signal behaviour: they stop
+  immediately. A selection that `cpf switch` already committed stays committed
+  when its hooks are interrupted.
+- Programs that leave their process group (for example with `setsid`) are not
+  stopped.
+
 # Workspace status
 
 ```

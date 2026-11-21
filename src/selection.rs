@@ -390,6 +390,7 @@ pub fn resolve(
     cwd: &Path,
     problem_flag: Option<&str>,
 ) -> Result<Selected, SelectionError> {
+    crate::storage::crash::barrier("selection.resolve");
     let root = canonical(root)?;
     let (problem, source) = if let Some(reference) = problem_flag {
         (

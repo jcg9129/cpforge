@@ -815,6 +815,7 @@ impl LoadedConfig {
 /// Discovery failures become diagnostics and an unknown user input; known
 /// workspace/problem files are still loaded independently.
 pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
+    crate::storage::crash::barrier("config.load");
     let options = DiscoveryOptions {
         config_override: request.config_path.clone(),
         workspace_root: request.workspace_root.clone(),

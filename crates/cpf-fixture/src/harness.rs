@@ -80,6 +80,29 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Read a Unix `identity-file` publication while the fixture waits at a
+    /// file barrier. Opening verifies the start identity before it is retained.
+    #[cfg(unix)]
+    pub fn from_file(path: &std::path::Path) -> io::Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        let mut fields = contents.split_whitespace();
+        let mut number = || -> io::Result<u64> {
+            fields
+                .next()
+                .ok_or_else(|| io::Error::other("missing fixture identity"))?
+                .parse::<u64>()
+                .map_err(io::Error::other)
+        };
+        let pid = u32::try_from(number()?).map_err(io::Error::other)?;
+        let start_id = number()?;
+        let process = platform::Process::open(pid, start_id)?;
+        Ok(Self {
+            pid,
+            start_id,
+            process,
+        })
+    }
+
     pub fn is_live(&self) -> bool {
         self.process.is_live(self.pid, self.start_id)
     }

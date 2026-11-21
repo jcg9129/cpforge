@@ -272,6 +272,11 @@ fn push_error(outcome: &mut RootOutcome, error: SupervisorError) {
 }
 
 fn request_kill(lease: &Lease, outcome: &mut RootOutcome) {
+    if outcome.stop_trigger == Some(StopTrigger::Cancelled) && outcome.kill_attempts == 0 {
+        // Hold an active root before orderly termination so subprocess tests
+        // can exercise force exit against the registry, including descendants.
+        crate::storage::crash::barrier("supervisor.before_cancel_kill");
+    }
     outcome.kill_attempts = outcome.kill_attempts.saturating_add(1);
     outcome
         .termination

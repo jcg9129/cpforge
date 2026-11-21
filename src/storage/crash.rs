@@ -36,7 +36,12 @@
 //! `CPF-PAUSED <name>` to stdout and block until one byte arrives on stdin.
 //! Barriers: `inputs.source_copied` (after the first captured source copy),
 //! `fact.cutoff`, `fact.after_cutoff`, `fact.after_replace`;
-//! `command.between_iterations` (after the first command job execution).
+//! `command.between_iterations` (after the first command job execution);
+//! `config.load`, `selection.resolve` (planning, before admission);
+//! `supervisor.before_cancel_kill` (live root before orderly cancellation kill);
+//! `job.after_delivery` (after the final summary, while signals remain installed).
+//! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
+//! from the control thread, for deterministic force-exit debounce tests.
 
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 pub(super) fn force_link_fallback() -> bool {
@@ -101,4 +106,14 @@ pub(crate) fn barrier(name: &'static str) {
     }
     #[cfg(not(feature = "storage-test-hooks"))]
     let _ = name;
+}
+
+/// Acknowledges a handled first signal on the control thread, never in the OS
+/// handler. Tests start the debounce interval only after observing this file.
+#[inline]
+pub(crate) fn signal_observed() {
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(path) = std::env::var_os("CPF_STORAGE_SIGNAL_READY") {
+        std::fs::write(path, b"signal observed\n").expect("publish signal readiness");
+    }
 }

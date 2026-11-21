@@ -89,11 +89,9 @@ impl CancelSignals {
         let worker = match std::thread::Builder::new()
             .name("cpf-control".into())
             .spawn(move || {
+                let mut observed = false;
                 while !stopping.load(Ordering::Acquire) {
                     platform::wait(&mut reader);
-                    // lock() incorporates the first notification, even if F is
-                    // racing this control thread.
-                    let _ = state.cancellation();
                     let forcing = FORCE.load(Ordering::Acquire);
                     if forcing != 0 {
                         EXITING.store(true, Ordering::Release);
@@ -103,6 +101,14 @@ impl CancelSignals {
                         } else {
                             CancelSource::Console
                         });
+                    }
+                    // Never wait for the verdict lock on the force-exit thread.
+                    // The owner also folds pending notifications into every
+                    // verdict-lock acquisition, including the F snapshot.
+                    state.poll_signals();
+                    if !observed && FIRST_AT.load(Ordering::Acquire) != 0 {
+                        observed = true;
+                        crate::storage::crash::signal_observed();
                     }
                 }
             }) {
@@ -327,7 +333,24 @@ mod platform {
         }
     }
     pub(super) fn wait(reader: &mut File) {
-        let _ = reader.read(&mut [0_u8; 64]);
+        // Block until the first notification. Afterwards retry pending intent
+        // in case its wake arrived while the verdict lock was busy; force exit
+        // never depends on that lock. Every handler run writes the pipe after
+        // publishing FIRST, so a notification racing this load still wakes.
+        let timeout = if FIRST.load(Ordering::Acquire) == 0 {
+            -1
+        } else {
+            5
+        };
+        let mut fd = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd for a descriptor owned by `reader`.
+        if unsafe { libc::poll(&mut fd, 1, timeout) } > 0 && fd.revents & libc::POLLIN != 0 {
+            let _ = reader.read(&mut [0_u8; 64]);
+        }
     }
 }
 

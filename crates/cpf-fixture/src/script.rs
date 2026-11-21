@@ -26,6 +26,8 @@ pub(crate) enum Step {
     IgnoreTerm,
     Hold,
     WaitFile(std::path::PathBuf),
+    #[cfg(unix)]
+    IdentityFile(std::path::PathBuf),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +84,10 @@ fn parse_step(arg: &str, depth: usize) -> Result<Step, String> {
             args
         };
         return Ok(Step::Spawn(number(count)?, args));
+    }
+    #[cfg(unix)]
+    if let Some(path) = arg.strip_prefix("identity-file:") {
+        return Ok(Step::IdentityFile(path.into()));
     }
     if let Some(path) = arg.strip_prefix("wait-file:") {
         return Ok(Step::WaitFile(path.into()));
@@ -294,6 +300,15 @@ pub(crate) fn execute(steps: Vec<Step>) -> io::Result<()> {
             }
             Step::Escape => platform::escape()?,
             Step::IgnoreTerm => platform::ignore_term()?,
+            #[cfg(unix)]
+            Step::IdentityFile(path) => {
+                let pid = std::process::id();
+                let (start, _) = platform::process_identity(pid)?;
+                // Publish complete contents: existence is the readiness barrier.
+                let temporary = path.with_extension(format!("{pid}.tmp"));
+                std::fs::write(&temporary, format!("{pid} {start}\n"))?;
+                std::fs::rename(temporary, path)?;
+            }
             Step::WaitFile(path) => {
                 while !path.try_exists()? {
                     std::thread::yield_now();

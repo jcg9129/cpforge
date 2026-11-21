@@ -414,6 +414,10 @@ pub fn run_with_config(
                 "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
             ));
         }
+        signals = Some(
+            CancelSignals::install(cancel.clone())
+                .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
+        );
         let cwd = std::env::current_dir()
             .map_err(|e| Error::Workspace(format!("cannot read current directory: {e}")))?;
         let root = crate::workspace::find_root(&cwd)?;
@@ -426,7 +430,11 @@ pub fn run_with_config(
             profile,
             config_path,
             &mut refusal,
-        )?;
+        );
+        // Planning can fail concurrently with a signal. Cancellation selects
+        // the refusal before any workspace admission or execution is attempted.
+        check_cancel(&cancel)?;
+        let plan = plan?;
         let InvocationPlan {
             config,
             selected,
@@ -481,10 +489,6 @@ pub fn run_with_config(
             writer.queue().offer(&diagnostic.to_string());
         }
         progress = Some(writer);
-        signals = Some(
-            CancelSignals::install(cancel.clone())
-                .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
-        );
         check_cancel(&cancel)?;
         let lock = WorkspaceLock::new(&root)?;
         let registered = register_job(
@@ -662,6 +666,7 @@ pub fn run_with_config(
                 status = ExitCode::Internal;
             }
             // The report retains the lease through delivery and the summary.
+            crate::storage::crash::barrier("job.after_delivery");
             Ok(signals.expect("signal listener").finish(status))
         }
         Err(error) => {
@@ -1549,6 +1554,7 @@ pub(crate) fn switch_hooks(selected: &Selected, config: LoadedConfig) -> ExitCod
     if status != ExitCode::Success {
         eprintln!("cpf: note: selection was committed before switch hooks");
     }
+    crate::storage::crash::barrier("job.after_delivery");
     signals.map_or(status, |signals| signals.finish(status))
 }
 

@@ -123,6 +123,24 @@ impl CancelState {
 
     pub(super) fn lock(&self) -> MutexGuard<'_, VerdictState> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.incorporate_signals(&mut state);
+        state
+    }
+
+    /// The console control thread must remain available for force exit even
+    /// while a verdict operation owns the lock. Its owner reads pending intent
+    /// on the next acquisition; run admission and F cannot pass that read.
+    pub(crate) fn poll_signals(&self) {
+        match self.state.try_lock() {
+            Ok(mut state) => self.incorporate_signals(&mut state),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                self.incorporate_signals(&mut error.into_inner());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+    }
+
+    fn incorporate_signals(&self, state: &mut VerdictState) {
         if self.signals.load(Ordering::Acquire) && !state.frozen && state.intent.is_none() {
             if let Some(source) = crate::cancel_signals::pending() {
                 state.first_notification = Some(Instant::now());
@@ -134,7 +152,6 @@ impl CancelState {
                 self.token.cancel();
             }
         }
-        state
     }
 }
 
@@ -164,5 +181,63 @@ mod tests {
         assert!(!cancel.token().is_cancelled());
         cancel.request_at(CancelSource::Api, cancel.start + Duration::from_millis(100));
         assert!(cancel.force_exit_requested());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_exit_with_held_verdict_lock_helper() {
+        if std::env::var_os("CPF_HELD_VERDICT_HELPER").is_none() {
+            return;
+        }
+        let cancel = CancelState::new();
+        let _signals = crate::cancel_signals::CancelSignals::install(cancel.clone()).unwrap();
+        let _locked = cancel.lock();
+        // Keep the lock held throughout both real notifications. The control
+        // thread must not wait here before servicing force exit.
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+        let until = Instant::now() + Duration::from_millis(120);
+        while Instant::now() < until {
+            std::thread::yield_now();
+        }
+        unsafe {
+            libc::raise(libc::SIGINT);
+        }
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_exit_does_not_wait_for_the_verdict_lock() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "jobs::engine::cancel::tests::force_exit_with_held_verdict_lock_helper",
+                "--nocapture",
+            ])
+            .env("CPF_HELD_VERDICT_HELPER", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= until {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("force exit blocked on the verdict lock");
+            }
+            std::thread::yield_now();
+        };
+        assert_eq!(status.signal(), Some(libc::SIGINT));
     }
 }

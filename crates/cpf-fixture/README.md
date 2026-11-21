@@ -96,3 +96,10 @@ Additional connected-session steps: `read-exactly:N` consumes exactly N stdin
 bytes (an early EOF fails the script), and Unix `default-sigpipe` restores
 SIGPIPE's default disposition so a later broken output pipe terminates the
 fixture by SIGPIPE. These steps compose with `write`, `close`, and `hold`.
+
+On Unix, `identity-file:<path>` atomically publishes `<pid> <start-id>\n`
+without an inherited control descriptor. Use it with `wait-file:<release>` or
+`hold` when launching the fixture through the CLI, whose supervisor closes
+unlisted descriptors. `Identity::from_file` verifies the identity before a
+signal is sent; the existing `assert_all_gone` checks descendants as well as
+roots. Paths in nested scripts must avoid the reserved delimiters above.

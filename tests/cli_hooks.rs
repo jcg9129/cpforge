@@ -355,10 +355,7 @@ fn cancelled_primary_skips_hooks_and_cancelling_hook_skips_later_hooks() {
             0
         );
         let output = wait(child);
-        assert!(
-            output.status.signal() == Some(libc::SIGINT) || output.status.code() == Some(6),
-            "{output:?}"
-        );
+        assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         if during_hook {
             assert_eq!(report["hooks"][0]["outcome"]["kind"], "cancelled");
@@ -489,10 +486,7 @@ fn cancelling_switch_hook_preserves_identity_and_committed_selection() {
         0
     );
     let output = wait(child);
-    assert!(
-        output.status.signal() == Some(libc::SIGINT) || output.status.code() == Some(6),
-        "{output:?}"
-    );
+    assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
     assert_eq!(output.stdout, b"local:A\n");
     assert!(String::from_utf8_lossy(&output.stderr).contains("selection was committed"));
     assert!(
