@@ -1022,7 +1022,10 @@ fn command_limit_errors(limits: &crate::config::Limits) -> Vec<String> {
                 .ok()
                 .filter(|p| *p > 0)
                 .and_then(|p| value.value.checked_add(p - 1).map(|bytes| bytes / p * p));
-            if normalised.is_none_or(|bytes| bytes == 0 || bytes >= libc::RLIM_INFINITY) {
+            // u128: RLIM_INFINITY is u64::MAX on Linux but smaller on macOS.
+            #[allow(clippy::unnecessary_cast)]
+            let infinity = u128::from(libc::RLIM_INFINITY as u64);
+            if normalised.is_none_or(|bytes| bytes == 0 || u128::from(bytes) >= infinity) {
                 errors.push(format!(
                     "{}: limits.{name} outside the platform range after page rounding",
                     value.origin
