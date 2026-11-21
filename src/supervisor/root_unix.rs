@@ -559,6 +559,10 @@ async fn finish_observed(
                 break;
             }
             Ok(None) => {
+                // On macOS a zero `wait4` right after NOTE_EXIT is expected:
+                // the kernel posts the event before finishing exit bookkeeping
+                // (execution contract §4.2), so it is retried, not an error.
+                #[cfg(target_os = "linux")]
                 push_error(root.outcome(), SupervisorError::Reap);
                 tokio::time::sleep_until(
                     (Instant::now() + Duration::from_millis(backoff))
