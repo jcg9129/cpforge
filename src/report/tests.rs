@@ -1754,6 +1754,12 @@ fn job_verdict_fixtures() {
     rows.push(Row {
         kind: JobKind::Build,
         selected: 0,
+        ..row("build_free_job", vec![], JobVerdict::Succeeded)
+    });
+    rows.push(Row {
+        kind: JobKind::Build,
+        selected: 0,
+        primary: vec![started(RunClass::ExitedZero)],
         ..row(
             "build_job_missing_result",
             vec![],

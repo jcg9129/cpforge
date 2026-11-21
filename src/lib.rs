@@ -1,5 +1,9 @@
 //! CLI foundation for cpforge.
 
+// Share integration fixtures with portable library tests.
+#[cfg(test)]
+extern crate self as cpforge;
+
 mod add;
 pub mod build;
 pub mod cli;

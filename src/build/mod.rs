@@ -364,6 +364,23 @@ impl PendingBuild<'_> {
     pub fn build_stage(&self) -> &ResolvedStage {
         &self.build
     }
+    /// Select the admitted cwd while keeping the preflighted program frozen.
+    pub fn stage_for_cwd(&self, cwd: PathBuf) -> Result<ResolvedStage, PrepareErrors> {
+        let mut dirs = self.recipe.dirs.clone();
+        dirs.run_cwd = cwd;
+        let context =
+            Context::target_build(&self.recipe.target, dirs, self.recipe.bindings.clone())?;
+        let prepared = exec::prepare(
+            self.recipe.target.build.as_ref().expect("build stage"),
+            &context,
+            &self.recipe.baseline,
+            self.recipe.platform,
+            &[],
+        )?;
+        let mut stage = self.build.clone();
+        stage.cwd = prepared.cwd;
+        Ok(stage)
+    }
     pub fn expanded_arguments(&self) -> &ExpandedArguments {
         &self.arguments
     }

@@ -545,7 +545,7 @@ pub fn job_verdict(input: &JobInput<'_>) -> JobResult {
     }
 }
 fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
-    if input.kind == JobKind::Build && input.build.is_none()
+    if input.kind == JobKind::Build && input.build.is_none() && !input.primary.is_empty()
         || input.internal_before_freeze.is_some()
         || input
             .primary

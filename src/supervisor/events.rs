@@ -41,6 +41,17 @@ pub struct EventSender {
     sender: mpsc::UnboundedSender<Envelope>,
     space: Arc<Semaphore>,
     accounting: Arc<Accounting>,
+    forward: Option<ForwardOutput>,
+}
+
+type OutputCallback = dyn Fn(Stream, &[u8]) + Send + Sync;
+
+#[derive(Clone)]
+struct ForwardOutput(Arc<OutputCallback>);
+impl std::fmt::Debug for ForwardOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ForwardOutput")
+    }
 }
 
 #[derive(Debug)]
@@ -59,9 +70,18 @@ impl EventSender {
                 sender,
                 space: Arc::new(Semaphore::new(bytes.min(Semaphore::MAX_PERMITS))),
                 accounting: Arc::default(),
+                forward: None,
             },
             EventReceiver(receiver),
         )
+    }
+
+    /// Forward directly to a job-wide transport, which performs byte accounting
+    /// and assigns sequence numbers atomically. No intermediate drops occur.
+    pub fn forwarding(callback: impl Fn(Stream, &[u8]) + Send + Sync + 'static) -> Self {
+        let (mut sender, _) = Self::with_budget(0);
+        sender.forward = Some(ForwardOutput(Arc::new(callback)));
+        sender
     }
 
     pub fn dropped(&self) -> u64 {
@@ -74,6 +94,10 @@ impl EventSender {
 
     /// Never waits, including for a consumer. Disconnection is a no-op.
     pub fn offer(&self, stream: Stream, bytes: &[u8]) {
+        if let Some(forward) = &self.forward {
+            (forward.0)(stream, bytes);
+            return;
+        }
         for bytes in bytes.chunks(EVENT_CHUNK) {
             if self.sender.is_closed() {
                 return;

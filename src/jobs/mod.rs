@@ -29,6 +29,7 @@
 //! job stage from [`ReadyJob::sources`], and allocate every consumer cwd below
 //! [`ReadyJob::dir`].
 
+pub mod engine;
 pub mod guard;
 
 use std::fmt;
@@ -78,7 +79,13 @@ impl fmt::Debug for PrepareJobInputs<'_> {
 #[non_exhaustive]
 pub struct ReadyJob<'probe> {
     pub owner: JobOwner,
+    pub workspace: PathBuf,
+    pub problem: ProblemBinding,
+    pub target: TargetPlan,
+    pub platform: Platform,
     pub id: JobId,
+    pub started_at: std::time::SystemTime,
+    pub started: std::time::Instant,
     pub dir: PathBuf,
     pub sequence: (Epoch, u64),
     pub manifest: FrozenManifest,
@@ -188,8 +195,7 @@ pub fn prepare_job<'probe>(
     let cwd = create(&format!("{stage_dir}/cwd"))?;
     let area = BuildArea::new(create("builds")?).map_err(ReadyError::Storage)?;
     let outputs = if target.build.is_some() {
-        let id = BuildId::generate()
-            .map_err(|error| ReadyError::Storage(StorageError::io(area.path(), error)))?;
+        let id = BuildId::new("r00000").expect("first build admission id");
         Some(build::allocate(&area, id).map_err(ReadyError::Storage)?)
     } else {
         None
@@ -200,7 +206,7 @@ pub fn prepare_job<'probe>(
             sources: frozen.sources().source_bindings(),
             dirs: InvocationDirs {
                 run_cwd: cwd.clone(),
-                problem: Some(inputs.problem),
+                problem: Some(inputs.problem.clone()),
                 workspace: Some(inputs.workspace_root.clone()),
             },
             baseline: inputs.baseline,
@@ -241,7 +247,13 @@ pub fn prepare_job<'probe>(
     let (manifest, sources) = frozen.into_parts();
     Ok(ReadyJob {
         owner: registered.owner,
+        workspace: inputs.workspace_root,
+        problem: inputs.problem,
+        target: target.clone(),
+        platform: inputs.platform,
         id: registered.id,
+        started_at: registered.started_at,
+        started: registered.started,
         dir: registered.dir,
         sequence: registered.sequence,
         manifest,

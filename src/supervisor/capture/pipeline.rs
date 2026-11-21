@@ -4,6 +4,7 @@ use crate::supervisor::{
     RootOutcome, SpawnOptions, StopTrigger, Violation, sys,
 };
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -170,10 +171,17 @@ impl Captures {
                 let space = space.clone();
                 let credit = credits.pop().expect("reserved sink credit");
                 let test = test.clone();
+                let retained_bytes = captures
+                    .admission
+                    .as_ref()
+                    .expect("setup admission")
+                    .retained_counter();
                 Some(
                     std::thread::Builder::new()
                         .name("cpf-sink".into())
-                        .spawn(move || worker(writer, receiver, state, space, credit, test))
+                        .spawn(move || {
+                            worker(writer, receiver, state, space, credit, test, retained_bytes)
+                        })
                         .map_err(|_| NotStarted::Worker)?,
                 )
             } else {
@@ -511,6 +519,7 @@ fn worker(
     space: Arc<Semaphore>,
     _credit: Credits,
     mut test: SinkTestOptions,
+    retained_bytes: Option<Arc<AtomicU64>>,
 ) {
     let result = (|| -> io::Result<()> {
         let mut written = 0_u64;
@@ -540,6 +549,10 @@ fn worker(
                 match result {
                     Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
                     Ok(n) => {
+                        // Count physical writes even after the logical record froze.
+                        if let Some(counter) = &retained_bytes {
+                            counter.fetch_add(n as u64, Ordering::Release);
+                        }
                         written = written
                             .checked_add(n as u64)
                             .ok_or_else(|| io::Error::other("stored byte count overflow"))?;

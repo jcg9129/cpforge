@@ -25,6 +25,7 @@ pub enum FrozenAnswer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenTest {
     pub id: TestId,
+    pub origin: super::Origin,
     pub input: FrozenFile,
     pub answer: FrozenAnswer,
     pub settings: TestSettings,
@@ -148,6 +149,7 @@ impl TestStore {
             };
             entries.push(FrozenTest {
                 id: entry.id.clone(),
+                origin: entry.origin,
                 input,
                 answer,
                 settings: TestSettings::default(),

@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use super::budget::{BudgetExceeded, CommitError, JobBudget};
 use super::job::{Epoch, JobId, JobLease, JobOwner, JobRecord, publish_job_record};
@@ -29,6 +29,8 @@ const ID_ATTEMPTS: usize = 32;
 #[derive(Debug)]
 pub struct RegisteredJob {
     pub id: JobId,
+    pub started_at: SystemTime,
+    pub started: Instant,
     pub dir: PathBuf,
     pub sequence: (Epoch, u64),
     pub owner: JobOwner,
@@ -79,6 +81,7 @@ pub fn register_job(
     budget_limit: u64,
     now: SystemTime,
 ) -> Result<RegisteredJob, AdmissionError> {
+    let started = Instant::now();
     let selection = select_and_rename(&guard, policy);
     let mut report = AdmissionReport {
         selection: selection.report,
@@ -94,6 +97,7 @@ pub fn register_job(
     report.reclaim = reclaim(selection.runs_dir);
     match result {
         Ok(mut job) => {
+            job.started = started;
             job.prune_report = report;
             Ok(job)
         }
@@ -198,6 +202,8 @@ fn register_locked(
     crash::point("admission.lease_locked");
     Ok(RegisteredJob {
         id,
+        started_at: now,
+        started: Instant::now(),
         dir,
         sequence: (epoch, sequence.next),
         owner,

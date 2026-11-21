@@ -96,6 +96,8 @@ struct RunCell {
     result: OnceLock<Option<RootOutcome>>,
     ready: Notify,
     transfer: OnceLock<Mutex<Option<Transfer>>>,
+    resources: Mutex<Option<Box<dyn Send>>>,
+    retained_bytes: OnceLock<Arc<AtomicU64>>,
 }
 
 // Keep the transfer in its reserved cell: boxing here would allocate on Drop.
@@ -185,6 +187,8 @@ fn reserve(count: usize) -> Result<Vec<Admission>, NotStarted> {
             result: OnceLock::new(),
             ready: Notify::new(),
             transfer: OnceLock::new(),
+            resources: Mutex::new(None),
+            retained_bytes: OnceLock::new(),
         });
         *entry = Some(cell.clone());
         bounds.slots_in_use.fetch_add(1, Ordering::AcqRel);
@@ -222,6 +226,33 @@ pub(super) fn reserve_pair_workers(
 }
 
 impl Admission {
+    /// Transfer job-owned resource guards with this admission, through failed
+    /// creation and stalled captures, until physical resources are released.
+    /// File sinks add each successful write to `retained_bytes`. The guards
+    /// may be dropped on the cleanup polling thread, so their `Drop` must be
+    /// short and must never block. Call at most once, before spawning.
+    pub fn hold_resources(
+        &mut self,
+        resources: impl Send + 'static,
+        retained_bytes: Arc<AtomicU64>,
+    ) {
+        self.cell
+            .retained_bytes
+            .set(retained_bytes)
+            .expect("one byte counter per admission");
+        let mut held = self
+            .cell
+            .resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(held.is_none(), "one resource owner per admission");
+        *held = Some(Box::new(resources));
+    }
+
+    pub(super) fn retained_counter(&self) -> Option<Arc<AtomicU64>> {
+        self.cell.retained_bytes.get().cloned()
+    }
+
     pub(super) fn worker_credits(&mut self, count: usize) -> Result<Vec<Credits>, NotStarted> {
         if let Some(credits) = self.worker_credits.take() {
             assert_eq!(credits.len(), count);
@@ -357,6 +388,12 @@ pub(super) fn init() -> io::Result<()> {
 
 impl GlobalBounds {
     fn release(&self, index: usize, cell: &RunCell, outcome: Option<RootOutcome>) {
+        let resources = cell
+            .resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        drop(resources);
         let slot = &self.slots[index];
         let mut entry = slot.cell.try_lock().expect("exclusive slot owner");
         debug_assert_eq!(entry.as_ref().map(|cell| cell.key), Some(cell.key));
