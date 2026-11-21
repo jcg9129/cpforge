@@ -226,6 +226,8 @@ impl Running {
     fn spawn(command: Command) -> Self {
         Self::start(command, false)
     }
+    // The child is stored in the returned value and waited on by `wait`.
+    #[allow(clippy::zombie_processes)]
     fn start(mut command: Command, broken_stdout: bool) -> Self {
         let mut child = command.spawn().unwrap();
         let (out_tx, stdout) = mpsc::channel();
@@ -713,7 +715,11 @@ fn delivery_failure_outranks_real_signal_cancellation_for_every_machine_job() {
             let output = child.wait();
             assert_eq!(output.status.code(), Some(11), "{job:?}: {output:?}");
             let report = w.report();
-            assert_eq!(report["result"]["pre_delivery_exit"]["code"], 6);
+            // The status chosen at F: the re-raised signal's shell status.
+            assert_eq!(
+                report["result"]["pre_delivery_exit"]["code"],
+                if signal == libc::SIGINT { 130 } else { 143 }
+            );
             assert_eq!(
                 report["result"]["cancellation"]["source"],
                 if signal == libc::SIGINT {
