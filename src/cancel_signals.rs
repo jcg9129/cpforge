@@ -239,17 +239,40 @@ mod platform {
     impl Listener {
         pub(super) fn install() -> io::Result<Self> {
             let mut fds = [0; 2];
+            // Linux creates both ends close-on-exec atomically. macOS has no
+            // pipe2, so the pipe and its FD_CLOEXEC are made under the
+            // supervisor's creation lock, never between a child's fork and exec.
+            #[cfg(target_os = "linux")]
             // SAFETY: valid two-element output array; ownership transferred to File.
-            if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+            if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let read = unsafe { File::from_raw_fd(fds[0]) };
-            let write = unsafe { File::from_raw_fd(fds[1]) };
-            for fd in fds {
-                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            #[cfg(not(target_os = "linux"))]
+            let _creation = {
+                #[cfg(target_os = "macos")]
+                let guard = crate::supervisor::creation_lock();
+                // SAFETY: valid two-element output array; ownership transferred to File.
+                if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
                     return Err(io::Error::last_os_error());
                 }
-            }
+                for fd in fds {
+                    // SAFETY: both descriptors were just created and are owned here.
+                    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                        let error = io::Error::last_os_error();
+                        // SAFETY: closing the descriptors this call created.
+                        unsafe {
+                            libc::close(fds[0]);
+                            libc::close(fds[1]);
+                        }
+                        return Err(error);
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                guard
+            };
+            // SAFETY: the descriptors were created above and are owned here.
+            let read = unsafe { File::from_raw_fd(fds[0]) };
+            let write = unsafe { File::from_raw_fd(fds[1]) };
             if unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
                 return Err(io::Error::last_os_error());
             }

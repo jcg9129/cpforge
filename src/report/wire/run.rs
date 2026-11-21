@@ -140,6 +140,7 @@ pub(super) fn cleanup(v: p::Cleanup) -> Value {
                     p::UnverifiedReason::Malformed => "malformed",
                     p::UnverifiedReason::ScanIncomplete => "scan_incomplete",
                     p::UnverifiedReason::ReapDeadline => "scan_incomplete",
+                    p::UnverifiedReason::Unsupported => "unsupported",
                 }),
             ),
         ]),
@@ -344,6 +345,7 @@ pub(super) fn timing(v: &p::RootOutcome) -> Result<Value> {
             "observer",
             s(match v.timing.observer {
                 p::ObserverKind::Pidfd => "pidfd",
+                p::ObserverKind::Kqueue => "kqueue",
                 p::ObserverKind::Polling => "polling",
             }),
         ),

@@ -100,6 +100,7 @@ pub struct Capabilities {
 }
 
 /// Cheap, non-spawning probes; no limits or process-wide state are changed.
+#[cfg(not(target_os = "macos"))]
 pub fn capabilities() -> Capabilities {
     #[cfg(target_os = "linux")]
     let (accounting, address_space, pidfd, procfs) = super::sys::probe_capabilities();
@@ -169,11 +170,60 @@ pub fn capabilities() -> Capabilities {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub fn capabilities() -> Capabilities {
+    Capabilities {
+        metrics: [
+            MetricKind::PeakRss,
+            MetricKind::PeakWorkingSet,
+            MetricKind::PeakJobCommit,
+            MetricKind::CpuTime,
+            MetricKind::ProcessLifetime,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let compiled = matches!(kind, MetricKind::PeakRss | MetricKind::CpuTime);
+            Capability {
+                kind,
+                compiled,
+                probe: if compiled { Ok(()) } else { unsupported() },
+            }
+        })
+        .collect(),
+        limits: [LimitKind::AddressSpace, LimitKind::JobCommit]
+            .into_iter()
+            .map(|kind| Capability {
+                kind,
+                compiled: false,
+                probe: unsupported(),
+            })
+            .collect(),
+        observers: vec![Capability {
+            kind: "kqueue",
+            compiled: true,
+            probe: super::sys::macos::probe_observer().map_err(|error| error.to_string()),
+        }],
+        deferred: [
+            "cgroup accounting",
+            "cgroup containment",
+            "--jobs",
+            "build cache",
+        ]
+        .into_iter()
+        .map(|kind| Capability {
+            kind,
+            compiled: false,
+            probe: Err("unavailable feature".into()),
+        })
+        .collect(),
+    }
+}
+
 fn unsupported() -> Result<(), String> {
     Err("unsupported on this platform".into())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn measurements(kinds: &[MetricKind]) -> Vec<Measurement> {
     let mut result = Vec::with_capacity(5);
     for &kind in kinds {
@@ -230,7 +280,7 @@ pub(super) fn measurements(kinds: &[MetricKind]) -> Vec<Measurement> {
     result
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn record_usage(outcome: &mut super::RootOutcome, usage: super::sys::RawRusage) {
     let confirmed = outcome.termination.cleanup == super::Cleanup::Confirmed;
     for measurement in &mut outcome.measurements {

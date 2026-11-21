@@ -15,8 +15,8 @@ pub(super) use windows::{Reader, Writer, into_stdio, into_stdio_for_tests, pipe,
 mod linux;
 #[cfg(target_os = "linux")]
 pub(super) use linux::{
-    CleanupScan, Observer, RawRusage, cleanup_scan, exit_check, init_process, kill_group,
-    kill_root, observe, observe_status, observer, reap, spawn,
+    CleanupScan, Observer, cleanup_scan, exit_check, init_process, kill_group, kill_root, observe,
+    observe_status, observer, reap, spawn,
 };
 
 #[cfg(target_os = "linux")]
@@ -37,3 +37,15 @@ pub(super) use transcript_file::{TranscriptEvents, TranscriptFile, TranscriptFil
 
 #[cfg(all(target_os = "linux", debug_assertions))]
 pub(super) use unix::resize_pipe;
+
+#[cfg(target_os = "macos")]
+pub(in crate::supervisor) mod macos;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Root plus waited descendants: max RSS in bytes, summed CPU durations.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::supervisor) struct RawRusage {
+    pub maxrss_bytes: u64,
+    pub user: std::time::Duration,
+    pub system: std::time::Duration,
+}

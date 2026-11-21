@@ -1,4 +1,5 @@
 use super::super::{InstalledLimit, NotStarted, OutputSpec, ProgramSpec, StdinSpec, Termination};
+use super::RawRusage;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -12,14 +13,6 @@ mod proc;
 pub(in crate::supervisor) use proc::CleanupScan;
 
 pub(in crate::supervisor) type Observer = AsyncFd<OwnedFd>;
-
-/// Root plus waited descendants: max RSS in bytes, summed CPU durations.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::supervisor) struct RawRusage {
-    pub maxrss_bytes: u64,
-    pub user: Duration,
-    pub system: Duration,
-}
 
 pub(in crate::supervisor) fn spawn(
     spec: ProgramSpec,

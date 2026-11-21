@@ -1,17 +1,19 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use cpf_fixture::harness::fixture_path;
 use cpforge::supervisor::{
-    Aggregation, CancelToken, Cleanup, Completeness, DEADLINE_GRACE, LimitKind, LimitValidation,
-    LocalLimit, MetricKind, NotStarted, Note, ObserverKind, OutputSpec, ParentReader, ProgramSpec,
-    ReadResult, RootOutcome, RunControls, Scope, SpawnOptions, Spawned, StdinSpec, StopTrigger,
-    SupervisorError, Termination, Unit, UnverifiedReason, Violation, admit, capabilities,
-    debug_counters, global_bounds, init_process, spawn_root, stdout_pipe,
-    wait_root as wait_root_controlled,
+    Aggregation, CancelToken, Cleanup, Completeness, DEADLINE_GRACE, LocalLimit, MetricKind,
+    NotStarted, Note, ObserverKind, OutputSpec, ParentReader, ProgramSpec, ReadResult, RootOutcome,
+    RunControls, Scope, SpawnOptions, Spawned, StdinSpec, StopTrigger, SupervisorError,
+    Termination, Unit, UnverifiedReason, Violation, admit, debug_counters, global_bounds,
+    init_process, spawn_root, stdout_pipe, wait_root as wait_root_controlled,
 };
+#[cfg(target_os = "linux")]
+use cpforge::supervisor::{LimitKind, LimitValidation, capabilities};
 use std::collections::BTreeSet;
 use std::fs;
 use std::future::Future;
+#[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -30,12 +32,12 @@ fn run_test(test: impl Future<Output = ()>) {
         .build()
         .unwrap()
         .block_on(async {
-            tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::time::timeout(allowance(10_000), async {
                 test.await;
                 quiescent().await;
             })
             .await
-            .expect("supervisor test exceeded 10 seconds");
+            .expect("supervisor test exceeded its watchdog");
         });
 }
 
@@ -95,6 +97,7 @@ struct Process {
     start: u64,
 }
 
+#[cfg(target_os = "linux")]
 fn process(pid: u32) -> Option<Process> {
     // A process can exit while it is being read: a missing, empty or truncated
     // stat file means "gone", never a test failure.
@@ -112,6 +115,7 @@ fn process(pid: u32) -> Option<Process> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn processes() -> Vec<Process> {
     fs::read_dir("/proc")
         .unwrap()
@@ -120,6 +124,86 @@ fn processes() -> Vec<Process> {
             process(pid)
         })
         .collect()
+}
+
+// Test observations only; the production Darwin verifier stays unsupported.
+#[cfg(target_os = "macos")]
+fn process(pid: u32) -> Option<Process> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: output has room for the entire structure; arg=1 includes zombies.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if count != size {
+        return None;
+    }
+    // SAFETY: the exact structure size was returned above.
+    let info = unsafe { info.assume_init() };
+    Some(Process {
+        pid,
+        state: if info.pbi_status == libc::SZOMB {
+            'Z'
+        } else {
+            'R'
+        },
+        ppid: info.pbi_ppid,
+        pgrp: info.pbi_pgid,
+        start: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn processes() -> Vec<Process> {
+    let mut pids = vec![0_i32; 65536];
+    let capacity = std::mem::size_of_val(pids.as_slice());
+    // SAFETY: errno is thread-local and the buffer has capacity bytes. The
+    // literal 1 is Darwin's PROC_ALL_PIDS (not exported by pinned libc).
+    let count = unsafe {
+        *libc::__error() = 0;
+        libc::proc_listpids(1, 0, pids.as_mut_ptr().cast(), capacity as i32)
+    };
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    assert_eq!(errno, 0);
+    assert!((1..capacity).contains(&(count as usize)));
+    assert_eq!(count as usize % std::mem::size_of::<i32>(), 0);
+    pids.truncate(count as usize / std::mem::size_of::<i32>());
+    pids.into_iter()
+        .filter(|pid| *pid > 0)
+        .filter_map(|pid| process(pid as u32))
+        .collect()
+}
+
+fn fd_count() -> usize {
+    #[cfg(target_os = "linux")]
+    let path = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    let path = "/dev/fd";
+    fs::read_dir(path).unwrap().count()
+}
+
+// Scale runner scheduling allowances only; policy deadlines stay fixed.
+fn allowance(milliseconds: u64) -> Duration {
+    Duration::from_millis(milliseconds * if cfg!(target_os = "macos") { 4 } else { 1 })
+}
+
+fn expected_cleanup() -> Cleanup {
+    #[cfg(target_os = "linux")]
+    {
+        Cleanup::Confirmed
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Cleanup::Unverified {
+            reason: UnverifiedReason::Unsupported,
+        }
+    }
 }
 
 fn children() -> BTreeSet<u32> {
@@ -131,7 +215,7 @@ fn children() -> BTreeSet<u32> {
 }
 
 async fn until(mut condition: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + allowance(1000);
     while !condition() {
         assert!(
             Instant::now() < deadline,
@@ -208,22 +292,27 @@ fn inherited_sigchld_ignore_is_reset_before_spawn() {
 #[test]
 fn exits_and_signals_with_both_observers() {
     run_test(async {
-        // SAFETY: pidfd_open takes integer arguments and returns an owned fd;
-        // probing our own pid neither observes nor consumes any child status.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
-        let unforced_observer = if fd == -1 {
-            let error = std::io::Error::last_os_error();
-            assert!(
-                matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)),
-                "unexpected pidfd probe failure: {error}"
-            );
-            eprintln!("pidfd unavailable ({error}); accepting polling observer");
-            ObserverKind::Polling
-        } else {
-            // SAFETY: the successful probe returned a uniquely owned fd.
-            drop(unsafe { OwnedFd::from_raw_fd(fd as i32) });
-            ObserverKind::Pidfd
+        #[cfg(target_os = "linux")]
+        let unforced_observer = {
+            // SAFETY: pidfd_open takes integer arguments and returns an owned fd;
+            // probing our own pid neither observes nor consumes any child status.
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
+            if fd == -1 {
+                let error = std::io::Error::last_os_error();
+                assert!(
+                    matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EPERM)),
+                    "unexpected pidfd probe failure: {error}"
+                );
+                eprintln!("pidfd unavailable ({error}); accepting polling observer");
+                ObserverKind::Polling
+            } else {
+                // SAFETY: the successful probe returned a uniquely owned fd.
+                drop(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+                ObserverKind::Pidfd
+            }
         };
+        #[cfg(target_os = "macos")]
+        let unforced_observer = ObserverKind::Kqueue;
         for polling in [false, true] {
             let expected_observer = if polling {
                 ObserverKind::Polling
@@ -271,7 +360,7 @@ fn failed_creation_and_stdin_setup_leave_no_children_or_pipe_fds() {
         // Warm the reactor before measuring resource stability.
         success(&wait_root(spawn(&["exit:0"], false)).await, 0);
         let before = children();
-        let before_fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let before_fds = fd_count();
         let pipe = stdout_pipe().unwrap();
         let mut missing = spec(&["exit:0"]);
         missing.program = std::env::current_dir()
@@ -301,7 +390,7 @@ fn failed_creation_and_stdin_setup_leave_no_children_or_pipe_fds() {
             Err(NotStarted::Setup(_))
         ));
         assert_eq!(children(), before);
-        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), before_fds);
+        assert_eq!(fd_count(), before_fds);
     });
 }
 
@@ -375,22 +464,45 @@ fn cancelled_wait_future_transfers_ownership() {
 #[test]
 fn creation_applies_cwd_complete_env_and_file_stdin() {
     run_test(async {
-        let mut program = spec(&["hold"]);
-        program.cwd = std::env::current_dir().unwrap().join("crates");
-        program
-            .env
-            .push(("CPF_B2B_TEST".into(), "complete environment".into()));
-        let cwd = program.cwd.clone();
-        let root = spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap();
-        let pid = root.pid();
-        assert_eq!(fs::read_link(format!("/proc/{pid}/cwd")).unwrap(), cwd);
-        until(|| {
-            fs::read(format!("/proc/{pid}/environ")).unwrap()
-                == b"CPF_B2B_TEST=complete environment\0"
-        })
-        .await;
-        drop(root);
-        until(|| process(pid).is_none()).await;
+        #[cfg(target_os = "linux")]
+        {
+            let mut program = spec(&["hold"]);
+            program.cwd = std::env::current_dir().unwrap().join("crates");
+            program
+                .env
+                .push(("CPF_B2B_TEST".into(), "complete environment".into()));
+            let cwd = program.cwd.clone();
+            let root = spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap();
+            let pid = root.pid();
+            assert_eq!(fs::read_link(format!("/proc/{pid}/cwd")).unwrap(), cwd);
+            until(|| {
+                fs::read(format!("/proc/{pid}/environ")).unwrap()
+                    == b"CPF_B2B_TEST=complete environment\0"
+            })
+            .await;
+            drop(root);
+            until(|| process(pid).is_none()).await;
+        }
+        #[cfg(target_os = "macos")]
+        for executable in ["/bin/pwd", "/usr/bin/env"] {
+            let pipe = stdout_pipe().unwrap();
+            let mut program = spec(&[]);
+            program.program = executable.into();
+            program.cwd = std::env::current_dir().unwrap().join("crates");
+            program
+                .env
+                .push(("CPF_TEST_ENV".into(), "complete environment".into()));
+            let expected = if executable == "/bin/pwd" {
+                format!("{}\n", fs::canonicalize(&program.cwd).unwrap().display())
+            } else {
+                "CPF_TEST_ENV=complete environment\n".into()
+            };
+            program.stdout = OutputSpec::Pipe(pipe.child);
+            let root = spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap();
+            let (bytes, outcome) = tokio::join!(drain(pipe.parent), wait_root(root));
+            assert_eq!(bytes, expected.as_bytes());
+            success(&outcome, 0);
+        }
 
         let pipe = stdout_pipe().unwrap();
         let mut program = spec(&["drain-stdin"]);
@@ -471,7 +583,7 @@ fn four_hundred_runs_leave_no_zombies_or_descriptors() {
         for polling in [false, true] {
             success(&wait_root(spawn(&["exit:0"], polling)).await, 0);
         }
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
         for _ in 0..200 {
             success(&wait_root(spawn(&["exit:0"], false)).await, 0);
         }
@@ -486,7 +598,7 @@ fn four_hundred_runs_leave_no_zombies_or_descriptors() {
                 .iter()
                 .any(|p| p.ppid == std::process::id() && p.state == 'Z')
         );
-        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+        assert_eq!(fd_count(), fds);
     });
 }
 
@@ -631,6 +743,7 @@ fn dropped_ticket_does_not_abandon_cleanup_and_normal_completion_is_none() {
 #[test]
 fn init_is_idempotent_and_thread_credits_are_bounded_and_returned() {
     run_test(async {
+        #[cfg(target_os = "linux")]
         let services = || {
             fs::read_dir("/proc/self/task")
                 .unwrap()
@@ -640,9 +753,11 @@ fn init_is_idempotent_and_thread_credits_are_bounded_and_returned() {
                 })
                 .count()
         };
+        #[cfg(target_os = "linux")]
         assert_eq!(services(), 1);
         init_process().unwrap();
         init_process().unwrap();
+        #[cfg(target_os = "linux")]
         assert_eq!(services(), 1);
         assert_eq!(debug_counters().credits_in_use, 1);
         let credits = &global_bounds().unwrap().thread_credits;
@@ -725,14 +840,16 @@ fn mixed_runs_leave_stable_fds_threads_slots_and_no_zombies() {
         for index in 0..50 {
             mixed(index).await;
         }
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
+        #[cfg(target_os = "linux")]
         let threads = fs::read_dir("/proc/self/task").unwrap().count();
         for _ in 0..5 {
             for index in 0..100 {
                 mixed(index).await;
             }
             quiescent().await;
-            assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+            assert_eq!(fd_count(), fds);
+            #[cfg(target_os = "linux")]
             assert_eq!(fs::read_dir("/proc/self/task").unwrap().count(), threads);
             assert!(
                 !processes()
@@ -751,7 +868,7 @@ fn killed(outcome: &RootOutcome, trigger: StopTrigger) {
     );
     assert_eq!(
         outcome.termination.cleanup,
-        Cleanup::Confirmed,
+        expected_cleanup(),
         "{outcome:?}"
     );
     assert_eq!(outcome.termination.method, Some("killpg(SIGKILL)"));
@@ -775,7 +892,7 @@ fn deadline_kills_hold_within_the_policy_bounds() {
         let timer = outcome.timing.create_end + Duration::from_millis(200);
         assert!(requested >= timer);
         assert!(
-            requested.duration_since(timer) <= Duration::from_millis(50),
+            requested.duration_since(timer) <= allowance(50),
             "{outcome:?}"
         );
         assert!(
@@ -784,7 +901,7 @@ fn deadline_kills_hold_within_the_policy_bounds() {
                 .exit_observed
                 .unwrap()
                 .duration_since(requested)
-                <= Duration::from_millis(250)
+                <= allowance(250)
         );
         assert_eq!(outcome.timing.grace, DEADLINE_GRACE);
         assert_eq!(
@@ -813,10 +930,10 @@ fn short_sleep_exits_without_enforcement_and_records_observed_wall() {
         assert!(outcome.violations.is_empty());
         let wall = outcome.timing.wall.unwrap();
         assert!(
-            wall >= Duration::from_millis(50) && wall <= Duration::from_millis(300),
+            wall >= Duration::from_millis(50) && wall <= Duration::from_millis(50) + allowance(250),
             "{outcome:?}"
         );
-        assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
+        assert_eq!(outcome.termination.cleanup, expected_cleanup());
     });
 }
 
@@ -1016,7 +1133,9 @@ fn reap_timeouts_transfer_identity_and_ticket_gets_the_physical_outcome() {
             );
             let requested = logical.termination.requested_at.unwrap();
             assert!(Instant::now().duration_since(requested) >= Duration::from_secs(2));
-            assert!(Instant::now().duration_since(requested) <= Duration::from_millis(2100));
+            assert!(
+                Instant::now().duration_since(requested) <= Duration::from_secs(2) + allowance(100)
+            );
             assert_eq!(logical.status, Termination::Unknown);
             assert!(logical.errors.contains(&SupervisorError::ReapTimeout));
             assert_eq!(logical.stop_trigger, Some(StopTrigger::WallDeadline));
@@ -1040,7 +1159,7 @@ fn reap_timeouts_transfer_identity_and_ticket_gets_the_physical_outcome() {
             assert!(physical.errors.contains(&SupervisorError::ReapTimeout));
             assert_eq!(
                 physical.termination.cleanup,
-                Cleanup::Confirmed,
+                expected_cleanup(),
                 "{physical:?}"
             );
             assert!(process(pid).is_none());
@@ -1122,6 +1241,7 @@ fn dropping_a_paused_wait_reconciles_an_already_exited_root() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn slow_cleanup_transfers_at_the_original_kill_reap_deadline() {
     run_test(async {
@@ -1149,7 +1269,10 @@ fn slow_cleanup_transfers_at_the_original_kill_reap_deadline() {
         );
         let elapsed = outcome.termination.requested_at.unwrap().elapsed();
         assert!(elapsed >= Duration::from_secs(2), "{elapsed:?}");
-        assert!(elapsed <= Duration::from_millis(2100), "{elapsed:?}");
+        assert!(
+            elapsed <= Duration::from_secs(2) + allowance(100),
+            "{elapsed:?}"
+        );
         assert_eq!(outcome.stop_trigger, Some(StopTrigger::WallDeadline));
         assert_eq!(outcome.status, Termination::Unknown);
         assert_eq!(
@@ -1581,7 +1704,7 @@ fn stalled_sink_freezes_at_five_seconds_and_keeps_its_slot_and_credit() {
         assert_eq!(record.stored, 0);
         let since_exit = outcome.timing.exit_observed.unwrap().elapsed();
         assert!(
-            (Duration::from_secs(5)..Duration::from_millis(5500)).contains(&since_exit),
+            (Duration::from_secs(5)..Duration::from_secs(5) + allowance(500)).contains(&since_exit),
             "{since_exit:?}"
         );
         assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
@@ -1868,7 +1991,8 @@ fn capture_drain_deadline_stops_an_escaped_pipe_holder() {
         success(&outcome, 0);
         let elapsed = outcome.timing.exit_observed.unwrap().elapsed();
         assert!(
-            (Duration::from_millis(500)..Duration::from_millis(900)).contains(&elapsed),
+            (Duration::from_millis(500)..Duration::from_millis(500) + allowance(400))
+                .contains(&elapsed),
             "{elapsed:?}"
         );
         let record = outcome.stdout.unwrap();
@@ -1904,7 +2028,7 @@ fn dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_
         let start = Instant::now();
         drop(waiting);
         let outcome = ticket.outcome().await.unwrap();
-        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(start.elapsed() < Duration::from_millis(500) + allowance(400));
         killed(&outcome, StopTrigger::Cancelled);
         let record = outcome.stdout.unwrap();
         assert!(record.losses.contains(&CaptureLoss::WriteStalled));
@@ -1956,7 +2080,8 @@ fn transferred_finished_capture_waits_for_root_facts_or_cutoff() {
                 assert!(elapsed < Duration::from_millis(450), "{elapsed:?}");
             } else {
                 assert!(
-                    (Duration::from_millis(500)..Duration::from_millis(900)).contains(&elapsed),
+                    (Duration::from_millis(500)..Duration::from_millis(500) + allowance(400))
+                        .contains(&elapsed),
                     "{elapsed:?}"
                 );
                 assert_eq!(outcome.status, Termination::Unknown);
@@ -1988,10 +2113,13 @@ fn transferred_run_without_captures_publishes_at_cutoff() {
         let again = ticket.clone();
         let start = Instant::now();
         drop(root);
-        let outcome = tokio::time::timeout(Duration::from_millis(900), ticket.outcome())
-            .await
-            .expect("logical record exceeded the transfer cutoff")
-            .unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(500) + allowance(400),
+            ticket.outcome(),
+        )
+        .await
+        .expect("logical record exceeded the transfer cutoff")
+        .unwrap();
         assert!(start.elapsed() >= Duration::from_millis(500));
         assert_eq!(outcome.status, Termination::Unknown);
         assert_eq!(
@@ -2079,14 +2207,16 @@ fn captured_runs_release_descriptors_threads_and_credits() {
         };
         run().await;
         quiescent().await;
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
+        #[cfg(target_os = "linux")]
         let threads = fs::read_dir("/proc/self/task").unwrap().count();
         let counters = debug_counters();
         for _ in 0..64 {
             run().await;
         }
         quiescent().await;
-        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+        assert_eq!(fd_count(), fds);
+        #[cfg(target_os = "linux")]
         assert_eq!(fs::read_dir("/proc/self/task").unwrap().count(), threads);
         assert_eq!(debug_counters(), counters);
         fs::remove_file(path.0.with_extension("err")).unwrap();
@@ -2264,6 +2394,7 @@ fn unverified_cleanup_marks_reaped_measurements_partial() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn address_space_limit_records_ordinary_allocation_failure_and_rounding() {
     run_test(async {
@@ -2314,12 +2445,13 @@ fn address_space_limit_records_ordinary_allocation_failure_and_rounding() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn invalid_limits_fail_before_setup_without_creating_children() {
     run_test(async {
         let baseline = debug_counters();
         let before = children();
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
         for (limits, expected) in [
             (
                 vec![LocalLimit::AddressSpace { bytes: 0 }],
@@ -2357,17 +2489,18 @@ fn invalid_limits_fail_before_setup_without_creating_children() {
             }
             assert_eq!(children(), before);
             assert_eq!(debug_counters(), baseline);
-            assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+            assert_eq!(fd_count(), fds);
         }
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn phase_pipe_distinguishes_limit_installation_from_exec_failure() {
     run_test(async {
         let before = children();
         let counters = debug_counters();
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
         for inject in [true, false] {
             let mut program = spec(&["hold"]);
             program.limits = vec![LocalLimit::AddressSpace {
@@ -2407,11 +2540,12 @@ fn phase_pipe_distinguishes_limit_installation_from_exec_failure() {
             quiescent().await;
             assert_eq!(children(), before);
             assert_eq!(debug_counters(), counters);
-            assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+            assert_eq!(fd_count(), fds);
         }
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn inherited_address_space_hard_limit_is_respected() {
     const MARKER: &str = "CPF_TEST_INHERITED_AS_LIMIT";
@@ -2480,10 +2614,11 @@ fn inherited_address_space_hard_limit_is_respected() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_capabilities_report_support_and_runtime_probes() {
     run_test(async {
-        let fds = fs::read_dir("/proc/self/fd").unwrap().count();
+        let fds = fd_count();
         let report = capabilities();
         assert_eq!(report.metrics.len(), 5);
         for kind in [MetricKind::PeakRss, MetricKind::CpuTime] {
@@ -2520,6 +2655,106 @@ fn linux_capabilities_report_support_and_runtime_probes() {
                 "unavailable feature"
             );
         }
-        assert_eq!(fs::read_dir("/proc/self/fd").unwrap().count(), fds);
+        assert_eq!(fd_count(), fds);
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_capabilities_advertise_kqueue_accounting_and_no_local_limits() {
+    run_test(async {
+        let before = fd_count();
+        let capabilities = cpforge::supervisor::capabilities();
+        assert!(
+            capabilities
+                .limits
+                .iter()
+                .all(|limit| !limit.compiled && limit.probe.is_err())
+        );
+        for kind in [MetricKind::PeakRss, MetricKind::CpuTime] {
+            let metric = capabilities
+                .metrics
+                .iter()
+                .find(|metric| metric.kind == kind)
+                .unwrap();
+            assert!(metric.compiled && metric.probe.is_ok());
+        }
+        let observer = capabilities
+            .observers
+            .iter()
+            .find(|observer| observer.kind == "kqueue")
+            .unwrap();
+        assert!(observer.compiled && observer.probe.is_ok());
+        assert_eq!(fd_count(), before);
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_rejects_both_limit_kinds_before_workers_files_or_spawn() {
+    run_test(async {
+        let path = CapturePath::new();
+        let baseline = debug_counters();
+        let fds = fd_count();
+        for limit in [
+            LocalLimit::AddressSpace { bytes: 1 << 20 },
+            LocalLimit::JobCommit { bytes: 1 << 20 },
+        ] {
+            let mut program = spec(&["hold"]);
+            program.limits = vec![limit];
+            program.program = path.0.with_extension("nonexistent");
+            program.stdout = capture(Sink::File(path.0.clone()), 4096, Exceed::Kill, false);
+            let admission = admit().unwrap();
+            let ticket = admission.ticket();
+            assert!(matches!(
+                spawn_root(
+                    program,
+                    admission,
+                    &SpawnOptions {
+                        stdout_sink: SinkTestOptions {
+                            fail_start: true,
+                            ..SinkTestOptions::default()
+                        },
+                        ..SpawnOptions::default()
+                    }
+                ),
+                Err(NotStarted::UnsupportedLimit)
+            ));
+            assert!(ticket.outcome().await.is_none());
+            assert!(!path.0.exists());
+            assert_eq!(debug_counters(), baseline);
+            assert_eq!(fd_count(), fds);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_connected_sessions_fail_before_admission_or_either_spawn() {
+    use cpforge::supervisor::session::{
+        RunRecord, SessionMode, SessionSpec, StartFailureKind, run_session,
+    };
+    run_test(async {
+        // Occupy every slot: admission, if attempted, would report capacity.
+        let held: Vec<_> = (0..4).map(|_| admit().unwrap()).collect();
+        let before = debug_counters();
+        let path = CapturePath::new();
+        for mode in [SessionMode::Direct, SessionMode::Relay] {
+            let mut solution = spec(&["hold"]);
+            solution.stderr = capture(Sink::File(path.0.clone()), 4096, Exceed::Kill, false);
+            let mut session = SessionSpec::new(solution, spec(&["hold"]), Duration::from_secs(1));
+            session.mode = mode;
+            session.transcript = Some(path.0.with_extension("transcript"));
+            let outcome = run_session(session).await;
+            for record in [&outcome.solution, &outcome.interactor] {
+                assert!(
+                    matches!(record, RunRecord::NotStarted(reason) if reason.kind == StartFailureKind::Unsupported)
+                );
+            }
+            assert!(!path.0.exists());
+            assert!(!path.0.with_extension("transcript").exists());
+            assert_eq!(debug_counters(), before);
+        }
+        drop(held);
     });
 }

@@ -22,7 +22,7 @@
 //!
 //! `JobPersistence` in `jobs::persist` supplies the disk-backed service;
 //! construct it from the ready job before passing that job to this engine.
-//! `SupervisorExecutor` is Linux-only. An executor must keep the
+//! `SupervisorExecutor` supports Linux and macOS. An executor must keep the
 //! [`RunResources`] guard with the physical resources of the run (writers,
 //! the root) until they are released, and file sinks add every successful
 //! write to [`RunResources::retained_counter`]. Persistence owns the metadata

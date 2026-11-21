@@ -104,7 +104,7 @@ struct RunCell {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Transfer {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Root(super::root::unix::Transfer),
     FailedCaptures(super::capture::FailedCaptures),
 }
@@ -264,7 +264,7 @@ impl Admission {
             .map(Credits::split)
             .ok_or(NotStarted::Worker)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn key(&self) -> u64 {
         self.cell.key
     }
@@ -277,7 +277,7 @@ impl Admission {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn transfer(self, record: super::root::unix::Transfer) {
         debug_assert_eq!(record.key(), self.cell.key);
         self.publish_transfer(Transfer::Root(record));
@@ -437,7 +437,7 @@ impl GlobalBounds {
                 };
                 let released = match record {
                     Transfer::FailedCaptures(captures) => captures.resources_released(),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     Transfer::Root(record) => {
                         let released = record.poll();
                         if let Some(outcome) = record.logical_outcome() {
@@ -452,7 +452,7 @@ impl GlobalBounds {
                 if released {
                     let outcome = match transfer.take().expect("poller owns record") {
                         Transfer::FailedCaptures(_) => None,
-                        #[cfg(target_os = "linux")]
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
                         Transfer::Root(mut record) => {
                             record.close_observer();
                             Some(record.outcome)

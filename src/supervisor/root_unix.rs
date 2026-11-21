@@ -1,4 +1,4 @@
-//! Unix root lifecycle policy, currently compiled only on Linux.
+//! Unix root lifecycle policy, for Linux and macOS.
 //!
 //! The cfg-selected `os` module supplies this execution-contract checklist:
 //! - Creation/limits (§3.4–3.5, §4.1–4.2, §7.2):
@@ -28,7 +28,7 @@
 //!   The caller separately resets SIGCHLD before sanitization and service startup.
 //!
 //! Linux delegates native operations to `sys` (pidfd/procfs, phase pipe, KiB RSS).
-//! A later Darwin selection must supply the same interface with its own mechanisms.
+//! Darwin supplies kqueue/waitid observation and byte-based RSS accounting.
 
 use super::*;
 use crate::supervisor::capture::{self, Captures};
@@ -36,6 +36,9 @@ use std::sync::{Mutex, Weak};
 
 #[cfg(target_os = "linux")]
 #[path = "root_linux.rs"]
+mod os;
+#[cfg(target_os = "macos")]
+#[path = "root_macos.rs"]
 mod os;
 use os as sys;
 pub(super) use os::init_process;
@@ -740,6 +743,7 @@ impl Transfer {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Root {
     pub(in crate::supervisor) async fn session_ready(&mut self) {
         let pid = self.pid() as i32;
@@ -844,6 +848,7 @@ impl Root {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(in crate::supervisor) async fn session_finish(
     mut root: Box<Root>,
     wall: Duration,
@@ -877,11 +882,11 @@ pub(in crate::supervisor) async fn session_finish(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::supervisor) mod tests {
     use super::*;
     use cpf_fixture::harness::fixture_path;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    pub(in crate::supervisor) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn observed_wall_judgment_has_exact_grace_boundaries_and_keeps_enforcement() {

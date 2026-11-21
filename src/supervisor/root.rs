@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "root_unix.rs"]
 pub(super) mod unix;
 
@@ -43,7 +43,7 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.borrow().is_some()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn requested_at(&self) -> Option<Instant> {
         *self.0.borrow()
     }
@@ -78,6 +78,7 @@ pub enum UnverifiedReason {
     Malformed,
     ScanIncomplete,
     ReapDeadline,
+    Unsupported,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -162,6 +163,7 @@ pub enum Termination {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObserverKind {
     Pidfd,
+    Kqueue,
     Polling,
 }
 
@@ -243,7 +245,7 @@ pub struct SpawnOptions {
 #[must_use = "wait_root must observe and reap the root"]
 #[derive(Debug)]
 pub struct Spawned {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     inner: Box<unix::Root>,
 }
 
@@ -251,11 +253,11 @@ impl Spawned {
     /// Cloneable ticket; each clone receives the same finalized outcome, or None
     /// after normal completion. Holding a ticket does not hold a cleanup slot.
     pub fn ticket(&self) -> TransferTicket {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.ticket()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             unreachable!("this platform cannot spawn a root yet")
         }
@@ -264,11 +266,11 @@ impl Spawned {
     /// Root pid, also the process-group id. This is identity information only;
     /// signalling authority remains private to the live-run registry.
     pub fn pid(&self) -> u32 {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.pid()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             unreachable!("this platform cannot spawn a root yet")
         }
@@ -289,13 +291,13 @@ pub fn spawn_root(
     {
         return Err(NotStarted::Unsupported);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         unix::spawn(spec, admission, opts).map(|inner| Spawned {
             inner: Box::new(inner),
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         if !spec.limits.is_empty() {
             return Err(NotStarted::UnsupportedLimit);
@@ -310,11 +312,11 @@ pub fn spawn_root(
 
 /// Observe exit without consuming it, kill the group, revoke signalling, reap.
 pub async fn wait_root(spawned: Spawned, controls: RunControls) -> RootOutcome {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         unix::wait(spawned.inner, controls).await
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (spawned, controls);
         unreachable!("this platform cannot spawn a root yet")
@@ -322,7 +324,8 @@ pub async fn wait_root(spawned: Spawned, controls: RunControls) -> RootOutcome {
 }
 
 /// Restore SIGCHLD's default disposition on Unix, mark inherited descriptors 3
-/// and above close-on-exec on Linux, and create the bounded cleanup service.
+/// and above close-on-exec on Linux and macOS, and create the bounded cleanup
+/// service.
 /// Call before starting other work; failure must abort start-up cleanly
 /// (execution contract §3.1, §3.3, §3.5). Idempotent and thread-safe.
 pub fn init_process() -> io::Result<()> {
@@ -331,7 +334,7 @@ pub fn init_process() -> io::Result<()> {
     #[cfg(unix)]
     {
         super::sys::reset_sigchld()?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             unix::init_process()?;
         }
@@ -342,6 +345,14 @@ pub fn init_process() -> io::Result<()> {
 /// Signal-control thread's force-exit barrier. It uses only live capabilities;
 /// creation and physical cleanup are never awaited.
 pub(crate) fn force_kill_active() {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     unix::force_kill_active();
+}
+
+/// Serialises a non-atomic descriptor creation (pipe, then `FD_CLOEXEC`) with
+/// child creation on macOS, which has no `pipe2`; a child spawned in between
+/// would otherwise inherit the descriptor.
+#[cfg(target_os = "macos")]
+pub(crate) fn creation_lock() -> std::sync::MutexGuard<'static, ()> {
+    super::sys::macos::creation_lock()
 }

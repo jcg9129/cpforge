@@ -32,6 +32,14 @@ impl Fixture {
             ".cpforge/job-seq",
             "schema = 1\nepoch = '0123456789abcdef0123456789abcdef'\nnext = '0'\n",
         );
+        // Homebrew GCC on macOS (`g++` is Apple clang there). The user layer is
+        // used so that a test's own user.toml, or any workspace-layer language
+        // table, still replaces it.
+        #[cfg(target_os = "macos")]
+        f.write(
+            "user.toml",
+            "schema = 1\n[languages.cpp.build]\nargv = ['g++-14', '-std=gnu++23', '-O2', '{sources}', '-o', '{artifact}']\n",
+        );
         fs::create_dir_all(f.path("problem/tests")).unwrap();
         f
     }

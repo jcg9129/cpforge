@@ -25,6 +25,8 @@ pub(in crate::supervisor) fn reset_sigchld() -> io::Result<()> {
 }
 
 pub(in crate::supervisor) fn pipe() -> io::Result<(Reader, Writer)> {
+    #[cfg(target_os = "macos")]
+    let _creation = super::macos::creation_lock();
     let mut fds = [-1; 2];
     #[cfg(not(target_os = "macos"))]
     // SAFETY: fds points to two writable integers. On success they are new,

@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -76,6 +76,10 @@ impl Directory {
     /// Language tables (and so `artifacts`) are not problem-layer keys; a
     /// target-specific artifact declaration belongs to the workspace layer.
     fn workspace(&self, extra: &str) {
+        #[cfg(target_os = "macos")]
+        let extra = format!(
+            "[languages.cpp.build]\nargv = ['g++-14', '-std=gnu++23', '-O2', '{{sources}}', '-o', '{{artifact}}']\n{extra}"
+        );
         fs::write(
             self.path("cpforge.toml"),
             format!("schema = 1\n[build]\ndeadline_s = 60\n[run]\ndeadline_s = 10\n{extra}"),
@@ -113,7 +117,7 @@ impl Directory {
         .unwrap();
         load_config(&ConfigRequest {
             environment: Environment::default(),
-            platform: Platform::Linux,
+            platform: Platform::host(),
             current_dir: self.0.clone(),
             config_path: Some(self.path("user.toml")),
             workspace_root: Some(self.0.clone()),
@@ -160,7 +164,7 @@ impl Directory {
         let baseline = Baseline::from_entries(vec![
             (
                 "PATH".into(),
-                std::env::var_os("PATH").expect("Linux toolchain tests require PATH"),
+                std::env::var_os("PATH").expect("Toolchain tests require PATH"),
             ),
             ("LANG".into(), "C.UTF-8".into()),
         ]);
@@ -177,7 +181,7 @@ impl Directory {
                     workspace: Some(self.0.clone()),
                 },
                 baseline,
-                platform: Platform::Linux,
+                platform: Platform::host(),
                 build_bytes: 64 << 20,
                 probe: &PROBE,
             },
@@ -185,7 +189,7 @@ impl Directory {
         )
         .unwrap_or_else(|errors| {
             panic!(
-                "Linux build proofs require g++, python3, javac and java on PATH; planning failed: {errors}"
+                "Build proofs require the C++ compiler, python3, javac and java on PATH; planning failed: {errors}"
             )
         })
     }
@@ -256,7 +260,7 @@ async fn drain(mut reader: ParentReader) -> Vec<u8> {
 }
 
 async fn launch(stage: ResolvedStage, stdin: StdinSpec) -> Execution {
-    let command = stage.launch_command(Platform::Linux).unwrap();
+    let command = stage.launch_command(Platform::host()).unwrap();
     assert_eq!(command.launch_kind, LaunchKind::Native);
     let stdout = stdout_pipe().unwrap();
     let stderr = stdout_pipe().unwrap();
@@ -346,7 +350,7 @@ fn cpp_generated_program_runs_twice_from_one_validated_build() {
             build
                 .run(dir.fresh_cwd("inspect-cwd"))
                 .unwrap()
-                .launch_command(Platform::Linux)
+                .launch_command(Platform::host())
                 .unwrap()
                 .program,
             artifact
@@ -371,7 +375,7 @@ fn cpp_grader_compiles_sources_with_captured_support_header() {
         let pending = dir.pending(&target, "grader");
         let args = pending
             .build_stage()
-            .launch_command(Platform::Linux)
+            .launch_command(Platform::host())
             .unwrap()
             .args;
         for source in ["solution.cpp", "grader.cpp"] {
@@ -400,7 +404,7 @@ async fn python_case(dir: &Directory, target: &TargetPlan, expected: &[u8]) {
     let cwd = dir.fresh_cwd("run");
     let stage = ready.run(cwd.clone()).unwrap();
     assert_eq!(stage.cwd, cwd);
-    let command = stage.launch_command(Platform::Linux).unwrap();
+    let command = stage.launch_command(Platform::host()).unwrap();
     assert_eq!(command.program.file_name().unwrap(), "python3");
     assert_eq!(
         command.args,
@@ -458,7 +462,7 @@ fn java_default_requires_main_class_and_runs_with_output_root_classpath() {
         let command = build
             .run(dir.fresh_cwd("inspect-cwd"))
             .unwrap()
-            .launch_command(Platform::Linux)
+            .launch_command(Platform::host())
             .unwrap();
         assert_eq!(command.program.file_name().unwrap(), "java");
         assert_eq!(
@@ -508,7 +512,7 @@ public class Grader {
         let command = build
             .run(dir.fresh_cwd("inspect-cwd"))
             .unwrap()
-            .launch_command(Platform::Linux)
+            .launch_command(Platform::host())
             .unwrap();
         assert_eq!(
             command.args,

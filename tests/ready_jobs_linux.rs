@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[allow(dead_code)] // Shared portable fixture also serves filesystem-only tests.
 mod ready_support;
@@ -100,7 +100,7 @@ async fn drain(mut reader: ParentReader) -> Vec<u8> {
 }
 
 async fn launch(stage: ResolvedStage, stdin: StdinSpec) -> Execution {
-    let command = stage.launch_command(Platform::Linux).unwrap();
+    let command = stage.launch_command(Platform::host()).unwrap();
     assert_eq!(command.launch_kind, LaunchKind::Native);
     let stdout = stdout_pipe().unwrap();
     let stderr = stdout_pipe().unwrap();
@@ -200,7 +200,11 @@ fn literal_original_path_in_shell_script_observes_edit_and_is_unchecked() {
         // Shell text is literal, including this absolute path to the original.
         // Source and artifact positional args still pass through the guard.
         let original = f.path("problem/main.cpp");
-        let script = format!("g++ '{}' -o \"$2\"", original.display());
+        #[cfg(target_os = "linux")]
+        let compiler = "g++";
+        #[cfg(target_os = "macos")]
+        let compiler = "g++-14";
+        let script = format!("{compiler} '{}' -o \"$2\"", original.display());
         f.write("user.toml", &format!("schema = 1\n[languages.cpp.build]\nshell = {{ interpreter = ['sh', '-c'], script = '''{script}''', args = ['{sources}', '{artifact}'] }}\n", sources = "{sources}", artifact = "{artifact}"));
         let target = f.target("cpp", "");
         let ready = prepare_build_job(

@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::ffi::OsString;
 use std::fs;
@@ -73,7 +73,7 @@ impl Directory {
         fs::write(&file, format!("[commands.c]\n{body}\n")).unwrap();
         load_config(&ConfigRequest {
             environment: Environment::default(),
-            platform: Platform::Linux,
+            platform: Platform::host(),
             current_dir: self.0.clone(),
             config_path: Some(file),
             ..ConfigRequest::default()
@@ -96,7 +96,7 @@ impl Directory {
             CommandBindings::default(),
         )
         .unwrap();
-        prepare(&plan.stage, &ctx, baseline, Platform::Linux, extra).unwrap()
+        prepare(&plan.stage, &ctx, baseline, Platform::host(), extra).unwrap()
     }
 
     fn resolve(
@@ -106,7 +106,7 @@ impl Directory {
         extra: &[OsString],
     ) -> Result<ResolvedStage, ResolveErrors> {
         let prepared = self.prepare(body, baseline, extra);
-        match resolve(prepared, &NativeProbe, Platform::Linux)? {
+        match resolve(prepared, &NativeProbe, Platform::host())? {
             Resolution::Resolved(stage) => Ok(stage),
             Resolution::AwaitingProducer(_) => {
                 panic!("external test program must resolve immediately")
@@ -204,7 +204,7 @@ async fn drain(mut reader: ParentReader) -> Vec<u8> {
 }
 
 async fn launch(stage: ResolvedStage) -> Vec<u8> {
-    let command = stage.launch_command(Platform::Linux).unwrap();
+    let command = stage.launch_command(Platform::host()).unwrap();
     assert_eq!(command.launch_kind, LaunchKind::Native);
     let pipe = stdout_pipe().unwrap();
     // Test-only bridge. Job admission will supply CPF_*, sinks and normalized
@@ -329,7 +329,10 @@ fn stage_path_selects_tool_and_missing_path_stops_before_launch() {
         let baseline =
             Baseline::from_entries(vec![("PATH".into(), empty.clone().into_os_string())]);
         let stage = dir.resolve(&body, &baseline, &[]).unwrap();
-        assert_eq!(stage.launch_command(Platform::Linux).unwrap().program, tool);
+        assert_eq!(
+            stage.launch_command(Platform::host()).unwrap().program,
+            tool
+        );
         assert_eq!(launch(stage).await, b"ok");
 
         // Keep the tool present, but exclude its directory from stage PATH.

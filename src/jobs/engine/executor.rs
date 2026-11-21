@@ -42,13 +42,13 @@ pub trait Executor {
     ) -> JobFuture<'_, ExecutionRecord>;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Default)]
 pub struct SupervisorExecutor {
     pub options: crate::supervisor::SpawnOptions,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Executor for SupervisorExecutor {
     fn execute(
         &mut self,
@@ -125,7 +125,7 @@ impl Executor for SupervisorExecutor {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn not_started(reason: crate::supervisor::NotStarted) -> ExecutionRecord {
     use crate::report::NotStartedReason as R;
     use crate::supervisor::NotStarted as N;

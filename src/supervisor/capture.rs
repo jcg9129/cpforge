@@ -66,11 +66,11 @@ impl StreamCapture {
 }
 
 // The pipeline itself contains no platform APIs. Future runtime backends can
-// use this module unchanged; currently only Linux creates roots.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// use this module unchanged; Linux and macOS share root lifecycle policy.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 mod pipeline;
 pub(super) use pipeline::FailedCaptures;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use pipeline::{Captures, DRAIN};
 
 #[doc(hidden)]
