@@ -28,21 +28,18 @@ fn invalid_problem_file(error: &selection::SelectionError) -> Option<PathBuf> {
     match error {
         selection::SelectionError::Context { cause, .. } => invalid_problem_file(cause),
         selection::SelectionError::Collision {
-            reason, entries, ..
-        } if matches!(
-            reason,
-            crate::names::CollisionReason::MetadataMissing
+            reason:
+                crate::names::CollisionReason::MetadataMissing
                 | crate::names::CollisionReason::MetadataUnreadable
                 | crate::names::CollisionReason::MetadataMalformed
                 | crate::names::CollisionReason::MetadataTooNew
-                | crate::names::CollisionReason::IdentityMismatch
-        ) =>
-        {
-            match entries.as_slice() {
-                [directory] => Some(directory.join("problem.toml")),
-                _ => None,
-            }
-        }
+                | crate::names::CollisionReason::IdentityMismatch,
+            entries,
+            ..
+        } => match entries.as_slice() {
+            [directory] => Some(directory.join("problem.toml")),
+            _ => None,
+        },
         _ => None,
     }
 }
