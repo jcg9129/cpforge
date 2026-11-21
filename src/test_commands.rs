@@ -1,4 +1,4 @@
-//! Human-readable catalog commands; running tests is reserved for a later task.
+//! Human-readable catalog commands.
 
 use crate::cli::TestCommand;
 use crate::error::Error;
@@ -30,27 +30,16 @@ fn store_error(error: StoreError) -> Error {
 
 pub(crate) fn run(
     problem: Option<&str>,
-    command: Option<TestCommand>,
+    command: TestCommand,
     machine: crate::cli::MachineArgs,
 ) -> Result<(), Error> {
-    if command.is_some() && machine.mode().requested() {
+    if machine.mode().requested() {
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
             "machine output is available for test jobs, not catalog subcommands",
         )
         .into());
     }
-    let Some(command) = command else {
-        let mut delivery = machine.prepare(crate::report::JobKind::Test)?;
-        let error = Error::Workspace("cpf test: running tests is not yet available; use cpf test add, ls, register, enable or disable".into());
-        if machine.mode().requested() {
-            delivery.refusal(
-                &crate::transport::early_refusal(crate::report::JobKind::Test, &error),
-                machine.mode(),
-            )?;
-        }
-        return Err(error);
-    };
     if let TestCommand::Add {
         input,
         answer: Some(answer),

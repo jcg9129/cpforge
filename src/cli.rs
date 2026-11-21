@@ -35,8 +35,17 @@ pub enum Command {
         #[command(flatten)]
         machine: MachineArgs,
     },
-    /// Manage the selected problem's test catalog.
+    /// Run selected tests, or manage the problem's test catalog.
     Test {
+        /// Run exactly these registered ids, including disabled tests, in order.
+        #[arg(long = "case", action = clap::ArgAction::Append)]
+        cases: Vec<String>,
+        /// Select a language profile.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Override only the run deadline (e.g. 500ms, 2s, 1m).
+        #[arg(long, allow_hyphen_values = true)]
+        deadline: Option<String>,
         #[command(flatten)]
         machine: MachineArgs,
         #[command(subcommand)]

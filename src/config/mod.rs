@@ -118,6 +118,7 @@ pub use stages::{
     PublishedLimit, Selection, StageHistory, StageKind, TargetSettings,
 };
 pub use syntax::{Placeholder, Token, tokenize};
+pub use validate::parse_deadline;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {

@@ -43,6 +43,9 @@ use crate::transport::{self, Delivery, MachineArgs, MachineMode};
 pub trait JobCommand {
     fn kind(&self) -> JobKind;
     fn operation(&self) -> Operation;
+    fn deadline_ms(&self) -> Result<Option<u64>, Error> {
+        Ok(None)
+    }
     fn select_tests(
         &self,
         selected: &Selected,
@@ -88,6 +91,146 @@ impl JobCommand for BuildCommand {
     }
 }
 
+#[derive(Debug)]
+pub struct TestRunCommand {
+    cases: Vec<String>,
+    deadline: Option<String>,
+}
+impl TestRunCommand {
+    pub fn new(cases: Vec<String>, deadline: Option<String>) -> Result<Self, Error> {
+        let mut seen = std::collections::BTreeSet::new();
+        for id in &cases {
+            if !seen.insert(id) {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!("duplicate --case {id:?}"),
+                )
+                .into());
+            }
+        }
+        Ok(Self { cases, deadline })
+    }
+}
+impl JobCommand for TestRunCommand {
+    fn kind(&self) -> JobKind {
+        JobKind::Test
+    }
+    fn operation(&self) -> Operation {
+        Operation::Test
+    }
+    fn deadline_ms(&self) -> Result<Option<u64>, Error> {
+        self.deadline
+            .as_deref()
+            .map(crate::config::parse_deadline)
+            .transpose()
+            .map_err(|e| Error::Config(format!("--deadline: {e}")))
+    }
+    fn select_tests(
+        &self,
+        selected: &Selected,
+        _config: &LoadedConfig,
+        _target: &TargetPlan,
+    ) -> Result<Vec<Identifier>, Error> {
+        let catalog = TestStore::new(selected.dir.clone())
+            .catalog()
+            .map_err(Error::Workspace)?;
+        if self.cases.is_empty() {
+            return Ok(catalog
+                .entries
+                .into_iter()
+                .filter(|e| e.enabled)
+                .map(|e| e.id)
+                .collect());
+        }
+        self.cases
+            .iter()
+            .map(|id| {
+                catalog
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id.as_str() == id)
+                    .map(|entry| entry.id.clone())
+                    .ok_or_else(|| {
+                        Error::Workspace(format!(
+                            "unknown registered test id {id:?}; register candidates with cpf test register first"
+                        ))
+                    })
+            })
+            .collect()
+    }
+    fn request(&self, target: &TargetPlan) -> JobRequest {
+        JobRequest::Test {
+            comparator: target.compare.value.clone(),
+        }
+    }
+    fn summary(&self, report: &FinalizedReport) -> Vec<String> {
+        let data = report.data();
+        let mut lines = if data.result.verdict == JobVerdict::BuildFailed {
+            build_summary(report)
+        } else {
+            Vec::new()
+        };
+        let passed = data
+            .tests
+            .iter()
+            .filter(|t| matches!(t.verdict, Some(crate::report::TestVerdict::Passed)))
+            .count() as u32;
+        let unchecked = data
+            .tests
+            .iter()
+            .filter(|t| matches!(t.verdict, Some(crate::report::TestVerdict::Unchecked)))
+            .count() as u32;
+        let comparator = data
+            .comparator
+            .as_ref()
+            .map_or("tokens", crate::report::comparator_token);
+        let template = if data.result.verdict == JobVerdict::NoTests {
+            crate::report::SummaryTemplate::NoTests
+        } else {
+            crate::report::SummaryTemplate::Passed {
+                passed,
+                selected: data.tests.len() as u32,
+                comparator,
+            }
+        };
+        let completed = !matches!(
+            data.result.verdict,
+            JobVerdict::Cancelled | JobVerdict::Infrastructure | JobVerdict::InternalError
+        );
+        if !matches!(
+            data.result.verdict,
+            JobVerdict::Passed
+                | JobVerdict::Unchecked
+                | JobVerdict::NoTests
+                | JobVerdict::BuildFailed
+        ) {
+            lines.push(crate::report::render_label(&label(
+                LabelSubject::Job(data.result.verdict),
+                &DisplayContext {
+                    invariant: data.result.internal.as_ref().map(|i| i.invariant),
+                    ..DisplayContext::default()
+                },
+            )));
+        }
+        lines.push(
+            crate::report::summary(template, completed, data.result.cancellation.is_some())
+                .render(),
+        );
+        if unchecked > 0 {
+            lines.push(crate::report::SummaryTemplate::Unchecked { count: unchecked }.render());
+        }
+        lines
+    }
+}
+
+/// Configuration contract §8.2: builds + tests × repeats + hooks, at most
+/// 10 000. Test jobs have one execution per test and no planned hooks yet.
+fn exceeds_run_cap(tests: usize, build: bool) -> bool {
+    tests
+        .checked_add(usize::from(build))
+        .is_none_or(|planned| planned > 10_000)
+}
+
 /// Run one invocation. Completed jobs return their selected status without
 /// becoming application errors. Refusals are delivered here, then returned for
 /// the CLI's stderr diagnostic. Machine preflight always precedes admission.
@@ -108,7 +251,7 @@ pub fn run(
     let outcome = (|| {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             return Err(Error::Infrastructure(
-                "unsupported platform: build execution requires Linux or macOS".into(),
+                "unsupported platform: build/test execution requires Linux or macOS".into(),
             ));
         }
         let cwd = std::env::current_dir()
@@ -141,6 +284,7 @@ pub fn run(
                 platform: Platform::host(),
                 operation: command.operation(),
                 profile,
+                deadline_ms: command.deadline_ms()?,
                 ..ConfigRequest::default()
             }),
         );
@@ -152,6 +296,11 @@ pub fn run(
             .retention()
             .map_err(|e| Error::Config(e.to_string()))?;
         let tests = command.select_tests(&selected, &config, &target)?;
+        if exceeds_run_cap(tests.len(), target.build.is_some()) {
+            return Err(Error::Config(
+                "planned runs exceed the 10 000 execution cap".into(),
+            ));
+        }
         let request = command.request(&target);
         let baseline = Baseline::capture();
         let binding = ProblemBinding {
@@ -622,4 +771,19 @@ fn build_summary(report: &FinalizedReport) -> Vec<String> {
     }
     lines.push(parts.join(" | "));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exceeds_run_cap;
+
+    #[test]
+    fn planned_run_cap_counts_the_build() {
+        assert!(!exceeds_run_cap(0, false));
+        assert!(!exceeds_run_cap(10_000, false));
+        assert!(exceeds_run_cap(10_001, false));
+        assert!(!exceeds_run_cap(9_999, true));
+        assert!(exceeds_run_cap(10_000, true));
+        assert!(exceeds_run_cap(usize::MAX, true));
+    }
 }

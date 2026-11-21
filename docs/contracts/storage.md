@@ -525,9 +525,12 @@ catalog order (id, enabled, answer absent / present, health), then the
 unregistered candidates (§8.1) in collision-key order, then diagnostics.
 Human-readable only; a stable machine format comes with `--json`.
 
-A bare `cpf test` runs tests (later task); selecting a case there uses an
-option (`--case <id>`), never a positional id, so it cannot collide with
-these subcommands.
+A bare `cpf test` runs every enabled registered test in catalog order.
+Repeatable `--case <id>` selects exactly those registered ids in option order,
+including disabled entries; duplicate ids are a usage error. Unknown ids and
+unregistered candidates refuse before admission. Case selection never uses a
+positional id, so it cannot collide with these subcommands. Zero selected tests
+still build the target, then report `no_tests` if the build succeeds.
 
 ### 5.4 `cpf adopt <path>` *(draft)*
 
@@ -1068,9 +1071,9 @@ enabled = true
   `O_NONBLOCK | O_CLOEXEC`; Windows opens never block on these types) and
   the type is validated on the **opened handle** before any read, so a
   regular file replaced by a FIFO between inspection and use is refused,
-  never waited on. A disabled entry's health is reported
-  but never blocks anything; a selected enabled entry that is unhealthy
-  stops the job before any run.
+  never waited on. An unselected disabled entry's health is reported
+  but never blocks a job; any selected entry that is unhealthy, including a
+  disabled entry explicitly selected with `--case`, stops the job before any run.
 - **Discovery** (read-only, never writes the catalog): entries of `tests/`
   (no recursion) named `<stem>.in` that no catalog entry names in either
   role are **unregistered candidates**, shown with their sibling

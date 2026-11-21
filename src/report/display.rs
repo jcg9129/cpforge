@@ -1,9 +1,97 @@
-//! Presentation data from report §2.8. Rendering/escaping belongs to callers.
+//! Typed presentation and human labels from report §2.8.
+//! Terminal line escaping and length limits belong to callers.
 
 use super::types::*;
 use crate::compare::Diag;
 use crate::supervisor::{LocalLimit, Measurement};
 use std::time::Duration;
+
+pub const fn comparator_token(comparator: &crate::config::Comparator) -> &'static str {
+    match comparator {
+        crate::config::Comparator::Exact => "exact",
+        crate::config::Comparator::Tokens => "tokens",
+        crate::config::Comparator::Lines => "lines",
+        crate::config::Comparator::Float(_) => "float",
+    }
+}
+
+/// Render typed labels using bounded, escaped comparator diagnostics.
+pub fn render_label(display: &DisplayLabel) -> String {
+    let mut parts = vec![display.token.map_or("", LabelToken::wire_token).to_owned()];
+    for qualifier in &display.qualifiers {
+        let text = match qualifier {
+            Qualifier::Comparator(mode) => format!("{mode} comparison"),
+            Qualifier::FirstDifference(diag) => diag.to_string(),
+            Qualifier::OutputDiffers(diag) => format!("(output differs: {diag})"),
+            Qualifier::OutputMatched => "(output matched)".into(),
+            Qualifier::WallDeadline {
+                deadline,
+                measured_wall,
+            } => {
+                let mut text = deadline.map_or_else(
+                    || "wall deadline".into(),
+                    |d| format!("wall deadline {}s", d.as_secs_f64()),
+                );
+                if let Some(wall) = measured_wall {
+                    text.push_str(&format!(
+                        "; measured wall {}s (root, observed)",
+                        wall.as_secs_f64()
+                    ));
+                }
+                text
+            }
+            Qualifier::Signal {
+                signal,
+                name,
+                core_dumped,
+            } => format!(
+                "signal {}{}",
+                name.clone().unwrap_or_else(|| signal.to_string()),
+                if *core_dumped { " (core dumped)" } else { "" }
+            ),
+            Qualifier::Exit { code, .. } => format!("exit code {code}"),
+            Qualifier::NotRun(reason) => reason.wire_token().replace('_', " "),
+            Qualifier::PrimaryCause(cause) => match cause {
+                InfrastructureCause::NotStarted { reason } => {
+                    format!("not started: {}", reason.wire_token().replace('_', " "))
+                }
+                InfrastructureCause::CaptureLoss { stream, loss } => format!(
+                    "{} capture: {}",
+                    stream.wire_token(),
+                    loss.wire_token().replace('_', " ")
+                ),
+                InfrastructureCause::SupervisorError { error } => {
+                    format!("supervisor: {}", error.wire_token().replace('_', " "))
+                }
+                other => other.wire_token().replace('_', " "),
+            },
+            Qualifier::Invariant(invariant) => invariant.wire_token().replace('_', " "),
+            Qualifier::BuildCause(cause) => cause.wire_token().replace('_', " "),
+            Qualifier::OutputBudget { streams, budgets } => streams
+                .streams()
+                .map(|stream| {
+                    budgets.iter().find(|(s, _)| *s == stream).map_or_else(
+                        || format!("{} output budget", stream.wire_token()),
+                        |(_, bytes)| format!("{} output budget {bytes} bytes", stream.wire_token()),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            Qualifier::CleanupNotVerified => "(cleanup not verified)".into(),
+            Qualifier::InstalledLimit(LocalLimit::AddressSpace { bytes }) => {
+                format!("local address-space limit {bytes} bytes")
+            }
+            Qualifier::InstalledLimit(LocalLimit::JobCommit { bytes }) => {
+                format!("local job-commit limit {bytes} bytes")
+            }
+            other => other
+                .fixed_text()
+                .map_or_else(|| format!("{other:?}"), str::to_owned),
+        };
+        parts.push(text);
+    }
+    parts.join("  ")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LabelToken {

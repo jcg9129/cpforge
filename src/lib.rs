@@ -52,9 +52,26 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 machine,
             );
         }
-        Some(Command::Test { command, machine }) => {
-            return test_commands::run(cli.problem.as_deref(), command, machine)
-                .map(|()| exit::ExitCode::Success);
+        Some(Command::Test {
+            command,
+            cases,
+            profile,
+            deadline,
+            machine,
+        }) => {
+            if let Some(command) = command {
+                if !cases.is_empty() || profile.is_some() || deadline.is_some() {
+                    return Err(clap::Error::raw(
+                        ErrorKind::ArgumentConflict,
+                        "--case, --profile and --deadline apply to test jobs, not catalog subcommands",
+                    )
+                    .into());
+                }
+                return test_commands::run(cli.problem.as_deref(), command, machine)
+                    .map(|()| exit::ExitCode::Success);
+            }
+            let command = job_command::TestRunCommand::new(cases, deadline)?;
+            return job_command::run(&command, cli.problem.as_deref(), profile, machine);
         }
         Some(Command::Current { path }) => {
             return selection::current(cli.problem.as_deref(), path)

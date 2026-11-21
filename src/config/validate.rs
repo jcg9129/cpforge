@@ -704,22 +704,10 @@ impl<'a> Validator<'a> {
                 return;
             }
         };
-        // Contract order: finiteness and sign of the number as written, then
-        // rounding and range; a product overflowing to infinity is out of range.
-        if !number.is_finite() {
-            self.error(n, "duration must be finite");
-            return;
+        match duration_milliseconds(number, factor) {
+            Ok(ms) => n.typed = Some(TypedValue::Milliseconds(ms)),
+            Err(message) => self.error(n, message),
         }
-        if number < 0.0 {
-            self.error(n, "duration must not be negative");
-            return;
-        }
-        let milliseconds = (number * factor).round();
-        if !(1.0..=86_400_000.0).contains(&milliseconds) {
-            self.error(n, "rounded duration must be in 1..=86400000 milliseconds");
-            return;
-        }
-        n.typed = Some(TypedValue::Milliseconds(milliseconds as u64));
     }
 }
 
@@ -921,4 +909,37 @@ impl Validator<'_> {
         }
         if n.has_errors() { None } else { Some(result) }
     }
+}
+
+/// Parse a CLI duration with the same units, rounding and bounds as deadline_s.
+/// A bare number is seconds, as for numeric configuration values.
+pub fn parse_deadline(value: &str) -> Result<u64, &'static str> {
+    let (number, factor) = if let Some(n) = value.strip_suffix("ms") {
+        (n, 1.0)
+    } else if let Some(n) = value.strip_suffix('s') {
+        (n, 1000.0)
+    } else if let Some(n) = value.strip_suffix('m') {
+        (n, 60_000.0)
+    } else {
+        (value, 1000.0)
+    };
+    let number = number
+        .parse::<f64>()
+        .map_err(|_| "invalid duration; use a number of seconds or ms, s or m")?;
+    duration_milliseconds(number, factor)
+}
+
+fn duration_milliseconds(number: f64, factor: f64) -> Result<u64, &'static str> {
+    // Check the written value before rounding; overflowing products fail range.
+    if !number.is_finite() {
+        return Err("duration must be finite");
+    }
+    if number < 0.0 {
+        return Err("duration must not be negative");
+    }
+    let ms = (number * factor).round();
+    if !(1.0..=86_400_000.0).contains(&ms) {
+        return Err("rounded duration must be in 1..=86400000 milliseconds");
+    }
+    Ok(ms as u64)
 }

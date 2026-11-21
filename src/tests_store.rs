@@ -486,6 +486,17 @@ impl TestStore {
         self.directory.join("tests.toml")
     }
 
+    /// Read registered entries only, without discovery or opening test data.
+    pub fn catalog(&self) -> Result<Catalog, String> {
+        let path = self.catalog_path();
+        match read_catalog(&path) {
+            Record::Missing => Ok(Catalog::default()),
+            record => {
+                record_result(record).map_err(|reason| format!("{} is {reason}", path.display()))
+            }
+        }
+    }
+
     /// Lock-free: no recovery, lock creation, or writes. Invalid metadata does
     /// not prevent discovery. Only failure to enumerate tests/ fails the listing.
     pub fn list(&self) -> Result<Listing, StorageError> {

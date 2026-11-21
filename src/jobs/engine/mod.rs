@@ -536,14 +536,47 @@ impl<'probe> Engine<'probe> {
                         },
                     );
                 }
-                tests.push(TestReport {
+                let test_report = TestReport {
                     frozen: test,
                     first_execution: execution.plan.index,
                     execution_count: 1,
                     class: execution.result.class.clone(),
                     check: Some(check),
                     verdict: Some(verdict),
-                });
+                };
+                if let Some(progress) = &progress {
+                    let context = report::DisplayContext {
+                        comparator: comparator.as_ref().map(report::comparator_token),
+                        wall_deadline: execution.summary.as_ref().map(|s| s.deadline),
+                        measured_wall: execution.evidence.as_deref().and_then(|e| match e {
+                            ExecutionRecord::Started(root) => root.timing.wall,
+                            ExecutionRecord::NotStarted(_) => None,
+                        }),
+                        budgets: vec![
+                            (report::Stream::Stdout, ready.target.run.stdout.bytes.value),
+                            (report::Stream::Stderr, ready.target.run.stderr.bytes.value),
+                        ],
+                        cleanup_unverified: execution
+                            .summary
+                            .as_ref()
+                            .is_some_and(|s| s.notes.contains(&report::RunNote::CleanupUnverified)),
+                        ..report::DisplayContext::default()
+                    };
+                    let display = report::label(
+                        report::LabelSubject::Test {
+                            verdict: test_report.verdict.as_ref().expect("test verdict"),
+                            class: test_report.class.as_ref(),
+                            check: test_report.check.as_ref(),
+                        },
+                        &context,
+                    );
+                    progress.offer(&format!(
+                        "{}  {}",
+                        test_report.frozen.id,
+                        report::render_label(&display)
+                    ));
+                }
+                tests.push(test_report);
             }
             if let Some(test) = execution
                 .plan
@@ -578,7 +611,7 @@ impl<'probe> Engine<'probe> {
                 done: executions.len() as u32 + 1,
                 total: planned_count,
             });
-            if let Some(progress) = &progress {
+            if let Some(progress) = progress.as_ref().filter(|_| kind != JobKind::Test) {
                 progress.offer(&format!(
                     "{}/{} executions finished",
                     executions.len() + 1,

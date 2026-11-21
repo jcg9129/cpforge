@@ -252,7 +252,7 @@ fn complete_inputs_preserve_bytes_hashes_answer_states_order_and_source_roles() 
 }
 
 #[test]
-fn unknown_candidates_disabled_and_unhealthy_selections_fail_closed() {
+fn unknown_candidates_and_unhealthy_selections_fail_closed() {
     let f = Fixture::new();
     f.write(
         "problem/tests.toml",
@@ -263,7 +263,14 @@ fn unknown_candidates_disabled_and_unhealthy_selections_fail_closed() {
     );
     f.write("problem/tests/good.in", b"good");
     f.write("problem/tests/candidate.in", b"unregistered");
-    for name in ["unknown", "candidate", "disabled", "missing"] {
+    f.write("problem/tests/disabled.in", b"explicit selection");
+    let job = f.job(1 << 20);
+    let manifest = f
+        .store()
+        .freeze_into(&[id("disabled")], &job.inputs())
+        .unwrap();
+    assert_eq!(manifest.entries()[0].id, id("disabled"));
+    for name in ["unknown", "candidate", "missing"] {
         let job = f.job(1 << 20);
         let error = f
             .store()
@@ -271,7 +278,6 @@ fn unknown_candidates_disabled_and_unhealthy_selections_fail_closed() {
             .unwrap_err();
         match name {
             "unknown" | "candidate" => assert!(matches!(error, FreezeError::UnknownId(_))),
-            "disabled" => assert!(matches!(error, FreezeError::DisabledId(_))),
             _ => assert!(matches!(
                 error,
                 FreezeError::Unhealthy {

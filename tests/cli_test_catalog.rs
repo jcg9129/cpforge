@@ -415,7 +415,7 @@ fn listing_distinguishes_absent_empty_present_and_missing_answers() {
 }
 
 #[test]
-fn unregistered_candidates_are_never_enabled_and_bare_test_is_reserved() {
+fn unregistered_candidates_are_never_enabled() {
     let workspace = Workspace::new();
     workspace.file("new.in", b"data");
     failure(
@@ -423,7 +423,6 @@ fn unregistered_candidates_are_never_enabled_and_bare_test_is_reserved() {
         &["registered", "register"],
     );
     assert!(!workspace.path("problems/A/tests.toml").exists());
-    failure(workspace.test(&[]), &["not yet available"]);
     failure(workspace.run("", &["test", "ls"]), &["NoSelection"]);
     failure(
         workspace.test(&["ls", "--problem", "missing"]),

@@ -21,14 +21,19 @@ fn unavailable_machine_modes_and_conflicting_flags_are_usage_errors() {
 }
 
 #[test]
-fn test_job_entry_delivers_its_existing_refusal_in_machine_modes() {
+fn test_job_entry_delivers_preflight_refusals_in_machine_modes() {
     for mode in ["--json", "--events", "--events=output"] {
         let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .args(["test", mode])
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        let supported = cfg!(any(target_os = "linux", target_os = "macos"));
+        assert_eq!(
+            output.status.code(),
+            Some(if supported { 8 } else { 10 }),
+            "{output:?}"
+        );
         assert_eq!(output.stdout.last(), Some(&b'\n'));
         let lines: Vec<serde_json::Value> = output
             .stdout
@@ -48,7 +53,14 @@ fn test_job_entry_delivers_its_existing_refusal_in_machine_modes() {
         };
         assert_eq!(report["document"], "job_report");
         assert_eq!(report["outcome"], "refused");
-        assert_eq!(report["refusal"]["class"], "workspace");
+        assert_eq!(
+            report["refusal"]["class"],
+            if supported {
+                "workspace"
+            } else {
+                "infrastructure"
+            }
+        );
         assert_eq!(report["persistence"]["report"]["kind"], "not_attempted");
     }
 }

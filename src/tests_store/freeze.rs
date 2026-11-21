@@ -1,5 +1,4 @@
-use super::{Answer, Health, Identifier, Record, TestStore, open_regular, read_catalog};
-use crate::selection::record_result;
+use super::{Answer, Health, Identifier, TestStore, open_regular};
 use crate::storage::inputs::{FrozenFile, InputsError, JobInputs};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -50,7 +49,6 @@ impl FrozenManifest {
 pub enum FreezeError {
     Catalog(String),
     UnknownId(TestId),
-    DisabledId(TestId),
     /// The same catalog entry was selected more than once.
     DuplicateId(TestId),
     Unhealthy {
@@ -64,7 +62,6 @@ impl fmt::Display for FreezeError {
         match self {
             Self::Catalog(message) => write!(f, "cannot freeze tests: {message}"),
             Self::UnknownId(id) => write!(f, "test {id} is unknown or unregistered"),
-            Self::DisabledId(id) => write!(f, "selected test {id} is disabled"),
             Self::DuplicateId(id) => write!(f, "test {id} is selected more than once"),
             Self::Unhealthy { path, health } => write!(f, "{}: {health}", path.display()),
             Self::Inputs(error) => write!(f, "{error}"),
@@ -86,11 +83,11 @@ impl From<InputsError> for FreezeError {
 }
 
 impl TestStore {
-    /// Resolve registered, enabled ids exactly in the caller's order. Candidates
+    /// Resolve registered ids exactly in the caller's order. Candidates
     /// never qualify. A failed freeze returns no manifest and cannot be retried
     /// in the same job, even through a newly borrowed inputs capability.
-    /// Explicitly selected disabled ids are errors: the caller filters disabled
-    /// entries out of default selections. Selecting one entry twice is a
+    /// Explicit selection may include disabled entries: the caller filters them
+    /// out of default selections. Selecting one entry twice is a
     /// `DuplicateId` error, detected before any file is opened or copied.
     pub fn freeze_into(
         &self,
@@ -106,13 +103,7 @@ impl TestStore {
         inputs: &JobInputs<'_>,
     ) -> Result<FrozenManifest, FreezeError> {
         inputs.ensure_active()?;
-        let path = self.catalog_path();
-        let catalog = match read_catalog(&path) {
-            Record::Missing => super::Catalog::default(),
-            record => record_result(record).map_err(|reason| {
-                FreezeError::Catalog(format!("{} is {reason}", path.display()))
-            })?,
-        };
+        let catalog = self.catalog().map_err(FreezeError::Catalog)?;
         let mut chosen = vec![false; catalog.entries.len()];
         let mut selected = Vec::with_capacity(ids.len());
         for id in ids {
@@ -122,9 +113,6 @@ impl TestStore {
                 .position(|entry| entry.id == *id)
                 .ok_or_else(|| FreezeError::UnknownId(id.clone()))?;
             let entry = &catalog.entries[index];
-            if !entry.enabled {
-                return Err(FreezeError::DisabledId(id.clone()));
-            }
             if std::mem::replace(&mut chosen[index], true) {
                 return Err(FreezeError::DuplicateId(id.clone()));
             }
