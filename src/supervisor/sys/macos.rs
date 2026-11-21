@@ -133,7 +133,9 @@ fn receipt(pid: i32, count: i32, receipt: &libc::kevent) -> io::Result<bool> {
     {
         return Err(io::Error::from_raw_os_error(libc::EIO));
     }
-    match receipt.data {
+    // `kevent` is packed on macOS: copy the field before matching on it.
+    let data = receipt.data;
+    match data {
         0 => Ok(false), // A registration acknowledgement, never an exit event.
         value if value == libc::ESRCH as libc::intptr_t => Ok(true),
         value => Err(io::Error::from_raw_os_error(
