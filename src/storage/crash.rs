@@ -29,6 +29,10 @@
 //! `test_add.answer_published`, `test_add.registered` (catalog insertion).
 //! Selecting `file_noclobber.linked` also forces the Linux link fallback in
 //! test builds, so real command subprocesses can exercise that boundary.
+//!
+//! Pause barriers: set `CPF_STORAGE_PAUSE_AT=<name>` to print
+//! `CPF-PAUSED <name>` to stdout and block until one byte arrives on stdin.
+//! Barriers: `inputs.source_copied` (after the first captured source copy).
 
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 pub(super) fn force_link_fallback() -> bool {
@@ -69,6 +73,26 @@ pub(crate) fn point(name: &'static str) {
             let _ = writeln!(stderr, "CPF-CRASH-AT {name}");
             let _ = stderr.flush();
             std::process::abort();
+        }
+    }
+    #[cfg(not(feature = "storage-test-hooks"))]
+    let _ = name;
+}
+
+/// Feature-gated subprocess barrier after the first source has been copied.
+/// Test drivers exchange one byte over their inherited stdin/stdout pipes;
+/// production builds do not inspect this setting or perform pipe I/O.
+#[inline]
+pub(crate) fn barrier(name: &'static str) {
+    #[cfg(feature = "storage-test-hooks")]
+    {
+        use std::io::{Read, Write};
+        if std::env::var("CPF_STORAGE_PAUSE_AT").is_ok_and(|value| value == name) {
+            println!("CPF-PAUSED {name}");
+            std::io::stdout().flush().expect("flush storage barrier");
+            std::io::stdin()
+                .read_exact(&mut [0_u8; 1])
+                .expect("release storage barrier");
         }
     }
     #[cfg(not(feature = "storage-test-hooks"))]

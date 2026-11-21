@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod exec;
 pub mod exit;
+pub mod jobs;
 pub mod names;
 pub mod selection;
 pub mod storage;

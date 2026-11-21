@@ -42,7 +42,7 @@ pub struct FrozenFile {
 }
 
 /// Complete tests and sources for one job. Construction requires both phases.
-/// C10a5 combines RegisteredJob + FrozenInputs + the plan into ReadyJob;
+/// `jobs::prepare_job` combines registration, complete inputs and planning;
 /// neither registration nor these inputs alone grants permission to run.
 #[derive(Debug)]
 pub struct FrozenInputs {
@@ -52,6 +52,10 @@ pub struct FrozenInputs {
 }
 
 impl FrozenInputs {
+    pub(crate) fn into_parts(self) -> (FrozenManifest, CapturedSources) {
+        (self.manifest, self.sources)
+    }
+
     pub fn job_dir(&self) -> &Path {
         &self.job_dir
     }

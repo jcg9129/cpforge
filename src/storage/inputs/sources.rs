@@ -168,7 +168,7 @@ fn capture_checked(
         opened.push((source, relative, file));
     }
     let mut files = Vec::with_capacity(opened.len());
-    for (source, relative, mut file) in opened {
+    for (index, (source, relative, mut file)) in opened.into_iter().enumerate() {
         let copy = inputs
             .copy(&Path::new("src").join(relative), &mut file)
             .map_err(|error| match error {
@@ -180,6 +180,9 @@ fn capture_checked(
                 }
                 error => CaptureError::Inputs(error),
             })?;
+        if index == 0 {
+            crate::storage::crash::barrier("inputs.source_copied");
+        }
         files.push(CapturedSourceCopy {
             role: source.role,
             problem_path: source.problem_path.clone(),
