@@ -617,6 +617,9 @@ fn four_slots_bound_admission_and_release_after_reap() {
         drop(root);
         assert!(ticket.outcome().await.is_some());
         assert!(process(pid).is_none());
+        // The outcome is published when the root finishes; the slot is
+        // released once cleanup completes, which may be a moment later.
+        until(|| debug_counters().slots_in_use == 3).await;
         let returned = admit().expect("reaping releases capacity even with tickets alive");
         assert!(matches!(admit(), Err(NotStarted::CleanupCapacity)));
         drop(returned);
