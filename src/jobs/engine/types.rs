@@ -372,3 +372,21 @@ impl FinalizedReport {
         &self.data
     }
 }
+
+#[cfg(test)]
+pub(crate) fn wire_fixture_plan(index: u32, role: Role) -> PlannedExecution {
+    PlannedExecution {
+        index,
+        stage: Stage::Run,
+        role,
+        depends_on_build: false,
+        recipe: Recipe::TargetRun,
+        stdin: None,
+        test: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn wire_fixture_run(index: u32) -> RunId {
+    RunId(format!("r{index:05}"))
+}

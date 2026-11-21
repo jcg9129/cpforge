@@ -551,7 +551,7 @@ to check the arithmetic. Sizes in bytes.
 | capture (header) | check 195 + 2 × (16 × `nsum(128)` + dropped) + counts + `u64` + digest + manifest `rel` 28 | 13 311 | |
 | build (header) | max of: `succeeded` + 16 artifacts × 399 (6 574); `failed{missing_output}` with 16 names × 399 and no artifacts (6 664) | 6 664 | |
 | **report header** | job 225, workspace `nsum(1024)` 2 191, problem 509, target 1 587, capture 13 311, fingerprints, build 6 664, result 1 734, fact 453, 32 × hook 244, 24 × warning 741, events, timing, persistence 448, scalars, keys | 53 595 | **64 KiB** |
-| **report** | header + Σ per planned execution (entry 8 838 + test 2 868 + aggregate 224 + 3 commas = 11 933) | | **64 KiB + 12 KiB × N** |
+| **report** | header + Σ per planned execution (entry 8 851 + test 2 868 + aggregate 224 + 3 commas = 11 946) | | **64 KiB + 12 KiB × N** |
 | `Diagnostic` | file `nsum(256)` 655, key text, 2 × `u32`, message text | 1 237 | |
 | **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 916 | **104 KiB** |
 | **event line** | max of: `run_finished` (summary + 99) 6 873; `output_chunk` (4 096 bytes → 5 464 base64 + 157) 5 621; others ≤ 400 | 6 873 | **7 KiB** (final envelope: report bound + 28, 29 with the line feed) |

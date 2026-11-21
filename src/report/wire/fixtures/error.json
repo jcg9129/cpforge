@@ -1,0 +1,1 @@
+{"schema":1,"document":"error","platform":"unix","command":"config_show","class":"config","exit":7,"error":{"kind":"invalid_config","message":"invalid configuration","path":null},"diagnostics":[],"diagnostics_dropped":0}
