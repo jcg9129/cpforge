@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use toml_edit::DocumentMut;
 
+use super::budget::JobBudget;
 pub use super::job_seq::Epoch;
 use super::job_seq::parse_decimal_u64;
 use super::{
@@ -224,10 +225,11 @@ pub fn publish_job_record(
 #[derive(Debug)]
 pub struct JobLease {
     file: File,
+    budget: Option<Arc<JobBudget>>,
 }
 
 /// Cheap shared ownership of one lease handle. Only the last clone's drop
-/// releases the lock. Future job accounting can share this same lifetime.
+/// releases the lock and the registered job's retained-byte accounting.
 pub type JobOwner = Arc<JobLease>;
 
 impl JobLease {
@@ -235,20 +237,43 @@ impl JobLease {
     /// job directory. Admission calls this while still holding its workspace
     /// guard. Any failure leaves interrupted storage for later reclamation.
     pub fn create_and_lock(job_dir: impl AsRef<Path>) -> io::Result<JobOwner> {
-        let file = sys::open_lease(&job_dir.as_ref().join("lease"), true)?;
+        Self::create_and_lock_inner(job_dir.as_ref(), None)
+    }
+
+    pub(crate) fn create_and_lock_with_budget(
+        job_dir: &Path,
+        budget: Arc<JobBudget>,
+    ) -> io::Result<JobOwner> {
+        Self::create_and_lock_inner(job_dir, Some(budget))
+    }
+
+    /// Registered owners and all their clones share the same accounting.
+    /// Standalone lease primitives and independent probes have no budget.
+    pub fn budget(&self) -> Option<&Arc<JobBudget>> {
+        self.budget.as_ref()
+    }
+
+    fn create_and_lock_inner(
+        job_dir: &Path,
+        budget: Option<Arc<JobBudget>>,
+    ) -> io::Result<JobOwner> {
+        let file = sys::open_lease(&job_dir.join("lease"), true)?;
         if !sys::try_lock(&file)? {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "new job lease is already locked",
             ));
         }
-        Ok(Arc::new(Self { file }))
+        Ok(Arc::new(Self { file, budget }))
     }
 }
 
 impl Drop for JobLease {
     fn drop(&mut self) {
         sys::unlock(&self.file);
+        if let Some(budget) = &self.budget {
+            budget.owner_released();
+        }
     }
 }
 
@@ -280,7 +305,7 @@ pub fn probe(job_dir: impl AsRef<Path>) -> ProbeOutcome {
     };
     match sys::try_lock(&file) {
         Ok(true) => ProbeOutcome::Acquired(ProbeLock {
-            _lease: JobLease { file },
+            _lease: JobLease { file, budget: None },
         }),
         Ok(false) => ProbeOutcome::Held,
         Err(error) => ProbeOutcome::Failed(error),

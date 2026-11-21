@@ -198,6 +198,10 @@ impl WorkspaceGuard<'_> {
         self.recovery.as_ref()
     }
 
+    pub(crate) fn take_recovery_warning(&mut self) -> Option<RecoveryIncomplete> {
+        self.recovery.take()
+    }
+
     /// Resolve a path confined below the root, checking every existing component
     /// at use. Missing final components are permitted for exclusive creation.
     /// Absolute paths must be constructed from `guard.root()` (the canonical

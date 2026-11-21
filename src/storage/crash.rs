@@ -16,6 +16,9 @@
 //! `init.job_seq_published` (after publishing a new initial job-seq),
 //! `init.config_published` (after publishing cpforge.toml);
 //! `job.record_published` (after no-clobber publication of job.toml);
+//! `admission.job_seq_replaced` (job-seq advanced, no job directory yet),
+//! `admission.directory_created`, `admission.job_record_published`,
+//! `admission.lease_locked`, `admission.lock_released` (before reclaim);
 //! `prune.before_rename`, `prune.after_rename` (each candidate's commit),
 //! `prune.before_reclaim` (step 3 entry, after releasing the workspace guard);
 //! `add.locked` (after recovery), `add.staged` (complete unpublished tree),

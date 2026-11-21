@@ -9,6 +9,8 @@
 //! Unix mode only; ownership, ACLs, extended attributes and Windows attributes
 //! are inherited from the destination directory rather than preserved.
 
+pub mod admission;
+pub mod budget;
 pub(crate) mod crash;
 mod edit;
 pub mod job;
