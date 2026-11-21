@@ -62,8 +62,8 @@ pub fn classify_run(record: &RunInput) -> RunClass {
         || record.budget_violations.stdout && record.stdout.kill_on_breach
         || record.stop_trigger
             == Some(StopTrigger::OutputBudget(crate::supervisor::Stream::Stdout));
-    let stderr = record.stderr.breached() && record.stderr.kill_on_breach
-        || record.budget_violations.stderr && record.stderr.kill_on_breach
+    let stderr = (record.stderr.breached() || record.budget_violations.stderr)
+        && record.stderr.kill_on_breach
         || record.stop_trigger
             == Some(StopTrigger::OutputBudget(crate::supervisor::Stream::Stderr));
     if stdout || stderr {
@@ -511,7 +511,7 @@ pub fn job_verdict(input: &JobInput<'_>) -> JobResult {
                     })
                 })
         })
-        .or_else(|| match input.build {
+        .or(match input.build {
             Some(BuildResult::InternalError { invariant }) => Some(InternalFailure {
                 invariant: *invariant,
                 locus: InternalLocus::Build,
