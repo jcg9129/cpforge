@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
-#[path = "root_linux.rs"]
-pub(super) mod linux;
+#[path = "root_unix.rs"]
+pub(super) mod unix;
 
 /// Persistent cancellation intent. Watch retains the flag, so registering a
 /// waiter concurrently with cancel (or dropping a waiter) cannot lose a wakeup.
@@ -244,7 +244,7 @@ pub struct SpawnOptions {
 #[derive(Debug)]
 pub struct Spawned {
     #[cfg(target_os = "linux")]
-    inner: Box<linux::Root>,
+    inner: Box<unix::Root>,
 }
 
 impl Spawned {
@@ -291,7 +291,7 @@ pub fn spawn_root(
     }
     #[cfg(target_os = "linux")]
     {
-        linux::spawn(spec, admission, opts).map(|inner| Spawned {
+        unix::spawn(spec, admission, opts).map(|inner| Spawned {
             inner: Box::new(inner),
         })
     }
@@ -312,7 +312,7 @@ pub fn spawn_root(
 pub async fn wait_root(spawned: Spawned, controls: RunControls) -> RootOutcome {
     #[cfg(target_os = "linux")]
     {
-        linux::wait(spawned.inner, controls).await
+        unix::wait(spawned.inner, controls).await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -333,7 +333,7 @@ pub fn init_process() -> io::Result<()> {
         super::sys::reset_sigchld()?;
         #[cfg(target_os = "linux")]
         {
-            super::sys::init_process()?;
+            unix::init_process()?;
         }
     }
     cleanup::init()

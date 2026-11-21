@@ -105,7 +105,7 @@ struct RunCell {
 #[derive(Debug)]
 enum Transfer {
     #[cfg(target_os = "linux")]
-    Root(super::root::linux::Transfer),
+    Root(super::root::unix::Transfer),
     FailedCaptures(super::capture::FailedCaptures),
 }
 
@@ -278,7 +278,7 @@ impl Admission {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn transfer(self, record: super::root::linux::Transfer) {
+    pub(super) fn transfer(self, record: super::root::unix::Transfer) {
         debug_assert_eq!(record.key(), self.cell.key);
         self.publish_transfer(Transfer::Root(record));
     }

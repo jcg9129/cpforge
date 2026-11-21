@@ -298,7 +298,7 @@ const TRANSCRIPT_FINALIZE: Duration = Duration::from_secs(1);
 mod linux {
     use super::*;
     use crate::supervisor::{
-        Exceed, Sink, StopTrigger, StreamPolicy, admit_pair, root::linux as roots, stdout_pipe, sys,
+        Exceed, Sink, StopTrigger, StreamPolicy, admit_pair, root::unix as roots, stdout_pipe, sys,
     };
     use std::time::Instant;
 
