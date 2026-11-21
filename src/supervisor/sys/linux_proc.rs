@@ -13,6 +13,8 @@ pub(in crate::supervisor) struct CleanupScan {
     buffer: [u8; 4096],
     last_survivors: Option<u32>,
     entry_delay: Duration,
+    #[cfg(test)]
+    scans_started: usize,
 }
 
 impl CleanupScan {
@@ -46,6 +48,8 @@ impl CleanupScan {
             buffer: [0; 4096],
             last_survivors: None,
             entry_delay: Duration::ZERO,
+            #[cfg(test)]
+            scans_started: 0,
         })
     }
 
@@ -55,6 +59,8 @@ impl CleanupScan {
 
     /// None means a completed scan found live members before the deadline.
     /// No interrupted, malformed, or unsupported scan may return Confirmed.
+    /// At the cleanup deadline the last completed scan's survivors stand,
+    /// even when a newer scan is interrupted.
     pub(in crate::supervisor) fn poll(
         &mut self,
         cleanup_deadline: Instant,
@@ -67,15 +73,7 @@ impl CleanupScan {
             UnverifiedReason::ScanIncomplete
         };
         if Instant::now() >= deadline {
-            if cutoff == UnverifiedReason::ReapDeadline {
-                return Some(Cleanup::Unverified { reason: cutoff });
-            }
-            return Some(match self.last_survivors {
-                Some(survivors) => Cleanup::Incomplete { survivors },
-                None => Cleanup::Unverified {
-                    reason: UnverifiedReason::ScanIncomplete,
-                },
-            });
+            return Some(self.at_deadline(cutoff));
         }
         let result = self.scan(deadline, cutoff);
         if cutoff == UnverifiedReason::ReapDeadline && Instant::now() >= deadline {
@@ -88,7 +86,18 @@ impl CleanupScan {
                 self.last_survivors = Some(survivors);
                 None
             }
+            // Only the deadline check yields ScanIncomplete from a scan.
+            Err(UnverifiedReason::ScanIncomplete) => Some(self.at_deadline(cutoff)),
             Err(reason) => Some(Cleanup::Unverified { reason }),
+        }
+    }
+
+    fn at_deadline(&self, cutoff: UnverifiedReason) -> Cleanup {
+        match (cutoff, self.last_survivors) {
+            (UnverifiedReason::ScanIncomplete, Some(survivors)) => {
+                Cleanup::Incomplete { survivors }
+            }
+            _ => Cleanup::Unverified { reason: cutoff },
         }
     }
 
@@ -97,6 +106,10 @@ impl CleanupScan {
         deadline: Instant,
         cutoff: UnverifiedReason,
     ) -> Result<u32, UnverifiedReason> {
+        #[cfg(test)]
+        {
+            self.scans_started += 1;
+        }
         let entries = fs::read_dir(&self.proc).map_err(|_| UnverifiedReason::ScanFailed)?;
         let mut survivors = 0_u32;
         for entry in entries {
@@ -449,6 +462,81 @@ mod tests {
                 Err(UnverifiedReason::ProcFiltered)
             );
         }
+    }
+
+    #[test]
+    fn scan_cut_by_cleanup_deadline_uses_only_the_last_completed_live_count() {
+        bounded(|| {
+            for previous_survivors in [None, Some(0), Some(1)] {
+                let tree = Tree::new();
+                tree.stat(
+                    101,
+                    if previous_survivors == Some(0) {
+                        'Z'
+                    } else {
+                        'S'
+                    },
+                    100,
+                );
+                let mut scan = tree.scanner();
+                if let Some(survivors) = previous_survivors {
+                    assert_eq!(
+                        scan.poll(Instant::now() + Duration::from_secs(1), None),
+                        if survivors == 0 {
+                            Some(Cleanup::Confirmed)
+                        } else {
+                            None
+                        }
+                    );
+                }
+                tree.stat(101, 'S', 100);
+                let scans_started = scan.scans_started;
+                scan.set_entry_delay(Duration::from_millis(100));
+                let deadline = Instant::now() + Duration::from_millis(20);
+                let expected = if previous_survivors == Some(1) {
+                    Cleanup::Incomplete { survivors: 1 }
+                } else {
+                    Cleanup::Unverified {
+                        reason: UnverifiedReason::ScanIncomplete,
+                    }
+                };
+                assert_eq!(scan.poll(deadline, None), Some(expected));
+                // Ensure the deadline interrupted scan(), rather than expiring
+                // before poll() started and exercising only its entry check.
+                assert_eq!(scan.scans_started, scans_started + 1);
+                assert!(Instant::now() >= deadline);
+            }
+        });
+    }
+
+    #[test]
+    fn reap_deadline_during_rescan_overrides_the_last_completed_live_count() {
+        bounded(|| {
+            for equal_deadlines in [false, true] {
+                let tree = Tree::new();
+                tree.stat(101, 'S', 100);
+                let mut scan = tree.scanner();
+                assert_eq!(
+                    scan.poll(Instant::now() + Duration::from_secs(1), None),
+                    None
+                );
+                scan.set_entry_delay(Duration::from_millis(100));
+                let start = Instant::now();
+                let reap = start + Duration::from_millis(20);
+                let cleanup = if equal_deadlines {
+                    reap
+                } else {
+                    start + Duration::from_secs(1)
+                };
+                assert_eq!(
+                    scan.poll(cleanup, Some(reap)),
+                    Some(Cleanup::Unverified {
+                        reason: UnverifiedReason::ReapDeadline,
+                    })
+                );
+                assert_eq!(scan.scans_started, 2);
+            }
+        });
     }
 
     #[test]
