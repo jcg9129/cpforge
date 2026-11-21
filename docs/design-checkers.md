@@ -9,7 +9,7 @@ the connected-run mechanics (§5) belong to the supervisor and record events
 and provenance but derive no verdicts (§11). Supervisor mechanics
 (ownership, deadlines, capture, cleanup, persistence, cancellation arbitration)
 are `contracts/execution.md` (cited *E §n*) and are not restated; comparators
-are `compare-spec.md`; CLI exit codes belong to the report transport.
+are `compare-spec.md`; CLI exit codes are `contracts/report.md` §5.
 
 This is cpforge's **local policy**, not a claim about how any judge decides.
 

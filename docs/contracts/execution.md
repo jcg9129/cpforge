@@ -3,7 +3,9 @@
 Status: v5. Normative for the `supervisor`, `jobs` and `report` modules.
 Storage (run directories, leases, pruning, retention accounting) is defined
 in `storage.md`; configuration (how a spec is produced, placeholders, shell
-mode, hooks, `repeat`, runs per job) is defined in `config.md`.
+mode, hooks, `repeat`, runs per job) is defined in `config.md`; result
+derivation, the report format, exit statuses and machine output are
+defined in `report.md` (the report contract).
 
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
@@ -71,7 +73,11 @@ files. Declared artifacts (design §5.2) are validated by build orchestration
 (build planning), not by the supervisor. Every run persists its resolved spec as a
 versioned record (location: storage contract); `spec_digest` is SHA-256 over a canonical
 encoding: Unix `OsString` as raw bytes, Windows as WTF-16 code units,
-length-prefixed, fields in declaration order. The serialised spec has a size
+length-prefixed, fields in declaration order. `spec.json` encodes native
+values as report contract §3.3 `ns`; `spec_digest` is unaffected (it is
+computed over this binary encoding). If `spec.json` has already been
+written with another native encoding, this is a `spec.json` schema
+increment. The serialised spec has a size
 limit (configuration contract: 256 KiB) checked before the run is admitted. In the CLI foundation,
 `Connected` variants and a `deadline_group` are rejected at validation
 (`NotStarted{Unsupported}`).
@@ -470,7 +476,8 @@ contract §6, not a reservation ceiling):
   publication files; held until the persistence thread has returned from the
   last write. Checked arithmetic. Failure →
   `NotStarted{RetentionBudget}`, nothing stays reserved, the job admits no
-  further runs.
+  further runs. Before its first run the job also reserves the report bound
+  of report contract §3.7 for `report.json` and its temporary file.
 - At **resources released** the reservation is converted: bytes actually on
   disk become retained, the rest is returned. A stalled writer keeps its full
   stream reservation until it returns (a directory lease alone does not
@@ -582,7 +589,14 @@ empty captures.
   metadata reservation passes to the cleanup service until it returns. The
   in-memory report stays authoritative for the invocation. Size bounds: spec
   ≤ 256 KiB, record ≤ 64 KiB, `cleanup.log` ≤ 64 KiB (then a truncation
-  marker), report ≤ 16 KiB + 64 KiB × runs (configuration contract caps runs per job).
+  marker), report ≤ 64 KiB + 12 KiB × planned executions (report contract
+  §3.7; configuration contract caps runs per job).
+- **Settlement**: a job settles its persistence before finalizing its
+  report: it waits, outside the verdict lock, until every artefact it
+  enqueued (specs, records, first `cleanup.log` publications) has a result,
+  published or `PersistError`; this ends by the last enqueue + 5 s. The
+  report then names a path for every published artefact and an error for
+  every other (report contract §2.9 W).
 
 ### 6.3 Deadline semantics
 
@@ -625,7 +639,9 @@ Precedence (supersedes the list in design §6.3):
   loss of kind `WriteError`, `WriteStalled`, `PipeRead`,
   `NoEofBeforeDrainDeadline` or `ForwardIncomplete`. Each loss kind is judged
   on its own: a budget breach (`exceeded_at`, `BudgetDiscard`) gives the
-  output-budget verdict and never excuses another loss.
+  output-budget verdict and never excuses another loss. A `Discard` breach
+  on a stream that is not compared is a note, not an output-budget outcome
+  (report contract §2.2).
 - Cleanup `Unverified` does not block a pass; the summary says "cleanup not
   verified".
 - A pass requires `Exited{0}`, no violation, stdout complete, no supervisor
@@ -638,13 +654,21 @@ Precedence (supersedes the list in design §6.3):
   finalized, from execution evidence and the comparison result or
   `comparison skipped`, under one per-job verdict lock that cancellation also
   takes to set intent, so every derivation sees intent either before or
-  after. A comparison already started finishes (in-process, bounded); one not
-  started when intent is set is skipped. A test is `cancelled` if its run was
+  after. Intent arbitrates check admission per report contract §2.4. A
+  check I/O failure is infrastructure unless the check is diagnostic, in
+  which case it is evidence only. A test is `cancelled` if its run was
   stopped by cancellation, never started (`CancelledBeforeStart`) or had its
   comparison skipped by cancellation — unless its evidence is
   infrastructure, which keeps precedence. Comparisons skipped after an
-  unsuccessful execution publish through the same path. The job report says
-  `cancelled` and is still finalized.
+  unsuccessful execution publish through the same path. The job verdict
+  follows the precedence of report contract §2.7 (`internal_error`, then
+  `infrastructure`, then `cancelled`, then the outcome rows): it is
+  `cancelled` only if no higher-precedence value applies and some primary
+  execution or check was stopped, skipped or refused by cancellation;
+  intent that stopped nothing leaves the completed verdict. Every intent
+  set before report finalization is recorded with its phase (report
+  contract §2.9) and the process status follows report contract §5.2. The
+  report is still finalized.
 
 ## 7. Limits and measurements
 
@@ -726,7 +750,9 @@ pub struct InstalledLimit {
   may stay blocked in `read` until `cpf` exits; since raw mode is the whole
   process, no later interaction can lose input to it. The child is not the
   terminal's foreground group and must not read the terminal directly.
-- `--json` / `--events` are rejected with raw mode. Exit-code mapping: report transport.
+- `--json` / `--events` are rejected with raw mode. Exit statuses: report
+  contract §5.5 (fixed statuses, the child's status is reported, never
+  passed through).
 
 ### 8.2 Ctrl-C
 
@@ -738,8 +764,10 @@ pub struct InstalledLimit {
 - First notification: cancel the current job. Any later notification ≥ 100 ms
   after the first: **force exit** — take the live-run registry lock (never
   held across creation or any blocking call), kill every registered run
-  through its signalling capability (§3.1.6), exit with the cancellation exit
-  code. Creation in progress is not awaited (§3.4). Force exit is the one path
+  through its signalling capability (§3.1.6), terminate per report contract
+  §5.3 (Unix: re-raise the forcing signal; otherwise 6). No further
+  intentional write to stdout or stderr begins after force exit starts.
+  Creation in progress is not awaited (§3.4). Force exit is the one path
   where the final report is **not** guaranteed; records already persisted
   remain.
 
@@ -750,14 +778,20 @@ pub enum Event {
     JobStarted  { seq: u64, job: JobId, kind: JobKind },
     RunStarted  { seq: u64, run: RunId, stage: Stage, digest: String },
     OutputChunk { seq: u64, run: RunId, stream: Stream, bytes: Bytes },   // fresh ≤ 4 KiB buffer
-    RunFinished { seq: u64, run: RunId, summary: RunSummary },            // ≤ 4 KiB
+    RunFinished { seq: u64, run: RunId, summary: RunSummary },            // ≤ 7 KiB (report contract §3.7)
     Progress    { seq: u64, done: u32, total: u32 },
     JobFinished { seq: u64, job: JobId, verdict: JobVerdict, report: Option<ReportId>, dropped: u64 }, // ≤ 4 KiB
 }
 ```
 
 - Every event carries a job-wide sequence number. When the transport budget is
-  full, events other than `JobFinished` are dropped and counted.
+  full, events other than `JobFinished` are dropped and counted. `seq`
+  starts at 0 and is assigned in one critical section with the
+  enqueue-or-drop decision; `JobFinished` takes the next number after the
+  main channel is closed. The terminal slot is filled after report
+  persistence (report contract §2.9 S), so `JobFinished.report` reflects
+  it. `RunStarted` carries `execution` and `role` on the wire (report
+  contract §7.3).
 - **Terminal delivery**: the job stops all its producers
   (supervisors finished or transferred; transferred runs no longer emit job
   events), **closes the main channel**, computes `dropped`, then publishes
@@ -768,13 +802,16 @@ pub enum Event {
   never fails the job.
 - `report` is a bounded identifier, set only after the report file was seen
   published; its path is derived from the job's run directory (storage contract).
-  Otherwise `None`, and the report's `PersistError` says why.
+  Otherwise `None`; the reason is in the delivered document's
+  `persistence` member (report contract §4.11) and on stderr, never in
+  `report.json`, which cannot contain its own persistence result.
 - **Report:** finalized in memory → persisted (bounded by the persistence
   deadline; failure is `PersistError`, not a hang) → transported (`--json` to
   stdout). With `--json` the in-memory report is written to stdout **even if
-  persistence failed**. Size is bounded by the per-record bound times the configuration contract's
-  limit on runs per job. Transport failure (closed stdout, `EPIPE`) gives the
-  report-delivery exit code (report transport). A stalled stdout blocks the final write as
+  persistence failed**. Size is bounded by report contract §3.7 and the
+  configuration contract's limit on runs per job. Transport failure (closed
+  stdout, `EPIPE`) is a delivery failure; the process status follows report
+  contract §5.2. A stalled stdout blocks the final write as
   in any CLI; all supervision is finished by then and force exit stays
   available.
 - Guarantee, narrowed: one finalized in-memory report per job, except force

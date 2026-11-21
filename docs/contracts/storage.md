@@ -14,7 +14,7 @@ local add with template provenance and contest membership (C4d) are implemented,
 while the remaining amended transactions are planned.
 References labelled *workspace design* point to `../design-workspace.md`.
 
-Related: design §4 and `execution.md`.
+Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
 
@@ -409,8 +409,8 @@ gitignore` and writes nothing else.
 4. Contest membership: edit transaction on `contest.toml` (created no-clobber
    when new), entry added only if absent.
 5. Step 4 failing after 3 committed → "problem created; contest membership
-   failed: <reason>", exit 1 until C9c adds a distinct partial-failure code;
-   rerunning `cpf add --contest` completes it without touching problem files.
+   failed: <reason>", failure class `partial` (exit 9, report contract
+   §5.1); rerunning `cpf add --contest` completes it without touching problem files.
 
 `contest.toml` schema 1 uses an ordered array of records (`[[problem]]`),
 with a string `id` (a problem identity, §2.1) and optional string `label`
@@ -486,10 +486,12 @@ bytes are published from them with the §4.3 primitive. Then:
    (`Exists` from a concurrent creator, I/O error) or step 3 fails, the
    published files stay and the command reports exactly which paths were
    published, that registration did not commit, the failing step and any
-   warnings; `ls` shows them as unregistered. A retry may choose a new
-   `n`. A file edited by the user between publication and registration is
+   warnings; `ls` shows them as unregistered, and the command exits with
+   failure class `partial` (exit 9, report contract §5.1). A retry may choose
+   a new `n`. A file edited by the user between publication and registration is
    registered as it is (no hash pins its content). `Durability::Uncertain`
-   after a publish means it happened: the sequence continues with a warning.
+   after a publish means it happened: the sequence continues with a warning
+   and does not by itself make the result partial.
 
 Output: the new id on stdout.
 
@@ -648,8 +650,8 @@ prefix of a drive or UNC path is removed so shells can use it), followed by
 a newline. A path
 that contains a newline is printed as is; line-oriented consumers are the
 target. On failure stdout is empty, the diagnostic goes to stderr, and the
-exit code is 1 (`NoSelection` included) until the report transport assigns
-codes. `current` is read-only: no lock, no recovery, no write, no hooks.
+command fails with failure class `workspace` (exit 8, `NoSelection`
+included; report contract §5.1). `current` is read-only: no lock, no recovery, no write, no hooks.
 
 **`cpf switch <ref>`** changes only the saved selection; it does not
 change what the current directory selects. Under the workspace lock, after
@@ -699,10 +701,14 @@ current directory is in A uses B's `[config] language`.
     report.json
     inputs/<test-id>.in|.ans       frozen copies (§7)
     inputs/src/...                 (draft) captured solution-target sources (§7)
+    inputs/capture.json            capture manifest (report contract §4.2)
     builds/<build-id>/             fresh output directory per build (build planning)
     <run-id>/  spec.json record.json cleanup.log  out/stdout out/stderr  cwd/
 .cpforge/runs/.reclaim-<job-id>/   being deleted
 ```
+
+`<run-id>` is `r` + the five-digit admission index (report contract §3.4);
+`<build-id>` is the build's run id.
 
 Builds live inside their job (every test rebuilds, design §6.6), so nothing
 is shared between jobs.
@@ -735,7 +741,7 @@ lease is released when the last clone drops.
 admission and inactive; a lease that exists but cannot be opened
 (permission, I/O error) leaves the directory in place and is reported.
 
-**Registered and ready** (C10a decisions, 2026-11-20). Steps 1–5 produce a
+**Registered and ready** (decisions of 2026-11-20). Steps 1–5 produce a
 **registered** job: sequence allocated, directory, `job.toml` and held
 lease. Nothing can run from a registered job. Freezing (§7: selected tests,
 then the captured files) runs outside the workspace lock under the held
@@ -755,9 +761,13 @@ later prune.
   a tie-breaker); directory timestamps are never used. A clock set back
   can misorder jobs; that only changes which inactive job is pruned first.
 - **`job.toml`**: `schema = 1`, `epoch`, `n` (§9 encodings), nothing else in
-  the CLI foundation. The capture check and the captured file lists live in
-  the ready job value and reach reports (report schema) and facts (§6.5);
-  they are not persisted here.
+  the CLI foundation. The capture check and the captured file lists are
+  persisted in the capture manifest `inputs/capture.json` (report contract
+  §4.2), published no-clobber as the last capture step with its size
+  reserved first; a manifest that is not committed is a capture failure and
+  the job never becomes ready. They are not persisted in `job.toml`.
+  Reports carry bounded previews, the list digest and the manifest path;
+  facts carry the capture check (§6.5).
 - **Lease**: a regular file `lease` inside the job directory, locked with the
   §4.5 backend (`flock(LOCK_EX | LOCK_NB)` on Unix; `LockFileEx` exclusive,
   fail-immediately, on a one-byte range on Windows). Owner and probe
@@ -773,7 +783,7 @@ later prune.
   report or publishes its fact; repairing `job-seq` is `fsck`'s.
 - **Fingerprints** (§6.5) are computed later from the private copies (they
   are tool-owned and never modified after capture), so capture records the
-  ordered source and support lists and the copy paths, and C15a hashes the
+  ordered source and support lists and the copy paths, and run-fact publication (§6.5) hashes the
   copies as written.
 
 **Limitation:** after an abrupt `cpf` death, Unix descendants outside
@@ -829,7 +839,7 @@ It never touches anything else.
 
 ### 6.4 Retention
 
-- **Owners** (C10a decisions): `keep_jobs` and `workspace_bytes` are enforced
+- **Owners** (decisions of 2026-11-20): `keep_jobs` and `workspace_bytes` are enforced
   by pruning (§6.3); `job_bytes` by the shared reservation interface below,
   which every producer of job files uses (admission and freezing write
   `job.toml` and the copies; later the run, record and report writers);
@@ -851,7 +861,8 @@ It never touches anything else.
 - **Per-job accounting definition:** outstanding logical bytes of files `cpf`
   creates for the job, admitted through the execution contract §5.4 reservation **before**
   each allocation (captures, frozen input copies and clones, file-I/O copies
-  into `cwd/`, specs, records, reports, logs, and their temp files during
+  into `cwd/`, specs, records, reports, logs, the capture manifest and the
+  report reservation (report contract §3.7), and their temp files during
   replacement), with checked arithmetic; released when the file is removed or
   when the job's owner is released. Reflinks count at full logical length.
 - **Child output:** after each run, `cwd/` beyond `cwd_bytes` (*default*
@@ -871,10 +882,14 @@ It never touches anything else.
   `valid`). Fact fields validated for `valid`: `epoch` (§9 encoding), `n`
   (§9 encoding), job id, finish time, verdict summary, both fingerprints
   (64 lowercase hex characters) and the capture check.
-- **Publication** at job finalization of a job that **completed** (not
-  cancelled, not failed before its report), **before** the lease is
-  released: lock; read `job-seq`, then the existing fact; decide by the
-  first matching row; release the lock.
+- **Publication** in report phase A (report contract §2.9) by a job whose
+  primary verdict is not `cancelled`, `infrastructure` or
+  `internal_error`, **before** the lease is released: lock; read
+  `job-seq`, then the existing fact. After reading `job-seq` and the
+  existing fact, the job reads its cancellation intent once (the
+  **cancellation cutoff**); intent set → `NotAttempted{Cancelled}`, nothing
+  written. Intent set after the cutoff does not prevent the replace.
+  Otherwise decide by the first matching row; release the lock.
 
   | Condition | Outcome |
   |---|---|
@@ -892,8 +907,10 @@ It never touches anything else.
   table above; `unreadable` and `too_new` facts are always preserved.
 - Every outcome is recorded in the job report; `NotPublished` and warnings
   are **warnings** of the job, never a verdict change; they do not change
-  the job's exit code (report transport). A job cancelled or interrupted before the
-  commit leaves the previous fact unchanged; `status` calls it the last
+  the job's exit code (report contract §5.2). A job cancelled before the
+  cutoff, or interrupted (death) before the commit, leaves the previous fact
+  unchanged; cancellation after the cutoff does not stop the replace, and a
+  committed fact is never rolled back; `status` calls it the last
   completed run. Nothing is recovered from interrupted jobs.
 
 ## 7. Frozen inputs and execution directories

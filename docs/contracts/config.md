@@ -792,9 +792,13 @@ repeat = 5
   "problem"`, `needs_build` or `for_each_test`; a workspace iff any of those,
   `{workspace}` or `cwd.selector = "workspace"`. Otherwise the command runs
   anywhere.
-- **Exit status of `cpf cmd`:** 0 iff every planned run succeeded; any
-  failure (§8.2) → the command-failure code; cancellation → the cancellation
-  code; plan errors → the config-error code (codes: report transport).
+- **Exit status of `cpf cmd`:** selected by report contract §5.2, whose
+  precedence governs. In its terms: usage 2; forced cancellation per report
+  contract §5.3; an internal failure 70; a delivery failure of
+  `--json`/`--events` 11; any recorded cancellation (including one after
+  every run completed) per report contract §5.3; plan errors 7; workspace
+  errors 8; job verdict `infrastructure` 10; a failed build (`needs_build`)
+  3; a run failure (§8.2) 1; otherwise, when every planned run succeeded, 0.
 
 ### 8.2 Repeat and run counts
 
@@ -802,12 +806,15 @@ repeat = 5
   test 2, … Each iteration is a separate run with a fresh `cwd/`.
 - **Failure** = non-zero exit, signal, deadline, output cap (`OutputBudget`),
   local-limit outcome, `NotStarted`, or any infrastructure outcome (execution contract §6.4).
-  The first failure stops the whole command (remaining runs recorded
-  `skipped`) unless `keep_going = true`. Cancellation stops before the next
-  run (execution contract §6.4).
+  The first failure stops the whole command (remaining runs have coverage
+  `skipped{stop_policy}`, report contract §2.1) unless `keep_going = true`.
+  Cancellation stops before the next run (execution contract §6.4); a
+  cancellation records remaining runs as `skipped{cancelled}`.
 - `for_each_test` with zero enabled tests is a phase-3 error.
 - Aggregates are **per test**: min, median (even count: lower middle) and max
   wall time over successful iterations.
+- Planned runs count only hooks allowed by trust, the switch and the depth
+  guard at plan time.
 - Planned runs = builds + tests × repeats + hooks, computed with checked
   arithmetic in phase 3; more than **10 000** is a plan error (execution contract §6.2
   report bound).
@@ -855,14 +862,26 @@ enabled = true                         # master switch, default true
   identity and paths **during its metadata operation** and passes that
   context to the hook, so a concurrent switch does not change what the hook
   sees.
-- `on_switch` runs after a successful switch; `after_test` once per
-  `cpf test` invocation after its job finished, also when tests failed, never
-  after cancellation or an infrastructure failure of the job. The hook
-  plan is captured with the triggering event.
+- `on_switch` runs after a successful switch; `after_test` in report phase H
+  (report contract §2.9), after fact publication, when the primary verdict
+  is not `cancelled`, `infrastructure` or `internal_error` and no
+  cancellation was requested. The hook plan is captured with the triggering
+  event.
+- An `after_test` hook's ordinary failure (a failed, cancelled or skipped
+  hook) is a warning in the triggering report; a hook internal error is an
+  internal failure of the job (report contract §2.6, status 70).
+  `on_switch` hooks run as a job of kind `hook` (report contract §2.10). Its
+  ordinary failures (verdicts `wall_deadline`, `output_budget`, `signal`,
+  `nonzero_exit`, `infrastructure`) and its admission failures of class
+  `workspace` or `config` are warnings and leave the status of `cpf switch`
+  at 0; a cancellation selects the cancellation status and an internal
+  failure (verdict `internal_error` or a caught panic) selects 70, by the
+  precedence of report contract §5.2.
 - Hooks run after the triggering command released the workspace lock,
   through the supervisor, in the listed order. Effective deadline: the
   referenced command's own `deadline_s` if set, else the hook default (30 s,
-  §7.1); other settings as for that command in hook context. A hook failure is a warning in the triggering report.
+  §7.1); other settings as for that command in hook context. An ordinary
+  hook failure is a warning in the triggering report (above).
   Cancelling the triggering command cancels hooks not yet started.
 - `CPF_HOOK_DEPTH=1` is injected last (§4.3); a `cpf` started with depth ≥ 1
   or a malformed value runs no hooks. This prevents accidental recursion;
@@ -900,10 +919,19 @@ is involved.
   (current problem if any); generated programs are reported "deferred
   (generated)", and any language, profile or command whose programs depend on
   an unavailable context (no current problem, a placeholder that needs a job)
-  "not checkable here" (neither is an error). Exit 0 or the config-error code (report transport).
+  "not checkable here" (neither is an error). Exit 0 or 7 (report contract
+  §5.5).
 - `cpf config paths`: the file per layer.
-- JSON: native strings as `{ "utf8": "…" }` when valid UTF-8, else
-  `{ "bytes_b64": "…" }` (Windows: WTF-8 bytes). Environment: only keys set or
+- JSON follows report contract §3 (canonical profile, reader rules).
+  Mapping of configuration values: TOML string → JSON string; integer →
+  decimal string (`i64`); float → `dec` (`{"text", "bits"}`), for every
+  float, not only comparator fields; boolean → JSON boolean; array → JSON
+  array; table → JSON object in key order of the effective configuration;
+  native paths and values (program paths, environment values, file paths)
+  → `ns` (`{"utf8"}` iff valid UTF-8 without control characters, else
+  `{"bytes_b64"}`; Windows WTF-8). TOML date-times are not accepted by any
+  configuration key (phase-1 error), so they need no mapping. The document
+  has `schema`, `document: "config_show"` and `platform`. Environment: only keys set or
   removed by configuration are shown; the inherited environment is never
   dumped.
 - No `set` / `edit` in the CLI foundation.
@@ -1033,7 +1061,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   - `cmd` with `cwd.selector = "problem"` and no placeholders outside a
     problem → plan error (context required); `echo {problem_id}` for an
     `interactive` problem → runs.
-  - Two runs, one `OutputBudget` → exit = command-failure code.
+  - Two runs, one `OutputBudget` → exit 1 (report contract §5.2).
   - Trust: listed `/example/cp` and root `/example/cp/` via a symlink
     `/example/link` → trusted after canonicalisation; listed path missing →
     untrusted + warning; Windows `C:\CP` vs `c:\cp` → trusted.
