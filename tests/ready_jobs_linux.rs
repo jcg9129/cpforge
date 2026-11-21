@@ -234,3 +234,87 @@ fn literal_original_path_in_shell_script_observes_edit_and_is_unchecked() {
         );
     });
 }
+
+#[test]
+fn managed_two_test_job_persists_reports_and_capture_files() {
+    use cpforge::jobs::engine::{Engine, JobRequest, NoHooks, SupervisorExecutor};
+    use cpforge::jobs::persist::JobPersistence;
+    use cpforge::report::{JobVerdict, wire};
+    run_test(async {
+        let f = Fixture::new();
+        f.write(
+            "problem/main.cpp",
+            "#include <iostream>\nint main() { std::cout << \"yes\\n\"; }\n",
+        );
+        f.write("problem/tests.toml", "schema = 1\n[[test]]\nid = 'a'\ninput = 'tests/a.in'\nanswer = 'tests/a.ans'\norigin = 'custom'\nenabled = true\n[[test]]\nid = 'b'\ninput = 'tests/b.in'\nanswer = 'tests/b.ans'\norigin = 'custom'\nenabled = true\n");
+        for id in ["a", "b"] {
+            f.write(&format!("problem/tests/{id}.in"), "");
+            f.write(&format!("problem/tests/{id}.ans"), "yes\n");
+        }
+        let target = f.target("cpp", "");
+        let registered = f.job(256 << 20, PrunePolicy::default());
+        let ids = ["a", "b"].map(|id| cpforge::names::Identifier::new(id).unwrap());
+        let frozen = registered
+            .inputs()
+            .freeze(
+                &f.store(),
+                &ids,
+                &CapturedSource::from_target(&target),
+                &f.path("problem"),
+            )
+            .unwrap();
+        let ready = prepare_job(registered, frozen, &target, f.inputs(&PROBE)).unwrap();
+        let dir = ready.dir.clone();
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: cpforge::config::Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let mut receiver = engine.events().subscribe().unwrap();
+        let report = engine
+            .run(
+                &mut SupervisorExecutor::default(),
+                &mut persistence,
+                &mut NoHooks,
+            )
+            .await;
+        assert_eq!(
+            report.data().result.verdict,
+            JobVerdict::Passed,
+            "{:?}",
+            report.data().executions
+        );
+        assert_eq!(report.data().tests.len(), 2);
+        for run in ["r00000", "r00001", "r00002"] {
+            let spec = fs::read(dir.join(run).join("spec.json")).unwrap();
+            let record = fs::read(dir.join(run).join("record.json")).unwrap();
+            assert_eq!(wire::read::read_json(&spec).unwrap()["schema"], 1);
+            assert_eq!(wire::read::read_json(&record).unwrap()["schema"], 1);
+            assert!(dir.join(run).join("out/stdout").is_file());
+            assert!(dir.join(run).join("out/stderr").is_file());
+            assert!(dir.join(run).join("cleanup.log").is_file());
+        }
+        assert_eq!(fs::read(dir.join("r00001/out/stdout")).unwrap(), b"yes\n");
+        let bytes = fs::read(dir.join("report.json")).unwrap();
+        assert_eq!(wire::read::report_schema_prefix(&bytes).unwrap(), 1);
+        assert_eq!(bytes, wire::encode_report(&report).unwrap());
+        let value = wire::read::read_json(&bytes).unwrap();
+        assert_eq!(
+            value["executions"][1]["summary"]["stdout"]["file"],
+            "r00001/out/stdout"
+        );
+        assert_eq!(
+            value["executions"][1]["summary"]["stdout"]["complete"],
+            true
+        );
+        while receiver.recv().await.is_some() {}
+        assert_eq!(
+            receiver.terminal().await.report_id.as_ref(),
+            Some(&report.data().job.id)
+        );
+        drop(persistence);
+    });
+}

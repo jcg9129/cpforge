@@ -75,9 +75,14 @@ versioned record (location: storage contract); `spec_digest` is SHA-256 over a c
 encoding: Unix `OsString` as raw bytes, Windows as WTF-16 code units,
 length-prefixed, fields in declaration order. `spec.json` encodes native
 values as report contract §3.3 `ns`; `spec_digest` is unaffected (it is
-computed over this binary encoding). If `spec.json` has already been
-written with another native encoding, this is a `spec.json` schema
-increment. The serialised spec has a size
+computed over this binary encoding). Binary framing uses little-endian
+`u64` integers and vector counts, byte-length-prefixed native strings and
+enum tokens, and one byte (`0` or `1`) for booleans. Windows native strings
+contain little-endian WTF-16 code units; their length prefix counts bytes.
+Enum tags use the schema's lowercase tokens; durations use microseconds,
+and an absent deadline group uses the token `none`. If `spec.json` has
+already been written with another native encoding, this is a `spec.json`
+schema increment. The serialised spec has a size
 limit (configuration contract: 256 KiB) checked before the run is admitted. In the CLI foundation,
 `Connected` variants and a `deadline_group` are rejected at validation
 (`NotStarted{Unsupported}`).
@@ -579,11 +584,11 @@ empty captures.
   = t_rec, matching §5.5 and §10.1); the report is enqueued when the job
   finishes. When an artefact misses its
   deadline the job records `PersistError{artefact, Timeout | Io(err)}`, marks
-  the persistence thread **unavailable** and fails every queued and later
-  artefact of that job at once with `PersistError{WorkerUnavailable}` (no
-  replacement thread); the job still finishes and prints its in-memory report
-  with `--json`; the deadline does not cancel the
-  syscall. The job never names a path it has not seen published (in
+  the persistence thread **unavailable** and fails every still-pending
+  artefact of that job at once with `PersistError{Timeout}`. Later artefacts
+  fail with `PersistError{WorkerUnavailable}` (no replacement thread); the
+  job still finishes and prints its in-memory report with `--json`; the
+  deadline does not cancel the syscall. The job never names a path it has not seen published (in
   `JobFinished`, the report or a record). A late rename may still land; it is
   harmless, noted in `cleanup.log` if possible, and the thread with its
   metadata reservation passes to the cleanup service until it returns. The

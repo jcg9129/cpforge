@@ -313,10 +313,9 @@ fn replace(v: &mut Value, key: &str, value: Value) {
     fields.iter_mut().find(|(name, _)| *name == key).unwrap().1 = value;
 }
 fn max_header(binary: bool) -> Value {
-    let (report, meta) = tests::passing();
+    let report = tests::passing();
     let mut value = super::report_value(
         &report,
-        &meta,
         Some(&ReportPersistence::Failed {
             error: e::PersistError::Io {
                 os_error: Some(i32::MIN),
@@ -382,7 +381,7 @@ fn max_header(binary: bool) -> Value {
     replace(&mut value, "executions", Value::Array(vec![]));
     replace(&mut value, "tests", Value::Array(vec![]));
     replace(&mut value, "aggregates", Value::Array(vec![]));
-    let mut result = super::schema::result(&report.result, &meta).unwrap();
+    let mut result = super::schema::result(&report.result, &report.details).unwrap();
     replace(&mut result, "verdict", tok());
     replace(&mut result, "primary_verdict", tok());
     replace(&mut result, "partial", b(false));
@@ -758,15 +757,11 @@ fn actual_engine_values_fill_every_available_cap() {
         r::RunNote::TruncatedStdout,
         r::RunNote::TruncatedStderr,
     ];
-    let metadata = SummaryMetadata {
-        kill_attempts: 8,
-        capture_files: [
-            Some(PathBuf::from("r99999/out/stdout")),
-            Some(PathBuf::from("r99999/out/stderr")),
-        ],
-        not_started_timing: None,
-    };
-    let encoded = encode_run_summary(&summary, &metadata).unwrap();
+    summary.observation.capture_files = [
+        Some(PathBuf::from("r99999/out/stdout")),
+        Some(PathBuf::from("r99999/out/stderr")),
+    ];
+    let encoded = encode_run_summary(&summary).unwrap();
     assert!(encoded.len() <= 6774);
     let parsed = read::read_json(&encoded).unwrap();
     assert_eq!(parsed["measurements"].as_array().unwrap().len(), 5);
@@ -802,7 +797,7 @@ fn actual_engine_values_fill_every_available_cap() {
             lists_sha256: [0xff; 32],
             manifest: Some("inputs/capture.json".into()),
         };
-        let value = super::schema::capture(&capture, None).unwrap();
+        let value = super::schema::capture(&capture).unwrap();
         assert!(encode(&value).len() <= 13311);
     }
 }

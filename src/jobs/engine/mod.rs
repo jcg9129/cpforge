@@ -20,6 +20,8 @@
 //! await [`EventReceiver::terminal`]. Sequence numbers start at zero and may
 //! have gaps where events were dropped; closure, not `seq`, is the barrier.
 //!
+//! `JobPersistence` in `jobs::persist` supplies the disk-backed service;
+//! construct it from the ready job before passing that job to this engine.
 //! `SupervisorExecutor` is Linux-only. An executor must keep the
 //! [`RunResources`] guard with the physical resources of the run (writers,
 //! the root) until they are released, and file sinks add every successful
@@ -31,12 +33,16 @@
 //! return the same answer. [`PhaseHooks::hooks`] receives a start check that
 //! reads the lock on every call; call it immediately before each hook start.
 //! [`MemoryPersistence`] performs no writes and settles every reference as
-//! unavailable, so the terminal event carries no report id.
+//! unavailable, so the terminal event carries no report id. After F, S publishes
+//! the immutable report once; `FinalizedReport::persistence` retains that result
+//! separately from the frozen value and the terminal slot is then filled.
 
 mod cancel;
 mod events;
 mod executor;
 mod persistence;
+mod report_value;
+mod spec;
 mod types;
 mod warnings;
 
@@ -44,6 +50,7 @@ pub use cancel::*;
 pub use events::*;
 pub use executor::*;
 pub use persistence::*;
+pub use report_value::*;
 pub use types::*;
 
 use std::fs;
@@ -308,7 +315,7 @@ impl<'probe> Engine<'probe> {
         self
     }
 
-    /// Run P, V, A/H, W, E and F. Panics in executor futures, derivations,
+    /// Run P, V, A/H, W, E, F and S. Panics in executor futures, derivations,
     /// comparisons and extension callbacks become explicit internal evidence.
     pub async fn run(
         self,
@@ -331,6 +338,7 @@ impl<'probe> Engine<'probe> {
         } = self;
         let started_at = ready.started_at;
         let mut warnings = warnings::admission(&ready.prune_report);
+        let mut details = report_details(&ready, capture_enabled, comparator.clone(), kind);
         let mut target = TargetState {
             pending: None,
             free: None,
@@ -354,6 +362,7 @@ impl<'probe> Engine<'probe> {
         events.offer(EventPayload::JobStarted {
             job: ready.id.clone(),
             kind,
+            sequence: ready.sequence.clone(),
         });
         let mut executions = Vec::with_capacity(plan.len());
         let mut tests = Vec::new();
@@ -639,7 +648,19 @@ impl<'probe> Engine<'probe> {
         } else {
             Vec::new()
         };
-        let report = {
+        if let Some(target) = &mut details.target {
+            if let Some(root) = executions
+                .iter()
+                .filter(|execution| execution.plan.stage == Stage::Run)
+                .find_map(|execution| match execution.evidence.as_deref() {
+                    Some(ExecutionRecord::Started(root)) => Some(root),
+                    _ => None,
+                })
+            {
+                target.local_limits.clone_from(&root.limits);
+            }
+        }
+        let mut report = {
             let mut state = cancel.lock();
             if state.internal.is_some() {
                 result.verdict = JobVerdict::InternalError;
@@ -649,9 +670,12 @@ impl<'probe> Engine<'probe> {
             if cancellation.is_some_and(|c| c.phase != CancelPhase::Primary) {
                 warnings.push(Warning::LateCancellation);
             }
+            details.warnings_dropped = warnings.len().saturating_sub(24) as u32;
             warnings.truncate(24);
-            let report = Arc::new(FinalizedReport {
-                data: ReportData {
+            details.pre_delivery_exit = pre_delivery_exit(kind, result.verdict, cancellation);
+            let report = FinalizedReport {
+                data: Arc::new(ReportData {
+                    details,
                     schema: 1,
                     document: "job_report",
                     platform: if cfg!(windows) { "windows" } else { "unix" },
@@ -668,9 +692,7 @@ impl<'probe> Engine<'probe> {
                     problem: ready.problem,
                     target: capture_enabled.then_some(ready.target),
                     comparator,
-                    capture: capture_enabled.then(|| {
-                        CaptureReport::from_sources(ready.capture_check, ready.sources.files())
-                    }),
+                    capture: capture_enabled.then_some(ready.capture_report),
                     build,
                     executions,
                     tests,
@@ -690,10 +712,13 @@ impl<'probe> Engine<'probe> {
                         finished_at: SystemTime::now(),
                         duration: cancel.start.elapsed(),
                     },
-                },
+                }),
                 _owner: ready.owner,
-                _report_reservation: report_reservation,
-            });
+                persistence: ReportPersistence::Failed {
+                    error: PersistError::WorkerUnavailable,
+                    message: "report not yet published".into(),
+                },
+            };
             state.frozen = true;
             report
         };
@@ -701,7 +726,21 @@ impl<'probe> Engine<'probe> {
         if let Some(observer) = &observer {
             let _ = catch_unwind(AssertUnwindSafe(|| (observer.0)(Point::AfterSnapshot)));
         }
-        events.finish(report.clone(), None);
+        report.persistence =
+            match caught(persistence.publish_report(report.data.clone(), report_reservation)).await
+            {
+                Ok(result) => result,
+                Err(_) => ReportPersistence::Failed {
+                    error: PersistError::WorkerUnavailable,
+                    message: "report persistence worker unavailable".into(),
+                },
+            };
+        let published = matches!(report.persistence, ReportPersistence::Published { .. });
+        let report = Arc::new(report);
+        events.finish(
+            report.clone(),
+            published.then(|| report.data.job.id.clone()),
+        );
         report
     }
 }
@@ -752,6 +791,7 @@ impl Context<'_> {
         report_refused: bool,
         admission_closed: &mut bool,
     ) -> ExecutionReport {
+        let admitted_at = std::time::Instant::now();
         let run = {
             let mut state = self.cancel.lock();
             if state.intent.is_some() {
@@ -850,7 +890,7 @@ impl Context<'_> {
             }
         }
         let spec = stage.zip(command).map(|(resolved, command)| {
-            Arc::new(ExecutionSpec {
+            let mut spec = ExecutionSpec {
                 run: run.clone(),
                 execution: plan.index,
                 stage: plan.stage,
@@ -860,8 +900,44 @@ impl Context<'_> {
                 stdin: plan.stdin.clone(),
                 directory: directory.clone(),
                 digest: None,
-            })
+                output_events: self.output_events,
+            };
+            spec.digest = Some(spec.spec_digest());
+            Arc::new(spec)
         });
+        if spec
+            .as_ref()
+            .is_some_and(|s| crate::report::wire::encode_spec(&s.wire_spec()).is_err())
+        {
+            failure = Some(StartFailure {
+                reason: NotStartedReason::SpecTooLarge,
+                api: None,
+                os_error: None,
+                invalid_limit: None,
+            });
+        }
+        // Specs enter the queue at admission, before process creation. Split
+        // the fixed allowance so queued requests own independent reservations.
+        let spec_metadata = metadata.as_mut().and_then(|r| r.split(512 * 1024));
+        let enqueued = catch_unwind(AssertUnwindSafe(|| {
+            persistence.enqueue(PendingArtifacts {
+                finalized: false,
+                run: run.clone(),
+                execution: plan.index,
+                spec: spec.clone(),
+                record: None,
+                metadata: spec_metadata,
+                writable,
+                owner: self.owner.clone(),
+            })
+        }));
+        if enqueued.is_err() {
+            record_internal(
+                self.cancel,
+                Invariant::JobEvidence,
+                InternalLocus::Execution { index: plan.index },
+            );
+        }
         let record = if let Some(failure) = failure {
             Some(Arc::new(ExecutionRecord::NotStarted(failure)))
         } else if let (Some(spec), Some(resources)) = (&spec, resources) {
@@ -906,6 +982,8 @@ impl Context<'_> {
         // Enqueue finalized evidence before deriving anything or comparing.
         let enqueued = catch_unwind(AssertUnwindSafe(|| {
             persistence.enqueue(PendingArtifacts {
+                finalized: true,
+                run: run.clone(),
                 execution: plan.index,
                 spec: spec.clone(),
                 record: record.clone(),
@@ -947,6 +1025,7 @@ impl Context<'_> {
                 #[cfg(any(test, feature = "storage-test-hooks"))]
                 self.point(Point::BeforeSummary(plan.index));
                 summary = Some(Arc::new(RunSummary {
+                    observation: summary_observation(record, self.dir, admitted_at.elapsed()),
                     class: result.class.clone().expect("derived class"),
                     record: record.clone(),
                     deadline: spec.as_ref().map_or(Duration::ZERO, |s| {
@@ -971,7 +1050,11 @@ impl Context<'_> {
             plan,
             run: Some(run),
             program: spec.as_ref().map(|s| s.command.program.clone()),
-            spec: Some(ArtifactRef::memory()),
+            // Report §4.5: `spec` is null only for skipped executions.
+            spec: Some(ArtifactRef {
+                digest: spec.as_ref().and_then(|s| s.digest),
+                ..ArtifactRef::memory()
+            }),
             record: record.as_ref().map(|_| ArtifactRef::memory()),
             summary,
             result,
@@ -1154,6 +1237,107 @@ fn aggregate(executions: &[ExecutionReport]) -> Vec<Aggregate> {
             group
         })
         .collect()
+}
+
+fn summary_observation(record: &ExecutionRecord, job: &Path, setup: Duration) -> SummaryEvidence {
+    match record {
+        ExecutionRecord::Started(root) => SummaryEvidence {
+            capture_files: [&root.stdout, &root.stderr].map(|stream| {
+                stream
+                    .as_ref()
+                    .and_then(|capture| capture.sink.as_ref())
+                    .and_then(|path| path.strip_prefix(job).ok())
+                    .map(Path::to_owned)
+            }),
+            not_started_timing: None,
+        },
+        ExecutionRecord::NotStarted(_) => SummaryEvidence {
+            capture_files: [None, None],
+            not_started_timing: Some((setup, "polling")),
+        },
+    }
+}
+
+fn report_details(
+    ready: &ReadyJob<'_>,
+    capture: bool,
+    comparator: Option<Comparator>,
+    kind: JobKind,
+) -> ReportDetails {
+    let id = ready
+        .problem
+        .id
+        .strip_prefix("local:")
+        .unwrap_or(&ready.problem.id);
+    let deadline = &ready.target.run.deadline.milliseconds;
+    let source = match &deadline.provenance {
+        crate::config::Provenance::Cli { .. } => "cli",
+        crate::config::Provenance::Derived { .. } => "derived",
+        crate::config::Provenance::BuiltIn => "default",
+        _ => "configured",
+    };
+    ReportDetails {
+        problem: Problem {
+            identity: format!("local:{id}"),
+            name: ready.report.problem_name.clone(),
+            kind: ready.report.problem_kind.clone(),
+            dir: ready.problem.dir.clone(),
+        },
+        target: capture.then(|| Target {
+            name: ready.report.target_name.clone(),
+            language: Some(ready.target.language.value.clone()),
+            profile: ready.target.profile.as_ref().map(|p| p.value.clone()),
+            build_free: ready.target.build.is_none(),
+            compare: comparator,
+            run_deadline: Some((deadline.value.saturating_mul(1000), source)),
+            published_limits: ready.report.published_limits,
+            local_limits: configured_limits(&ready.target.run.limits),
+        }),
+        fingerprints: None,
+        fact: (kind == JobKind::Test).then_some(Fact {
+            outcome: FactOutcome::NotAttempted {
+                reason: "not_completed",
+            },
+            warnings: Vec::new(),
+        }),
+        hooks: Vec::new(),
+        hooks_dropped: 0,
+        warnings: Vec::new(),
+        warnings_dropped: 0,
+        pre_delivery_exit: PreDeliveryExit {
+            code: 0,
+            reraise: None,
+        },
+        internal_message: "report derivation invariant failed".into(),
+    }
+}
+
+fn configured_limits(limits: &crate::config::Limits) -> Vec<crate::supervisor::InstalledLimit> {
+    use crate::supervisor::{InstalledLimit, LocalLimit, OuterRestriction};
+    let mut result = Vec::new();
+    for configured in [
+        limits
+            .address_space
+            .as_ref()
+            .map(|v| LocalLimit::AddressSpace { bytes: v.value }),
+        limits
+            .job_commit
+            .as_ref()
+            .map(|v| LocalLimit::JobCommit { bytes: v.value }),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        result.push(InstalledLimit {
+            configured,
+            inherited: None,
+            normalised: 0,
+            installed: None,
+            mechanism: "not_installed",
+            outer: OuterRestriction::Unknown,
+        });
+    }
+    result
 }
 
 #[cfg(test)]

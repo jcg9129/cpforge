@@ -67,16 +67,21 @@ pub(super) fn admission(report: &AdmissionReport) -> Vec<Warning> {
             detail: "reclaim_leftover",
         });
     }
-    for (_, publication) in &report.publications {
+    for (path, publication) in &report.publications {
+        let artefact = if path.file_name().is_some_and(|name| name == "capture.json") {
+            "capture_manifest"
+        } else {
+            "job_metadata"
+        };
         if matches!(publication.durability, Durability::Uncertain(_)) {
             push(Warning::Durability {
-                artefact: "job_metadata",
+                artefact,
                 detail: "uncertain",
             });
         }
         if matches!(publication.cleanup, Cleanup::Pending(_)) {
             push(Warning::Durability {
-                artefact: "job_metadata",
+                artefact,
                 detail: "cleanup_pending",
             });
         }

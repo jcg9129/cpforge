@@ -2,20 +2,34 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use super::{ArtifactRef, ExecutionRecord, ExecutionReport, ExecutionSpec, PersistError, Warning};
+use super::{ExecutionRecord, ExecutionReport, ExecutionSpec, PersistError, Warning};
 use crate::storage::budget::Reservation;
 use crate::storage::job::JobOwner;
 
 pub type JobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Nonblocking enqueue and bounded settlement are separate operations. Enqueue
-/// immediately at record finalization. An implementation owns metadata
+/// specs at admission and records immediately at record finalization. The service
+/// owns metadata
 /// reservations and owner clones until its last write returns, including after
 /// a settlement timeout. No verdict lock is held while calling this service.
 /// Settlement may change only the spec/record references, never execution
-/// evidence or results. Report publication is a separate operation after F.
+/// evidence or results. Report publication is a separate operation after F;
+/// it includes encoding within the same enqueue deadline.
 pub trait Persistence {
     fn enqueue(&mut self, artifact: PendingArtifacts);
+    fn publish_report(
+        &mut self,
+        _report: Arc<super::ReportData>,
+        _reservation: Option<Reservation>,
+    ) -> JobFuture<'_, super::ReportPersistence> {
+        Box::pin(async {
+            super::ReportPersistence::Failed {
+                error: PersistError::WorkerUnavailable,
+                message: "persistence worker unavailable".into(),
+            }
+        })
+    }
     fn settle<'a>(
         &'a mut self,
         executions: &'a mut [ExecutionReport],
@@ -24,6 +38,9 @@ pub trait Persistence {
 
 #[derive(Debug)]
 pub struct PendingArtifacts {
+    /// False for the admission-time spec; true for record finalization.
+    pub finalized: bool,
+    pub run: super::RunId,
     pub execution: u32,
     /// False on setup failure or missing metadata allowance: never write
     /// into a colliding tree or without reserved headroom.
@@ -54,7 +71,8 @@ impl Persistence for MemoryPersistence {
                     .into_iter()
                     .flatten()
                 {
-                    *reference = ArtifactRef::memory();
+                    reference.path = None;
+                    reference.error = Some(PersistError::WorkerUnavailable);
                 }
             }
             self.pending.clear();

@@ -16,6 +16,7 @@ pub const EVENT_BOUND: usize = 7 * 1024;
 pub enum EventPayload {
     JobStarted {
         job: JobId,
+        sequence: (crate::storage::job::Epoch, u64),
         kind: JobKind,
     },
     RunStarted {
@@ -51,7 +52,7 @@ pub struct JobFinished {
     pub seq: u64,
     pub job: JobId,
     pub verdict: JobVerdict,
-    /// Set only by a later persistence service after observing publication.
+    /// Set after S only if report publication was observed.
     pub report_id: Option<JobId>,
     pub dropped: u64,
     pub report: Arc<FinalizedReport>,

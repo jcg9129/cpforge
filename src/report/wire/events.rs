@@ -1,6 +1,5 @@
 use super::{model::*, run::*, schema::*, value::*};
 use crate::jobs::engine as e;
-use crate::storage::job::Epoch;
 
 pub fn encode_event_header(
     platform: &str,
@@ -24,25 +23,20 @@ pub fn encode_event_header(
         super::EVENT_BOUND,
     )
 }
-/// JobStarted needs the sequence absent from the engine event payload;
-/// RunStarted needs a computed spec digest. Neither is fabricated here.
-pub fn encode_event(
-    v: &e::Event,
-    job_sequence: Option<(&Epoch, u64)>,
-    summary_metadata: Option<&SummaryMetadata>,
-) -> Result<Vec<u8>> {
+pub fn encode_event(v: &e::Event) -> Result<Vec<u8>> {
     let (name, mut fields) = match &v.payload {
-        e::EventPayload::JobStarted { job, kind } => {
-            let (epoch, n) = job_sequence.ok_or(Error("job_started needs job sequence"))?;
-            (
-                "job_started",
-                vec![
-                    ("job", s(job.as_str())),
-                    ("kind", s(kind.wire_token())),
-                    ("sequence", sequence(epoch, n)),
-                ],
-            )
-        }
+        e::EventPayload::JobStarted {
+            job,
+            kind,
+            sequence: (epoch, n),
+        } => (
+            "job_started",
+            vec![
+                ("job", s(job.as_str())),
+                ("kind", s(kind.wire_token())),
+                ("sequence", sequence(epoch, *n)),
+            ],
+        ),
         e::EventPayload::RunStarted {
             run,
             execution,
@@ -79,16 +73,7 @@ pub fn encode_event(
         }
         e::EventPayload::RunFinished { run, summary: v } => (
             "run_finished",
-            vec![
-                ("run", run_id(run.as_str())?),
-                (
-                    "summary",
-                    summary(
-                        v,
-                        summary_metadata.ok_or(Error("run_finished needs summary metadata"))?,
-                    )?,
-                ),
-            ],
+            vec![("run", run_id(run.as_str())?), ("summary", summary(v)?)],
         ),
         e::EventPayload::Progress { done, total } => {
             ("progress", vec![("done", n(*done)), ("total", n(*total))])
@@ -98,8 +83,12 @@ pub fn encode_event(
     fields.insert(0, ("event", s(name)));
     bounded(&Value::Object(fields), super::EVENT_BOUND)
 }
-/// Terminal envelope. The caller supplies the observed report publication path.
-pub fn encode_job_finished(v: &e::JobFinished, path: Option<&std::path::Path>) -> Result<Vec<u8>> {
+/// Terminal envelope reflects the engine's observed report publication.
+pub fn encode_job_finished(v: &e::JobFinished) -> Result<Vec<u8>> {
+    let path = match v.report.persistence() {
+        ReportPersistence::Published { path, .. } if v.report_id.is_some() => Some(path.as_path()),
+        _ => None,
+    };
     job_finished(v.seq, &v.job, v.verdict, path, v.dropped)
 }
 pub fn job_finished(
@@ -126,12 +115,8 @@ pub fn job_finished(
         super::EVENT_BOUND,
     )
 }
-pub fn encode_final_report(
-    v: &e::FinalizedReport,
-    meta: &ReportMetadata,
-    persistence: &ReportPersistence,
-) -> Result<Vec<u8>> {
-    let report = super::report_value(v.data(), meta, Some(persistence))?;
+pub fn encode_final_report(v: &e::FinalizedReport) -> Result<Vec<u8>> {
+    let report = super::report_value(v.data(), Some(v.persistence()))?;
     bounded(
         &obj([("event", s("report")), ("report", report)]),
         super::report_bound(v.data().executions.len())? + 28,

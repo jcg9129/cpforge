@@ -202,6 +202,7 @@ pub enum SupervisorError {
 
 #[derive(Clone, Debug)]
 pub struct RootOutcome {
+    pub kill_attempts: u32,
     pub stdout: Option<StreamCapture>,
     pub stderr: Option<StreamCapture>,
     pub status: Termination,

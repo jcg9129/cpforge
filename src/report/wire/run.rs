@@ -2,17 +2,7 @@ use super::value::*;
 use crate::jobs::engine as e;
 use crate::report as r;
 use crate::supervisor as p;
-use std::path::PathBuf;
-use std::time::Duration;
 
-/// Observations not retained in the current supervisor adapter. Capture paths
-/// must describe observed publication, rather than the sink requested in a spec.
-#[derive(Clone, Debug, Default)]
-pub struct SummaryMetadata {
-    pub kill_attempts: u32,
-    pub capture_files: [Option<PathBuf>; 2],
-    pub not_started_timing: Option<(Duration, &'static str)>,
-}
 pub(super) fn causes(causes: &r::InfrastructureCauses) -> Value {
     array(causes.as_slice(), cause)
 }
@@ -178,8 +168,11 @@ pub(super) fn stream(
         ("observed", u(v.map_or(0, |v| v.observed))),
         ("stored", u(v.map_or(0, |v| v.stored))),
         ("forwarded", u(v.map_or(0, |v| v.forwarded))),
-        ("eof", b(v.is_none_or(|v| v.eof))),
-        ("complete", b(v.is_none_or(p::StreamCapture::complete))),
+        ("eof", b(v.is_some_and(|v| v.eof))),
+        (
+            "complete",
+            b(file.is_some() && v.is_some_and(p::StreamCapture::complete)),
+        ),
         ("exceeded_at", opt(v.and_then(|v| v.exceeded_at), u)),
         (
             "losses",
@@ -323,7 +316,7 @@ pub(super) fn violation(v: &p::Violation) -> Value {
         ]),
     }
 }
-pub(super) fn started(v: &p::RootOutcome, meta: &SummaryMetadata) -> Result<Value> {
+pub(super) fn started(v: &p::RootOutcome) -> Result<Value> {
     Ok(obj([
         ("kind", s("started")),
         ("status", status(v.status)?),
@@ -337,7 +330,7 @@ pub(super) fn started(v: &p::RootOutcome, meta: &SummaryMetadata) -> Result<Valu
             checked_array(&v.violations, 3, |v| Ok(violation(v)))?,
         ),
         ("cleanup", cleanup(v.termination.cleanup)),
-        ("kill_attempts", n(meta.kill_attempts)),
+        ("kill_attempts", n(v.kill_attempts)),
     ]))
 }
 pub(super) fn timing(v: &p::RootOutcome) -> Result<Value> {
@@ -356,14 +349,20 @@ pub(super) fn timing(v: &p::RootOutcome) -> Result<Value> {
         ),
     ]))
 }
-pub(super) fn summary(v: &e::RunSummary, meta: &SummaryMetadata) -> Result<Value> {
+pub(super) fn summary(v: &e::RunSummary) -> Result<Value> {
     let (execution, timing, stdout, stderr, measurements, limits, errors, mut notes) =
         match v.record.as_ref() {
             e::ExecutionRecord::Started(root) => (
-                started(root, meta)?,
+                started(root)?,
                 timing(root)?,
-                stream(root.stdout.as_ref(), meta.capture_files[0].as_deref())?,
-                stream(root.stderr.as_ref(), meta.capture_files[1].as_deref())?,
+                stream(
+                    root.stdout.as_ref(),
+                    v.observation.capture_files[0].as_deref(),
+                )?,
+                stream(
+                    root.stderr.as_ref(),
+                    v.observation.capture_files[1].as_deref(),
+                )?,
                 checked_array(&root.measurements, 5, |v| measurement(v, false))?,
                 checked_array(&root.limits, 2, |v| limit(v, true))?,
                 {
@@ -380,7 +379,8 @@ pub(super) fn summary(v: &e::RunSummary, meta: &SummaryMetadata) -> Result<Value
                 root.notes.iter().copied().map(note).collect::<Vec<_>>(),
             ),
             e::ExecutionRecord::NotStarted(_) => {
-                let (setup, observer) = meta
+                let (setup, observer) = v
+                    .observation
                     .not_started_timing
                     .ok_or(Error("not-started summary needs timing observation"))?;
                 if !matches!(observer, "pidfd" | "kqueue" | "polling" | "process_handle") {
@@ -426,8 +426,8 @@ pub(super) fn summary(v: &e::RunSummary, meta: &SummaryMetadata) -> Result<Value
     bounded(&value, 7 * 1024)?;
     Ok(value)
 }
-pub fn encode_run_summary(v: &e::RunSummary, meta: &SummaryMetadata) -> Result<Vec<u8>> {
-    Ok(encode(&summary(v, meta)?))
+pub fn encode_run_summary(v: &e::RunSummary) -> Result<Vec<u8>> {
+    Ok(encode(&summary(v)?))
 }
 pub(super) fn not_started(v: &e::StartFailure) -> Result<Value> {
     let mut fields = vec![("kind", s(v.reason.wire_token()))];
@@ -515,7 +515,7 @@ pub(super) fn stage(v: e::Stage) -> Value {
         e::Stage::Hook => "hook",
     })
 }
-pub(super) fn execution(v: &e::ExecutionReport, meta: Option<&SummaryMetadata>) -> Result<Value> {
+pub(super) fn execution(v: &e::ExecutionReport) -> Result<Value> {
     let coverage = match v.result.coverage {
         r::Coverage::NotStarted { reason } => {
             let reason = match v.evidence.as_deref() {
@@ -530,10 +530,7 @@ pub(super) fn execution(v: &e::ExecutionReport, meta: Option<&SummaryMetadata>) 
         other => kind(other.wire_token()),
     };
     let summary = match &v.summary {
-        Some(v) => summary(
-            v,
-            meta.ok_or(Error("run summary needs publication/termination metadata"))?,
-        )?,
+        Some(v) => summary(v)?,
         None => Value::Null,
     };
     let value = obj([

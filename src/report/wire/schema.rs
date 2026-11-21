@@ -170,7 +170,7 @@ pub(super) fn capture_check(v: &crate::jobs::CaptureCheck) -> Result<Value> {
         ]),
     })
 }
-pub(super) fn capture(v: &e::CaptureReport, manifest: Option<&Path>) -> Result<Value> {
+pub(super) fn capture(v: &e::CaptureReport) -> Result<Value> {
     Ok(obj([
         ("check", capture_check(&v.check)?),
         (
@@ -205,8 +205,8 @@ pub(super) fn capture(v: &e::CaptureReport, manifest: Option<&Path>) -> Result<V
         (
             "manifest",
             rel(
-                manifest
-                    .or(v.manifest.as_deref())
+                v.manifest
+                    .as_deref()
                     .ok_or(Error("ready capture needs published manifest"))?,
                 26,
             )?,
@@ -454,7 +454,7 @@ pub(super) fn pre_exit(v: PreDeliveryExit) -> Result<Value> {
         ("reraise", opt(v.reraise, s)),
     ]))
 }
-pub(super) fn result(v: &e::ReportResult, meta: &ReportMetadata) -> Result<Value> {
+pub(super) fn result(v: &e::ReportResult, meta: &e::ReportDetails) -> Result<Value> {
     Ok(obj([
         ("verdict", s(v.verdict.wire_token())),
         ("primary_verdict", s(v.primary_verdict.wire_token())),
@@ -692,9 +692,7 @@ pub(super) fn engine_warning(
             e::Warning::Recovery { .. } => "interrupted publications recovered",
             e::Warning::Durability { .. } => "publication durability uncertain",
             e::Warning::CleanupUnverified { .. } => "cleanup not verified",
-            e::Warning::Persistence { .. } => {
-                return Err(Error("persistence warning needs artefact/run override"));
-            }
+            e::Warning::Persistence { .. } => "artefact publication failed",
         }
         .into(),
         kind: match v {
@@ -717,7 +715,15 @@ pub(super) fn engine_warning(
             e::Warning::CleanupUnverified { runs } => {
                 WarningKind::CleanupUnverified { runs: *runs }
             }
-            e::Warning::Persistence { .. } => unreachable!(),
+            e::Warning::Persistence {
+                artefact,
+                run,
+                error,
+            } => WarningKind::Persist {
+                artefact,
+                run: run.as_str().to_owned(),
+                error: error.clone(),
+            },
         },
     })
 }
@@ -804,7 +810,9 @@ pub(super) fn document_error(v: &DocumentError) -> Result<Value> {
 }
 pub(super) fn persistence(v: &ReportPersistence) -> Result<Value> {
     let (report, durability) = match v {
-        ReportPersistence::Published { path, uncertain } => (
+        ReportPersistence::Published {
+            path, uncertain, ..
+        } => (
             obj([("kind", s("published")), ("path", rel(path, 60)?)]),
             s(if *uncertain { "uncertain" } else { "ok" }),
         ),

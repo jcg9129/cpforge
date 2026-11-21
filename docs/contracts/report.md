@@ -738,6 +738,9 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
   "os_error":i32}`, `{"kind":"write_stalled"}`,
   `{"kind":"no_eof_before_drain_deadline"}`,
   `{"kind":"pipe_read","os_error":i32}`, `{"kind":"forward_incomplete"}`.
+- A started stream with no capture file (including sink `Discard`) has
+  `complete: false` and `file: null`; zero counters do not assert that no
+  bytes were produced.
 - `file`: job-relative capture path (`<run>/out/stdout`), set only when the
   capture file was published.
 - `Measurement` (E §7.1): `{kind, value: u64?, unit, scope, aggregation,

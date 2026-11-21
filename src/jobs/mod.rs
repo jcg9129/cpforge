@@ -31,6 +31,7 @@
 
 pub mod engine;
 pub mod guard;
+pub mod persist;
 
 use std::fmt;
 use std::fs;
@@ -56,6 +57,7 @@ pub use guard::{CaptureCheck, CaptureCheckReason, GuardError};
 pub struct PrepareJobInputs<'probe> {
     pub workspace_root: PathBuf,
     pub problem: ProblemBinding,
+    pub report: engine::ReportPresentation,
     pub baseline: Baseline,
     pub platform: Platform,
     pub build_bytes: u64,
@@ -67,6 +69,7 @@ impl fmt::Debug for PrepareJobInputs<'_> {
         f.debug_struct("PrepareJobInputs")
             .field("workspace_root", &self.workspace_root)
             .field("problem", &self.problem)
+            .field("report", &self.report)
             .field("baseline", &self.baseline)
             .field("platform", &self.platform)
             .field("build_bytes", &self.build_bytes)
@@ -81,6 +84,7 @@ pub struct ReadyJob<'probe> {
     pub owner: JobOwner,
     pub workspace: PathBuf,
     pub problem: ProblemBinding,
+    pub report: engine::ReportPresentation,
     pub target: TargetPlan,
     pub platform: Platform,
     pub id: JobId,
@@ -92,6 +96,7 @@ pub struct ReadyJob<'probe> {
     /// Configured source order followed by support order, for fingerprints.
     pub sources: CapturedSources,
     pub capture_check: CaptureCheck,
+    pub capture_report: engine::CaptureReport,
     pub planned_target: PlannedTarget<'probe>,
     pub budget: Arc<JobBudget>,
     pub prune_report: AdmissionReport,
@@ -245,10 +250,66 @@ pub fn prepare_job<'probe>(
     )
     .map_err(ReadyError::Guard)?;
     let (manifest, sources) = frozen.into_parts();
+    let mut capture_report =
+        engine::CaptureReport::from_sources(capture_check.clone(), sources.files());
+    let lists = [
+        crate::storage::inputs::SourceRole::Source,
+        crate::storage::inputs::SourceRole::Support,
+    ]
+    .map(|role| {
+        sources
+            .files()
+            .iter()
+            .filter(|file| file.role == role)
+            .map(|file| file.problem_path.components().iter().collect::<PathBuf>())
+            .collect::<Vec<_>>()
+    });
+    let bytes = crate::report::wire::encode_capture_manifest(
+        persist::platform(),
+        &registered.id,
+        &capture_check,
+        &lists[0],
+        &lists[1],
+        &capture_report.lists_sha256,
+    )
+    .map_err(|error| {
+        ReadyError::Storage(StorageError::io(
+            &registered.dir,
+            std::io::Error::other(error.to_string()),
+        ))
+    })?;
+    let allowance = (bytes.len() as u64).checked_mul(2).ok_or_else(|| {
+        ReadyError::Storage(StorageError::io(
+            &registered.dir,
+            std::io::Error::other("capture manifest size overflow"),
+        ))
+    })?;
+    let mut reservation = registered.budget.reserve(allowance).map_err(|error| {
+        ReadyError::Storage(StorageError::io(
+            &registered.dir,
+            std::io::Error::other(error.to_string()),
+        ))
+    })?;
+    let guard = crate::storage::WorkspaceGuard::leased(&registered.owner);
+    guard
+        .created
+        .borrow_mut()
+        .push(registered.dir.join("inputs"));
+    let published = crate::storage::publish_file_noclobber(&guard, "inputs/capture.json", &bytes);
+    persist::account(&mut reservation, bytes.len() as u64, &published);
+    let published = published.map_err(ReadyError::Storage)?;
+    drop(guard);
+    capture_report.manifest = Some("inputs/capture.json".into());
+    let mut prune_report = registered.prune_report;
+    prune_report
+        .publications
+        .push((registered.dir.join("inputs/capture.json"), published));
+
     Ok(ReadyJob {
         owner: registered.owner,
         workspace: inputs.workspace_root,
         problem: inputs.problem,
+        report: inputs.report,
         target: target.clone(),
         platform: inputs.platform,
         id: registered.id,
@@ -259,9 +320,10 @@ pub fn prepare_job<'probe>(
         manifest,
         sources,
         capture_check,
+        capture_report,
         planned_target,
         budget: registered.budget,
-        prune_report: registered.prune_report,
+        prune_report,
     })
 }
 

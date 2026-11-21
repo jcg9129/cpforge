@@ -111,7 +111,6 @@ pub struct Record<'a> {
     pub platform: &'static str,
     pub spec: &'a e::ArtifactRef,
     pub execution: &'a e::ExecutionRecord,
-    pub summary_metadata: &'a SummaryMetadata,
 }
 pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
     let spec = obj([
@@ -147,7 +146,7 @@ pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
             Value::Array(vec![]),
         ),
         e::ExecutionRecord::Started(root) => {
-            let mut execution = match started(root, v.summary_metadata)? {
+            let mut execution = match started(root)? {
                 Value::Object(v) => v,
                 _ => unreachable!(),
             };
@@ -208,11 +207,15 @@ pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
                 Value::Object(execution),
                 record_stream(
                     root.stdout.as_ref(),
-                    v.summary_metadata.capture_files[0].as_deref(),
+                    root.stdout
+                        .as_ref()
+                        .and_then(|stream| stream.sink.as_deref()),
                 )?,
                 record_stream(
                     root.stderr.as_ref(),
-                    v.summary_metadata.capture_files[1].as_deref(),
+                    root.stderr
+                        .as_ref()
+                        .and_then(|stream| stream.sink.as_deref()),
                 )?,
                 checked_array(&root.measurements, 5, |v| measurement(v, true))?,
                 checked_array(&root.limits, 2, |v| limit(v, true))?,
@@ -247,6 +250,12 @@ fn record_stream(v: Option<&p::StreamCapture>, file: Option<&std::path::Path>) -
         Value::Object(v) => v,
         _ => unreachable!(),
     };
+    let complete = file.is_some() && v.is_some_and(p::StreamCapture::complete);
+    value
+        .iter_mut()
+        .find(|(name, _)| *name == "complete")
+        .expect("stream completeness member")
+        .1 = b(complete);
     let file = file
         .map(|v| {
             let value = ns(&native_bytes(v.as_os_str()));

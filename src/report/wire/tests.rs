@@ -1,7 +1,6 @@
 use super::*;
 use crate::{jobs::engine as e, report as r, supervisor as p};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,8 +20,10 @@ pub(super) fn identity() -> e::JobIdentity {
 pub(super) fn small_summary() -> e::RunSummary {
     let now = Instant::now();
     e::RunSummary {
+        observation: e::SummaryEvidence::default(),
         class: r::RunClass::ExitedZero,
         record: Arc::new(e::ExecutionRecord::Started(Box::new(p::RootOutcome {
+            kill_attempts: 0,
             stdout: None,
             stderr: None,
             status: p::Termination::Exited { code: 0 },
@@ -53,7 +54,7 @@ pub(super) fn small_summary() -> e::RunSummary {
         cwd_overflow_bytes: None,
     }
 }
-pub(super) fn passing() -> (e::ReportData, ReportMetadata) {
+pub(super) fn passing() -> e::ReportData {
     let summary = Arc::new(small_summary());
     let execution = e::ExecutionReport {
         plan: e::wire_fixture_plan(0, e::Role::Test { test: "a".into() }),
@@ -119,44 +120,8 @@ pub(super) fn passing() -> (e::ReportData, ReportMetadata) {
         },
         ..Default::default()
     };
-    (
-        e::ReportData {
-            schema: 1,
-            document: "job_report",
-            platform: "unix",
-            outcome: "finished",
-            cpf_version: "0.1.0",
-            command: r::JobKind::Test,
-            job: identity(),
-            workspace: "workspace".into(),
-            problem: crate::exec::ProblemBinding {
-                dir: "problems/a".into(),
-                id: "a".into(),
-            },
-            target: None,
-            comparator: Some(crate::config::Comparator::Tokens),
-            capture: None,
-            build: None,
-            executions: vec![execution],
-            tests: vec![test],
-            aggregates: vec![],
-            result: e::ReportResult {
-                verdict: r::JobVerdict::Passed,
-                primary_verdict: r::JobVerdict::Passed,
-                partial: false,
-                cancellation: None,
-                internal: None,
-                counts,
-            },
-            warnings: vec![],
-            events: e::EventSummary { dropped: 0 },
-            timing: e::Timing {
-                started_at: UNIX_EPOCH,
-                finished_at: UNIX_EPOCH + Duration::from_micros(10),
-                duration: Duration::from_micros(10),
-            },
-        },
-        ReportMetadata {
+    e::ReportData {
+        details: e::ReportDetails {
             problem: Problem {
                 identity: "local:a".into(),
                 name: "a".into(),
@@ -172,17 +137,48 @@ pub(super) fn passing() -> (e::ReportData, ReportMetadata) {
             hooks: vec![],
             hooks_dropped: 0,
             warnings: vec![],
-            warning_overrides: BTreeMap::new(),
             warnings_dropped: 0,
-            summaries: BTreeMap::from([(0, SummaryMetadata::default())]),
             pre_delivery_exit: PreDeliveryExit {
                 code: 0,
                 reraise: None,
             },
             internal_message: String::new(),
-            capture_manifest: None,
         },
-    )
+        schema: 1,
+        document: "job_report",
+        platform: "unix",
+        outcome: "finished",
+        cpf_version: "0.1.0",
+        command: r::JobKind::Test,
+        job: identity(),
+        workspace: "workspace".into(),
+        problem: crate::exec::ProblemBinding {
+            dir: "problems/a".into(),
+            id: "a".into(),
+        },
+        target: None,
+        comparator: Some(crate::config::Comparator::Tokens),
+        capture: None,
+        build: None,
+        executions: vec![execution],
+        tests: vec![test],
+        aggregates: vec![],
+        result: e::ReportResult {
+            verdict: r::JobVerdict::Passed,
+            primary_verdict: r::JobVerdict::Passed,
+            partial: false,
+            cancellation: None,
+            internal: None,
+            counts,
+        },
+        warnings: vec![],
+        events: e::EventSummary { dropped: 0 },
+        timing: e::Timing {
+            started_at: UNIX_EPOCH,
+            finished_at: UNIX_EPOCH + Duration::from_micros(10),
+            duration: Duration::from_micros(10),
+        },
+    }
 }
 pub(super) fn refusal() -> Refusal {
     Refusal {
@@ -418,13 +414,12 @@ fn canonical_escaping_text_and_prefixes() {
 }
 #[test]
 fn report_refusal_error_golden_bytes() {
-    let (report, meta) = passing();
-    let actual = encode_report_data(&report, &meta).unwrap();
+    let report = passing();
+    let actual = encode_report_data(&report).unwrap();
     assert_eq!(actual, include_bytes!("fixtures/passing.json"));
     assert!(actual.starts_with(b"{\"schema\":1,\"document\":\"job_report\",\"platform\":"));
     let stdout = encode_stdout_report_data(
         &report,
-        &meta,
         &ReportPersistence::Failed {
             error: e::PersistError::Timeout,
             message: "timeout".into(),
@@ -470,6 +465,7 @@ fn every_event_envelope_golden_bytes() {
     let events = [
         e::EventPayload::JobStarted {
             job: id.id.clone(),
+            sequence: id.sequence.clone(),
             kind: r::JobKind::Test,
         },
         e::EventPayload::RunStarted {
@@ -496,14 +492,10 @@ fn every_event_envelope_golden_bytes() {
     ];
     for (seq, (payload, golden)) in events.into_iter().zip(fixtures).enumerate() {
         assert_eq!(
-            encode_event(
-                &e::Event {
-                    seq: seq as u64,
-                    payload
-                },
-                Some((&id.sequence.0, id.sequence.1)),
-                Some(&SummaryMetadata::default())
-            )
+            encode_event(&e::Event {
+                seq: seq as u64,
+                payload
+            })
             .unwrap(),
             golden
         );
@@ -519,8 +511,8 @@ fn every_event_envelope_golden_bytes() {
 }
 #[test]
 fn capped_lists_and_required_nullable_members() {
-    let (mut report, mut meta) = passing();
-    meta.hooks = (0..35)
+    let mut report = passing();
+    report.details.hooks = (0..35)
         .map(|_| Hook {
             name: "hook".into(),
             trigger: "after_test",
@@ -528,27 +520,27 @@ fn capped_lists_and_required_nullable_members() {
             outcome: HookResult::NotPlanned { reason: "disabled" },
         })
         .collect();
-    meta.hooks_dropped = 2;
-    meta.warnings = (0..27)
+    report.details.hooks_dropped = 2;
+    report.details.warnings = (0..27)
         .map(|_| Warning {
             kind: WarningKind::ProgressDropped { lines: 1 },
             message: String::new(),
         })
         .collect();
-    meta.warnings_dropped = 4;
-    let value = read::read_json(&encode_report_data(&report, &meta).unwrap()).unwrap();
+    report.details.warnings_dropped = 4;
+    let value = read::read_json(&encode_report_data(&report).unwrap()).unwrap();
     assert_eq!(value["hooks"].as_array().unwrap().len(), 32);
     assert_eq!(value["hooks_dropped"], 5);
     assert_eq!(value["warnings"].as_array().unwrap().len(), 24);
     assert_eq!(value["warnings_dropped"], 7);
     report.executions[0].summary = None;
     report.executions[0].result.invariant = Some(r::Invariant::SummaryUnderivable);
-    let bytes = encode_report_data(&report, &meta).unwrap();
+    let bytes = encode_report_data(&report).unwrap();
     let v = read::read_json(&bytes).unwrap();
     assert!(v["executions"][0]["summary"].is_null());
     assert_eq!(v["executions"][0]["class"]["kind"], "exited_zero");
     report.executions[0].result.class = None;
-    let v = read::read_json(&encode_report_data(&report, &meta).unwrap()).unwrap();
+    let v = read::read_json(&encode_report_data(&report).unwrap()).unwrap();
     assert!(v["executions"][0]["class"].is_null());
     let mut refusal = refusal();
     refusal.diagnostics = vec![
@@ -598,12 +590,10 @@ fn spec_record_manifest_and_global_config_mapping() {
         path: None,
         error: Some(e::PersistError::Timeout),
     };
-    let metadata = SummaryMetadata::default();
     let encoded = encode_record(&Record {
         platform: "unix",
         spec: &reference,
         execution: &summary.record,
-        summary_metadata: &metadata,
     })
     .unwrap();
     assert!(encoded.starts_with(b"{\"schema\":1,\"document\":"));
@@ -667,7 +657,7 @@ fn diagnostics_are_embedded_verbatim_and_event_chunks_preserve_bytes() {
                 bytes,
             },
         };
-        let encoded = encode_event(&event, None, None).unwrap();
+        let encoded = encode_event(&event).unwrap();
         let value = read::read_json(&encoded).unwrap();
         original.extend(decode_base64(value["bytes"]["bytes_b64"].as_str().unwrap()).unwrap());
     }
@@ -676,9 +666,9 @@ fn diagnostics_are_embedded_verbatim_and_event_chunks_preserve_bytes() {
 
 #[test]
 fn missing_evidence_and_out_of_domain_values_fail_encoding() {
-    let (report, mut meta) = passing();
-    meta.summaries.clear();
-    assert!(encode_report_data(&report, &meta).is_err());
+    let mut report = passing();
+    report.schema = 2;
+    assert!(encode_report_data(&report).is_err());
     let event = e::Event {
         seq: 0,
         payload: e::EventPayload::RunStarted {
@@ -689,7 +679,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
             digest: None,
         },
     };
-    assert!(encode_event(&event, None, None).is_err());
+    assert!(encode_event(&event).is_err());
     let event = e::Event {
         seq: 0,
         payload: e::EventPayload::OutputChunk {
@@ -698,7 +688,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
             bytes: vec![0; 4097],
         },
     };
-    assert!(encode_event(&event, None, None).is_err());
+    assert!(encode_event(&event).is_err());
     assert!(report_bound(10_001).is_err());
     assert!(value::code(-2_147_483_649).is_err());
     assert!(value::code(4_294_967_296).is_err());
@@ -736,9 +726,9 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
         );
     }
     assert!(run::supervisor_token("(+)").is_err());
-    let (report, mut meta) = passing();
-    meta.problem.identity = "local:b".into();
-    assert!(encode_report_data(&report, &meta).is_err());
+    let mut report = passing();
+    report.details.problem.identity = "local:b".into();
+    assert!(encode_report_data(&report).is_err());
 }
 
 #[test]
@@ -790,30 +780,55 @@ fn spec_and_record_size_limits_are_enforced() {
     };
     root.stdout = Some(capture.clone());
     root.stderr = Some(capture);
-    let metadata = SummaryMetadata {
-        capture_files: [
-            Some("\"".repeat(2038).into()),
-            Some("\"".repeat(2038).into()),
-        ],
-        ..Default::default()
-    };
+    for stream in [&mut root.stdout, &mut root.stderr].into_iter().flatten() {
+        stream.sink = Some("\"".repeat(2038).into());
+    }
     let reference = e::ArtifactRef {
         digest: Some([0xff; 32]),
         path: Some("r00000/spec.json".into()),
         error: None,
     };
-    let mut record = Record {
+    let record = Record {
         platform: "unix",
         spec: &reference,
         execution: &summary.record,
-        summary_metadata: &metadata,
     };
     let bytes = encode_record(&record).unwrap();
     assert!(bytes.len() > 8192 && bytes.len() <= 64 * 1024);
-    let oversized = SummaryMetadata {
-        capture_files: [Some("\"".repeat(2043).into()), None],
-        ..Default::default()
+    let mut oversized = summary.record.as_ref().clone();
+    let e::ExecutionRecord::Started(root) = &mut oversized else {
+        unreachable!()
     };
-    record.summary_metadata = &oversized;
-    assert!(encode_record(&record).is_err());
+    root.stdout.as_mut().unwrap().sink = Some("\"".repeat(2043).into());
+    assert!(
+        encode_record(&Record {
+            execution: &oversized,
+            ..record
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn uncaptured_started_stream_is_incomplete_even_after_eof() {
+    let absent = run::stream(None, None).unwrap();
+    let absent = read::read_json(&encode(&absent)).unwrap();
+    assert_eq!(absent["complete"], false);
+    assert!(absent["file"].is_null());
+    let discarded = p::StreamCapture {
+        observed: 123,
+        stored: 0,
+        forwarded: 0,
+        retained: Vec::new(),
+        eof: true,
+        exceeded_at: None,
+        losses: Vec::new(),
+        sink: None,
+    };
+    let value = run::stream(Some(&discarded), None).unwrap();
+    let value = read::read_json(&encode(&value)).unwrap();
+    assert_eq!(value["observed"], "123");
+    assert_eq!(value["eof"], true);
+    assert_eq!(value["complete"], false);
+    assert!(value["file"].is_null());
 }

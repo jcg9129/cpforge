@@ -1,0 +1,201 @@
+//! Finalized schema evidence owned by the engine, independent of delivery.
+use super::{self as e, CancelPhase};
+use crate::config::Comparator;
+use crate::report::HookOutcome;
+use std::path::PathBuf;
+
+/// Display facts supplied with ready-job preparation, where problem metadata
+/// and the selection are available. They are frozen before execution.
+#[derive(Clone, Debug)]
+pub struct ReportPresentation {
+    pub problem_name: String,
+    pub problem_kind: String,
+    pub target_name: Option<String>,
+    pub published_limits: Option<(Option<u32>, Option<u64>)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Problem {
+    pub identity: String,
+    pub name: String,
+    pub kind: String,
+    pub dir: PathBuf,
+}
+#[derive(Clone, Debug)]
+pub struct Target {
+    pub name: Option<String>,
+    pub language: Option<String>,
+    pub profile: Option<String>,
+    pub build_free: bool,
+    pub compare: Option<Comparator>,
+    pub run_deadline: Option<(u64, &'static str)>,
+    pub published_limits: Option<(Option<u32>, Option<u64>)>,
+    pub local_limits: Vec<crate::supervisor::InstalledLimit>,
+}
+#[derive(Clone, Debug)]
+pub enum FactOutcome {
+    Published,
+    Superseded,
+    NotPublished {
+        reason: &'static str,
+        message: Option<String>,
+    },
+    NotAttempted {
+        reason: &'static str,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct Fact {
+    pub outcome: FactOutcome,
+    pub warnings: Vec<&'static str>,
+}
+#[derive(Clone, Debug)]
+pub enum HookResult {
+    Planned(HookOutcome),
+    NotPlanned { reason: &'static str },
+}
+#[derive(Clone, Debug)]
+pub struct Hook {
+    pub name: String,
+    pub trigger: &'static str,
+    pub execution: Option<u32>,
+    pub outcome: HookResult,
+}
+#[derive(Clone, Debug)]
+pub enum WarningKind {
+    Prune {
+        job: Option<crate::storage::job::JobId>,
+        detail: &'static str,
+    },
+    Recovery {
+        paths: u32,
+        first: Option<PathBuf>,
+    },
+    Persist {
+        artefact: &'static str,
+        run: String,
+        error: e::PersistError,
+    },
+    Durability {
+        artefact: &'static str,
+        detail: &'static str,
+    },
+    Retention {
+        detail: &'static str,
+        run: Option<String>,
+        bytes: u64,
+    },
+    CleanupUnverified {
+        runs: u32,
+    },
+    Fact(FactOutcome),
+    Hook {
+        name: String,
+        outcome: HookResult,
+    },
+    HooksDisabled {
+        reason: &'static str,
+    },
+    LateCancellation {
+        phase: CancelPhase,
+    },
+    ProgressDropped {
+        lines: u32,
+    },
+}
+#[derive(Clone, Debug)]
+pub struct WireWarning {
+    pub kind: WarningKind,
+    pub message: String,
+}
+/// Already selected at finalization; serialization never selects process status.
+#[derive(Clone, Copy, Debug)]
+pub struct PreDeliveryExit {
+    pub code: i64,
+    pub reraise: Option<&'static str>,
+}
+#[derive(Clone, Debug)]
+pub struct ReportDetails {
+    pub problem: Problem,
+    pub target: Option<Target>,
+    pub fingerprints: Option<([u8; 32], [u8; 32])>,
+    pub fact: Option<Fact>,
+    pub hooks: Vec<Hook>,
+    pub hooks_dropped: u32,
+    pub warnings: Vec<WireWarning>,
+    pub warnings_dropped: u32,
+    pub pre_delivery_exit: PreDeliveryExit,
+    pub internal_message: String,
+}
+#[derive(Clone, Debug)]
+pub enum ReportPersistence {
+    Published {
+        path: PathBuf,
+        uncertain: bool,
+        /// Retained for stderr delivery after S; omitted from report.json.
+        cleanup_pending: bool,
+    },
+    Failed {
+        error: e::PersistError,
+        message: String,
+    },
+    Refusal,
+}
+
+/// Report §5.2 rows 3 and 5–14, evaluated once under F's verdict lock.
+pub fn pre_delivery_exit(
+    kind: crate::report::JobKind,
+    verdict: crate::report::JobVerdict,
+    cancellation: Option<super::Cancellation>,
+) -> PreDeliveryExit {
+    use crate::report::JobVerdict as V;
+    if verdict == V::InternalError {
+        return PreDeliveryExit {
+            code: 70,
+            reraise: None,
+        };
+    }
+    if let Some(intent) = cancellation {
+        if cfg!(unix) {
+            let signal = match intent.source {
+                super::CancelSource::Console => Some((130, "sigint")),
+                super::CancelSource::Terminate => Some((143, "sigterm")),
+                super::CancelSource::Api => None,
+            };
+            if let Some((code, signal)) = signal {
+                return PreDeliveryExit {
+                    code,
+                    reraise: Some(signal),
+                };
+            }
+        }
+        return PreDeliveryExit {
+            code: 6,
+            reraise: None,
+        };
+    }
+    if verdict == V::Cancelled {
+        return PreDeliveryExit {
+            code: 6,
+            reraise: None,
+        };
+    }
+    let code = if kind == crate::report::JobKind::Hook {
+        0
+    } else {
+        match verdict {
+            V::InternalError => 70,
+            V::Cancelled => 6,
+            V::Infrastructure => 10,
+            V::BuildFailed => 3,
+            V::CheckerFailed => 5,
+            V::WallDeadline | V::OutputBudget | V::Signal | V::NonzeroExit | V::WrongAnswer => 1,
+            V::Unchecked | V::NoTests => 4,
+            _ => 0,
+        }
+    };
+    PreDeliveryExit {
+        code,
+        reraise: None,
+    }
+}

@@ -194,6 +194,7 @@ impl Executor for Fake {
 
 fn root(code: i64) -> supervisor::RootOutcome {
     supervisor::RootOutcome {
+        kill_attempts: 0,
         stdout: Some(supervisor::StreamCapture {
             observed: 4,
             retained: b"yes\n".to_vec(),
@@ -526,7 +527,7 @@ fn retention_refusal_closes_admission_and_returns_partial_reservations() {
     );
     assert_eq!(report.data().result.verdict, JobVerdict::Infrastructure);
     drop(blocking);
-    assert_eq!(budget.usage().reserved, (64 * 1024 + 12 * 1024 * 3) * 2);
+    assert_eq!(budget.usage().reserved, 0);
 }
 
 #[test]
@@ -950,9 +951,15 @@ fn settlement_waits_outside_verdict_lock_and_keeps_reservations() {
             executions: &'a mut [ExecutionReport],
         ) -> JobFuture<'a, Vec<Warning>> {
             Box::pin(async move {
-                assert_eq!(self.memory.pending.len(), 1);
-                let meta = self.memory.pending[0].metadata.as_ref().unwrap();
-                assert_eq!(meta.bytes(), METADATA);
+                assert_eq!(self.memory.pending.len(), 2);
+                let total: u64 = self
+                    .memory
+                    .pending
+                    .iter()
+                    .filter_map(|p| p.metadata.as_ref())
+                    .map(Reservation::bytes)
+                    .sum();
+                assert_eq!(total, METADATA);
                 self.entered.take().unwrap().send(()).unwrap();
                 self.resume.take().unwrap().await.unwrap();
                 self.memory.settle(executions).await
@@ -1202,4 +1209,385 @@ fn phase_callback_panics_leave_the_primary_verdict_frozen() {
             }
         );
     }
+}
+
+#[test]
+fn disk_persistence_publishes_frozen_bytes_and_terminal_only_after_report() {
+    use crate::jobs::persist::JobPersistence;
+    use crate::report::wire;
+    struct RecordingFake {
+        fake: Fake,
+        specs: Vec<Arc<ExecutionSpec>>,
+    }
+    impl Executor for RecordingFake {
+        fn execute(
+            &mut self,
+            spec: Arc<ExecutionSpec>,
+            cancel: CancelToken,
+            events: RunEvents,
+            resources: RunResources,
+        ) -> JobFuture<'_, ExecutionRecord> {
+            self.specs.push(spec.clone());
+            self.fake.execute(spec, cancel, events, resources)
+        }
+    }
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let budget = ready.budget.clone();
+    let dir = ready.dir.clone();
+    let mut persistence = JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let mut receiver = engine.events().subscribe().unwrap();
+    let mut fake = RecordingFake {
+        fake: Fake::default(),
+        specs: Vec::new(),
+    };
+    let report = runtime(engine.run(&mut fake, &mut persistence, &mut NoHooks));
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert!(matches!(
+        report.persistence(),
+        ReportPersistence::Published { .. }
+    ));
+    assert_eq!(fake.specs[0].digest, Some(fake.specs[0].spec_digest()));
+    let spec_bytes = fs::read(dir.join("r00000/spec.json")).unwrap();
+    assert_eq!(
+        spec_bytes,
+        wire::encode_spec(&fake.specs[0].wire_spec()).unwrap()
+    );
+    let record_bytes = fs::read(dir.join("r00000/record.json")).unwrap();
+    assert_eq!(
+        record_bytes,
+        wire::encode_record(&wire::Record {
+            platform: report.data().platform,
+            spec: report.data().executions[0].spec.as_ref().unwrap(),
+            execution: report.data().executions[0].evidence.as_ref().unwrap(),
+        })
+        .unwrap()
+    );
+    let report_bytes = fs::read(dir.join("report.json")).unwrap();
+    assert_eq!(report_bytes, wire::encode_report(&report).unwrap());
+    assert!(
+        wire::read::read_json(&report_bytes)
+            .unwrap()
+            .get("persistence")
+            .is_none()
+    );
+    assert_eq!(
+        wire::read::read_json(&wire::encode_stdout_report(&report).unwrap()).unwrap()["persistence"]
+            ["report"]["kind"],
+        "published"
+    );
+    let capture =
+        wire::read::read_json(&fs::read(dir.join("inputs/capture.json")).unwrap()).unwrap();
+    assert_eq!(capture["document"], "capture_manifest");
+    assert_eq!(
+        report.data().capture.as_ref().unwrap().manifest.as_deref(),
+        Some(Path::new("inputs/capture.json"))
+    );
+    assert!(dir.join("r00000/cleanup.log").is_file());
+    let terminal = runtime(async {
+        while let Some(event) = receiver.recv().await {
+            wire::encode_event(&event).unwrap();
+        }
+        receiver.terminal().await
+    });
+    assert_eq!(terminal.report_id, Some(report.data().job.id.clone()));
+    let encoded = wire::encode_job_finished(&terminal).unwrap();
+    assert!(!wire::read::read_json(&encoded).unwrap()["report"].is_null());
+    let reservation = budget
+        .reserve(2 * wire::report_bound(1).unwrap() as u64)
+        .unwrap();
+    let repeated =
+        runtime(persistence.publish_report(Arc::new(report.data().clone()), Some(reservation)));
+    assert!(matches!(repeated, ReportPersistence::Failed { .. }));
+    assert_eq!(fs::read(dir.join("report.json")).unwrap(), report_bytes);
+}
+
+#[test]
+fn record_budget_refusal_warns_without_changing_verdict() {
+    use crate::jobs::persist::JobPersistence;
+    struct RefuseRecord {
+        persistence: JobPersistence,
+        budget: Arc<JobBudget>,
+        blocker: Option<Reservation>,
+    }
+    impl Persistence for RefuseRecord {
+        fn enqueue(&mut self, mut artifact: PendingArtifacts) {
+            if artifact.finalized {
+                artifact.metadata = None;
+                let usage = self.budget.usage();
+                self.blocker = Some(
+                    self.budget
+                        .reserve(self.budget.limit() - usage.retained - usage.reserved)
+                        .unwrap(),
+                );
+                artifact.metadata = self.budget.reserve(METADATA).ok();
+                assert!(artifact.metadata.is_none());
+            }
+            self.persistence.enqueue(artifact);
+        }
+        fn settle<'a>(
+            &'a mut self,
+            executions: &'a mut [ExecutionReport],
+        ) -> JobFuture<'a, Vec<Warning>> {
+            self.persistence.settle(executions)
+        }
+        fn publish_report(
+            &mut self,
+            report: Arc<ReportData>,
+            reservation: Option<Reservation>,
+        ) -> JobFuture<'_, ReportPersistence> {
+            self.persistence.publish_report(report, reservation)
+        }
+    }
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let mut persistence = RefuseRecord {
+        persistence: JobPersistence::new(&ready).unwrap(),
+        budget: ready.budget.clone(),
+        blocker: None,
+    };
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let report = runtime(engine.run(&mut Fake::default(), &mut persistence, &mut NoHooks));
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert!(matches!(
+        report.data().executions[0].record.as_ref().unwrap().error,
+        Some(PersistError::Io { .. })
+    ));
+    assert!(
+        report.data().executions[0]
+            .record
+            .as_ref()
+            .unwrap()
+            .path
+            .is_none()
+    );
+    assert!(report.data().warnings.iter().any(|w| matches!(
+        w,
+        Warning::Persistence {
+            artefact: "record",
+            error: PersistError::Io { .. },
+            ..
+        }
+    )));
+    assert!(matches!(
+        report.persistence(),
+        ReportPersistence::Published { .. }
+    ));
+}
+
+#[test]
+fn stalled_persistence_bounds_w_times_out_the_queue_and_omits_terminal_path() {
+    use crate::jobs::persist::JobPersistence;
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut persistence = JobPersistence::stalled(&ready, Duration::from_secs(1), gate.clone());
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let mut receiver = engine.events().subscribe().unwrap();
+    let start = Instant::now();
+    let report = runtime(async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.run(&mut Fake::default(), &mut persistence, &mut NoHooks),
+        )
+        .await
+        .expect("W must be bounded")
+    });
+    gate.notify_one();
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    for reference in [
+        &report.data().executions[0].spec,
+        &report.data().executions[0].record,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert_eq!(reference.error, Some(PersistError::Timeout));
+        assert!(reference.path.is_none());
+    }
+    assert!(matches!(
+        report.persistence(),
+        ReportPersistence::Failed {
+            error: PersistError::WorkerUnavailable,
+            ..
+        }
+    ));
+    let terminal = runtime(async {
+        while receiver.recv().await.is_some() {}
+        receiver.terminal().await
+    });
+    assert!(terminal.report_id.is_none());
+    assert!(
+        crate::report::wire::read::read_json(
+            &crate::report::wire::encode_job_finished(&terminal).unwrap()
+        )
+        .unwrap()["report"]
+            .is_null()
+    );
+}
+
+#[test]
+fn report_collision_fails_publication_without_rewriting_or_changing_verdict() {
+    use crate::jobs::persist::JobPersistence;
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let path = ready.dir.join("report.json");
+    fs::write(&path, b"existing").unwrap();
+    let mut persistence = JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let mut receiver = engine.events().subscribe().unwrap();
+    let report = runtime(engine.run(&mut Fake::default(), &mut persistence, &mut NoHooks));
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert!(matches!(
+        report.persistence(),
+        ReportPersistence::Failed {
+            error: PersistError::Io { .. },
+            ..
+        }
+    ));
+    let terminal = runtime(async {
+        while receiver.recv().await.is_some() {}
+        receiver.terminal().await
+    });
+    assert!(terminal.report_id.is_none());
+    assert_eq!(fs::read(path).unwrap(), b"existing");
+}
+
+#[test]
+fn pre_delivery_status_uses_report_precedence_and_ignores_persistence() {
+    for (verdict, code) in [
+        (JobVerdict::InternalError, 70),
+        (JobVerdict::Infrastructure, 10),
+        (JobVerdict::BuildFailed, 3),
+        (JobVerdict::CheckerFailed, 5),
+        (JobVerdict::WrongAnswer, 1),
+        (JobVerdict::Unchecked, 4),
+        (JobVerdict::NoTests, 4),
+        (JobVerdict::Passed, 0),
+        (JobVerdict::Cancelled, 6),
+    ] {
+        assert_eq!(pre_delivery_exit(JobKind::Test, verdict, None).code, code);
+    }
+    let intent = Cancellation {
+        requested_at: Duration::ZERO,
+        source: CancelSource::Api,
+        phase: CancelPhase::Closure,
+    };
+    assert_eq!(
+        pre_delivery_exit(JobKind::Test, JobVerdict::Infrastructure, Some(intent)).code,
+        6
+    );
+    assert_eq!(
+        pre_delivery_exit(JobKind::Test, JobVerdict::InternalError, Some(intent)).code,
+        70
+    );
+    assert_eq!(
+        pre_delivery_exit(JobKind::Hook, JobVerdict::Infrastructure, None).code,
+        0
+    );
+    assert_eq!(
+        pre_delivery_exit(JobKind::Hook, JobVerdict::Cancelled, None).code,
+        6
+    );
+    let console = Cancellation {
+        source: CancelSource::Console,
+        ..intent
+    };
+    let status = pre_delivery_exit(JobKind::Test, JobVerdict::Passed, Some(console));
+    assert_eq!(status.code, if cfg!(unix) { 130 } else { 6 });
+    assert_eq!(
+        status.reraise,
+        if cfg!(unix) { Some("sigint") } else { None }
+    );
+}
+
+#[test]
+fn stalled_report_publication_bounds_s_and_keeps_w_warnings_frozen() {
+    use crate::jobs::persist::JobPersistence;
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let dir = ready.dir.clone();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut persistence =
+        JobPersistence::stalled_report(&ready, Duration::from_secs(1), gate.clone());
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let mut receiver = engine.events().subscribe().unwrap();
+    let report = runtime(async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.run(&mut Fake::default(), &mut persistence, &mut NoHooks),
+        )
+        .await
+        .expect("S must be bounded")
+    });
+    gate.notify_one();
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert!(
+        report.data().executions[0]
+            .spec
+            .as_ref()
+            .unwrap()
+            .path
+            .is_some()
+    );
+    assert!(
+        report.data().executions[0]
+            .record
+            .as_ref()
+            .unwrap()
+            .path
+            .is_some()
+    );
+    assert!(
+        !report
+            .data()
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, Warning::Persistence { .. }))
+    );
+    assert!(matches!(
+        report.persistence(),
+        ReportPersistence::Failed {
+            error: PersistError::Timeout,
+            ..
+        }
+    ));
+    let terminal = runtime(async {
+        while receiver.recv().await.is_some() {}
+        receiver.terminal().await
+    });
+    assert!(terminal.report_id.is_none());
+    assert!(!dir.join("report.json").exists());
 }

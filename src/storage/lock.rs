@@ -164,7 +164,7 @@ impl WorkspaceLock {
         }
         let mut guard = WorkspaceGuard {
             root: &self.root,
-            state,
+            state: Some(state),
             created: RefCell::new(created),
             recovery: None,
             #[cfg(feature = "storage-test-hooks")]
@@ -183,14 +183,28 @@ impl WorkspaceLock {
 #[derive(Debug)]
 pub struct WorkspaceGuard<'a> {
     root: &'a Path,
-    state: MutexGuard<'a, State>,
+    state: Option<MutexGuard<'a, State>>,
     pub(crate) created: RefCell<Vec<PathBuf>>,
     recovery: Option<RecoveryIncomplete>,
     #[cfg(feature = "storage-test-hooks")]
     pub(crate) test_hooks: super::TestHooks,
 }
 
-impl WorkspaceGuard<'_> {
+impl<'a> WorkspaceGuard<'a> {
+    /// Job-local publication is serialized by its sole persistence worker.
+    /// The borrowed lease prevents pruning; no workspace recovery or lock is
+    /// needed for immutable files confined to this already registered tree.
+    pub(crate) fn leased(owner: &'a super::job::JobOwner) -> Self {
+        Self {
+            root: owner.directory(),
+            state: None,
+            created: RefCell::new(Vec::new()),
+            recovery: None,
+            #[cfg(feature = "storage-test-hooks")]
+            test_hooks: super::TestHooks::default(),
+        }
+    }
+
     pub fn root(&self) -> &Path {
         self.root
     }
@@ -245,7 +259,9 @@ impl WorkspaceGuard<'_> {
 
 impl Drop for WorkspaceGuard<'_> {
     fn drop(&mut self) {
-        sys::unlock(self.state.file.as_ref().expect("opened lock"));
+        if let Some(state) = &self.state {
+            sys::unlock(state.file.as_ref().expect("opened lock"));
+        }
     }
 }
 

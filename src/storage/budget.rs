@@ -101,6 +101,15 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// Transfer part of an existing allowance without reserving twice.
+    pub fn split(&mut self, bytes: u64) -> Option<Self> {
+        self.bytes = self.bytes.checked_sub(bytes)?;
+        Some(Self {
+            budget: Arc::clone(&self.budget),
+            bytes,
+        })
+    }
+
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -280,5 +289,31 @@ mod tests {
         assert_usage(&budget, 0, 7);
         drop(reservations);
         assert_usage(&budget, 0, 0);
+    }
+
+    #[test]
+    fn split_transfers_reserved_headroom_without_double_counting() {
+        let budget = Arc::new(JobBudget::new(100));
+        let mut parent = budget.reserve(100).unwrap();
+        let mut child = parent.split(60).unwrap();
+        assert_eq!(parent.bytes(), 40);
+        assert_eq!(child.bytes(), 60);
+        assert!(parent.split(41).is_none());
+        assert_eq!(
+            budget.usage(),
+            BudgetUsage {
+                retained: 0,
+                reserved: 100
+            }
+        );
+        child.commit(20).unwrap();
+        drop(parent);
+        assert_eq!(
+            budget.usage(),
+            BudgetUsage {
+                retained: 20,
+                reserved: 0
+            }
+        );
     }
 }

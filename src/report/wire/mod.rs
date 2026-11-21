@@ -1,15 +1,14 @@
 //! Canonical schema-1 JSON. These pure encoders return compact UTF-8 bytes,
 //! without a trailing newline. Transport and publication belong to callers.
 //!
-//! Supplemental metadata supplies evidence the engine does not yet retain;
-//! missing required observations return an error instead of an invented value.
+//! The engine owns all finalized evidence; encoding requires no supplemental metadata.
 //!
 //! E §2 and §6 define spec/record contents and limits, but do not prescribe
 //! JSON document names or nested object spellings. `execution_spec` and
 //! `run_record` follow declaration order, with report vocabulary for shared
 //! variants. Config tables live under `config`, preserving effective key order.
 //! These encodings do not compute or change the independent binary spec digest.
-//! Report metadata also supplies the already-selected pre-delivery status;
+//! The engine also supplies the already-selected pre-delivery status;
 //! encoding has no process-status, publication, delivery, or settlement effects.
 mod artifacts;
 mod events;
@@ -27,7 +26,7 @@ pub use native::{
     base64, decode_base64, decode_native, encode_bytes, encode_native, encode_native_summary,
     native_bytes,
 };
-pub use run::{SummaryMetadata, encode_run_summary, ntstatus_name};
+pub use run::{encode_run_summary, ntstatus_name};
 pub use schema::timestamp;
 pub use value::{Error, Result};
 
@@ -46,11 +45,8 @@ pub fn report_bound(planned: usize) -> Result<usize> {
     }
     Ok(REPORT_HEADER_BOUND + EXECUTION_ALLOWANCE * planned)
 }
-fn report_value(
-    v: &e::ReportData,
-    meta: &ReportMetadata,
-    persist: Option<&ReportPersistence>,
-) -> Result<Value> {
+fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Result<Value> {
+    let meta = &v.details;
     if v.schema != 1 || v.document != "job_report" || v.outcome != "finished" {
         return Err(Error("expected finalized schema-1 job report"));
     }
@@ -68,7 +64,8 @@ fn report_value(
         return Err(Error("comparator metadata does not match engine"));
     }
     // The engine binding is authoritative; metadata adds only name and kind.
-    if meta.problem.identity.strip_prefix("local:") != Some(v.problem.id.as_str())
+    if meta.problem.identity.strip_prefix("local:")
+        != Some(v.problem.id.strip_prefix("local:").unwrap_or(&v.problem.id))
         || meta.problem.dir != v.problem.dir
     {
         return Err(Error("problem metadata does not match engine"));
@@ -80,12 +77,8 @@ fn report_value(
         return Err(Error("finished report cannot have refusal persistence"));
     }
     let mut warnings = Vec::new();
-    for (j, engine_warning_value) in v.warnings.iter().enumerate() {
-        let warning = match meta.warning_overrides.get(&j) {
-            Some(v) => v.clone(),
-            None => engine_warning(engine_warning_value, v.result.cancellation)?,
-        };
-        warnings.push(warning);
+    for engine_warning_value in &v.warnings {
+        warnings.push(engine_warning(engine_warning_value, v.result.cancellation)?);
     }
     warnings.extend(meta.warnings.clone());
     let mut fields = vec![
@@ -110,7 +103,7 @@ fn report_value(
             "capture",
             v.capture
                 .as_ref()
-                .map(|v| capture(v, meta.capture_manifest.as_deref()))
+                .map(|v| capture(v))
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
@@ -130,9 +123,7 @@ fn report_value(
         ),
         (
             "executions",
-            checked_array(&v.executions, 10_000, |v| {
-                run::execution(v, meta.summaries.get(&v.plan.index))
-            })?,
+            checked_array(&v.executions, 10_000, |v| run::execution(v))?,
         ),
         ("tests", checked_array(&v.tests, 10_000, test)?),
         (
@@ -186,31 +177,26 @@ fn report_value(
     document("job_report", v.platform, fields)
 }
 /// Persisted report.json: deliberately excludes its own persistence outcome.
-pub fn encode_report(report: &e::FinalizedReport, meta: &ReportMetadata) -> Result<Vec<u8>> {
-    encode_report_data(report.data(), meta)
+pub fn encode_report(report: &e::FinalizedReport) -> Result<Vec<u8>> {
+    encode_report_data(report.data())
 }
 /// Also useful for fixtures and independent finalized-value producers.
-pub fn encode_report_data(report: &e::ReportData, meta: &ReportMetadata) -> Result<Vec<u8>> {
+pub fn encode_report_data(report: &e::ReportData) -> Result<Vec<u8>> {
     bounded(
-        &report_value(report, meta, None)?,
+        &report_value(report, None)?,
         report_bound(report.executions.len())?,
     )
 }
 /// stdout-only wrapper, also embedded by the final event envelope.
-pub fn encode_stdout_report(
-    report: &e::FinalizedReport,
-    meta: &ReportMetadata,
-    persistence: &ReportPersistence,
-) -> Result<Vec<u8>> {
-    encode_stdout_report_data(report.data(), meta, persistence)
+pub fn encode_stdout_report(report: &e::FinalizedReport) -> Result<Vec<u8>> {
+    encode_stdout_report_data(report.data(), report.persistence())
 }
 pub fn encode_stdout_report_data(
     report: &e::ReportData,
-    meta: &ReportMetadata,
     persistence: &ReportPersistence,
 ) -> Result<Vec<u8>> {
     bounded(
-        &report_value(report, meta, Some(persistence))?,
+        &report_value(report, Some(persistence))?,
         report_bound(report.executions.len())?,
     )
 }

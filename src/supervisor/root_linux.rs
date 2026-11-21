@@ -205,6 +205,7 @@ fn push_error(outcome: &mut RootOutcome, error: SupervisorError) {
 }
 
 fn request_kill(lease: &Lease, outcome: &mut RootOutcome) {
+    outcome.kill_attempts = outcome.kill_attempts.saturating_add(1);
     outcome
         .termination
         .requested_at
@@ -311,6 +312,7 @@ pub(in crate::supervisor) fn spawn_prepared(
         cleanup_started: false,
         captures: Some(captures),
         outcome: Some(RootOutcome {
+            kill_attempts: 0,
             stdout: None,
             stderr: None,
             status: Termination::Unknown,
@@ -817,6 +819,8 @@ impl Root {
             .requested_at
             .get_or_insert_with(Instant::now);
         self.outcome().termination.method = Some("kill(SIGKILL)");
+        let outcome = self.outcome();
+        outcome.kill_attempts = outcome.kill_attempts.saturating_add(1);
         let result = sys::kill_root(pid);
         if let Err(error) = &result {
             push_error(

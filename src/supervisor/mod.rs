@@ -28,6 +28,22 @@ pub use cleanup::{
 };
 pub use root::*;
 
+/// Persistence shares the process-wide credit bound without changing signal
+/// setup. A stalled worker retains this credit until its syscall returns.
+pub(crate) fn persistence_credit() -> io::Result<Credits> {
+    cleanup::init()?;
+    cleanup::global_bounds()
+        .expect("initialized bounds")
+        .thread_credits
+        .try_reserve(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "persistence worker capacity exhausted",
+            )
+        })
+}
+
 /// One reader owned by the parent and one blocking writer for the child.
 #[derive(Debug)]
 pub struct StdPipe {

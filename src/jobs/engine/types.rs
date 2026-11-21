@@ -120,7 +120,8 @@ pub struct ExecutionSpec {
     pub resolved: ResolvedStage,
     pub stdin: Option<PathBuf>,
     pub directory: PathBuf,
-    /// Canonical spec encoding will populate this before disk persistence.
+    pub output_events: bool,
+    /// Digest of the independent binary execution description.
     pub digest: Option<[u8; 32]>,
 }
 
@@ -159,8 +160,15 @@ impl ExecutionRecord {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SummaryEvidence {
+    pub capture_files: [Option<PathBuf>; 2],
+    pub not_started_timing: Option<(Duration, &'static str)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunSummary {
+    pub observation: SummaryEvidence,
     pub class: report::RunClass,
     /// Final supervisor evidence includes timing, streams, limits and measurements.
     pub record: Arc<ExecutionRecord>,
@@ -264,7 +272,8 @@ pub enum Warning {
         runs: u32,
     },
     Persistence {
-        execution: Option<u32>,
+        artefact: &'static str,
+        run: RunId,
         error: PersistError,
     },
 }
@@ -285,11 +294,11 @@ pub struct CaptureReport {
     pub counts: [u32; 2],
     pub bytes: u64,
     pub lists_sha256: [u8; 32],
-    /// Not yet available from input preparation; never claim a publication.
+    /// Present only after no-clobber publication of the full manifest.
     pub manifest: Option<PathBuf>,
 }
 impl CaptureReport {
-    pub(super) fn from_sources(check: CaptureCheck, files: &[CapturedSourceCopy]) -> Self {
+    pub(crate) fn from_sources(check: CaptureCheck, files: &[CapturedSourceCopy]) -> Self {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
         let mut lists = [Vec::new(), Vec::new()];
@@ -337,6 +346,7 @@ pub struct EventSummary {
 
 #[derive(Clone, Debug)]
 pub struct ReportData {
+    pub details: super::ReportDetails,
     pub schema: u32,
     pub document: &'static str,
     pub platform: &'static str,
@@ -363,11 +373,14 @@ pub struct ReportData {
 /// Arc has a single owner. The lease lives as long as this report or any run.
 #[derive(Debug)]
 pub struct FinalizedReport {
-    pub(super) data: ReportData,
+    pub(super) data: Arc<ReportData>,
     pub(super) _owner: JobOwner,
-    pub(super) _report_reservation: Option<crate::storage::budget::Reservation>,
+    pub(super) persistence: super::ReportPersistence,
 }
 impl FinalizedReport {
+    pub fn persistence(&self) -> &super::ReportPersistence {
+        &self.persistence
+    }
     pub fn data(&self) -> &ReportData {
         &self.data
     }

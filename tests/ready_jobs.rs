@@ -392,3 +392,54 @@ fn interruption_while_freezing_tests_never_reaches_source_capture_or_readiness()
     f.prune();
     assert!(!dir.exists());
 }
+
+#[test]
+fn capture_manifest_is_the_last_ready_step_and_is_never_clobbered() {
+    let f = Fixture::new();
+    f.write("problem/main.py", "source\n");
+    let target = f.target("python", "");
+    let registered = f.job(1 << 20, PrunePolicy::default());
+    let dir = registered.dir.clone();
+    let frozen = registered
+        .inputs()
+        .freeze(
+            &f.store(),
+            &[],
+            &CapturedSource::from_target(&target),
+            &f.path("problem"),
+        )
+        .unwrap();
+    fs::write(dir.join("inputs/capture.json"), b"existing manifest").unwrap();
+    let result = prepare_job(registered, frozen, &target, f.inputs(&Tools));
+    assert!(matches!(result, Err(ReadyError::Storage(_))));
+    assert_eq!(
+        fs::read(dir.join("inputs/capture.json")).unwrap(),
+        b"existing manifest"
+    );
+}
+
+#[test]
+fn capture_manifest_budget_refusal_never_returns_a_ready_job() {
+    let f = Fixture::new();
+    f.write("problem/main.py", "source\n");
+    let target = f.target("python", "");
+    let registered = f.job(1 << 20, PrunePolicy::default());
+    let frozen = registered
+        .inputs()
+        .freeze(
+            &f.store(),
+            &[],
+            &CapturedSource::from_target(&target),
+            &f.path("problem"),
+        )
+        .unwrap();
+    let dir = registered.dir.clone();
+    let budget = registered.budget.clone();
+    let allowance = budget
+        .reserve(budget.limit() - budget.usage().retained)
+        .unwrap();
+    let result = prepare_job(registered, frozen, &target, f.inputs(&Tools));
+    assert!(matches!(result, Err(ReadyError::Storage(_))));
+    assert!(!dir.join("inputs/capture.json").exists());
+    drop(allowance);
+}

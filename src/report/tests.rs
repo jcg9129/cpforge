@@ -2713,6 +2713,7 @@ fn root_outcome() -> supervisor::RootOutcome {
         sink: None,
     };
     supervisor::RootOutcome {
+        kill_attempts: 0,
         stdout: Some(capture.clone()),
         stderr: Some(capture),
         status: Termination::Exited { code: 0 },

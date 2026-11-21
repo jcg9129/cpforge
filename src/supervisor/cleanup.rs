@@ -352,8 +352,10 @@ pub fn debug_counters() -> Counters {
 }
 
 pub(super) fn init() -> io::Result<()> {
-    // init_process serializes initialization. Do not publish partially started
-    // bounds: a failed thread creation drops the candidate and its reservations.
+    // Both process setup and job persistence can request these shared bounds.
+    // Do not publish partially started bounds after a thread creation failure.
+    static INIT: Mutex<()> = Mutex::new(());
+    let _init = INIT.lock().unwrap_or_else(|error| error.into_inner());
     if BOUNDS.get().is_none() {
         let bounds = Arc::new(GlobalBounds {
             thread_credits: ThreadCredits {

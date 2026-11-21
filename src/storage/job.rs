@@ -224,6 +224,7 @@ pub fn publish_job_record(
 /// explicitly unlocked while an owner clone lives. Handles are non-inheritable.
 #[derive(Debug)]
 pub struct JobLease {
+    directory: std::path::PathBuf,
     file: File,
     budget: Option<Arc<JobBudget>>,
 }
@@ -233,6 +234,10 @@ pub struct JobLease {
 pub type JobOwner = Arc<JobLease>;
 
 impl JobLease {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     /// Exclusively create and immediately lock `lease` in an existing checked
     /// job directory. Admission calls this while still holding its workspace
     /// guard. Any failure leaves interrupted storage for later reclamation.
@@ -264,7 +269,11 @@ impl JobLease {
                 "new job lease is already locked",
             ));
         }
-        Ok(Arc::new(Self { file, budget }))
+        Ok(Arc::new(Self {
+            directory: job_dir.to_owned(),
+            file,
+            budget,
+        }))
     }
 }
 

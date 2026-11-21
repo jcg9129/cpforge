@@ -84,6 +84,12 @@ impl Fixture {
                 dir: self.path("problem"),
                 id: "local:p".into(),
             },
+            report: cpforge::jobs::engine::ReportPresentation {
+                problem_name: "problem".into(),
+                problem_kind: "batch".into(),
+                target_name: None,
+                published_limits: None,
+            },
             baseline: Baseline::from_entries(vec![
                 ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
                 ("LANG".into(), "C.UTF-8".into()),
