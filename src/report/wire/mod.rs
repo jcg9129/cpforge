@@ -65,11 +65,13 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         return Err(Error("comparator metadata does not match engine"));
     }
     // The engine binding is authoritative; metadata adds only name and kind.
-    if meta.problem.identity.strip_prefix("local:")
-        != Some(v.problem.id.strip_prefix("local:").unwrap_or(&v.problem.id))
-        || meta.problem.dir != v.problem.dir
-    {
-        return Err(Error("problem metadata does not match engine"));
+    match (&meta.problem, &v.problem) {
+        (Some(meta), Some(binding))
+            if meta.identity.strip_prefix("local:")
+                == Some(binding.id.strip_prefix("local:").unwrap_or(&binding.id))
+                && meta.dir == binding.dir => {}
+        (None, None) => {}
+        _ => return Err(Error("problem metadata does not match engine")),
     }
     if (v.command == crate::report::JobKind::Test) != meta.fact.is_some() {
         return Err(Error("test report needs fact outcome"));
@@ -91,7 +93,14 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
             "workspace",
             native::nsum(&native::native_bytes(v.workspace.as_os_str()), 1024),
         ),
-        ("problem", problem(&meta.problem, Some(&v.workspace))?),
+        (
+            "problem",
+            meta.problem
+                .as_ref()
+                .map(|p| problem(p, Some(&v.workspace)))
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
         (
             "target",
             meta.target

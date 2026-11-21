@@ -103,6 +103,10 @@ impl JobPersistence {
         Self::start(ready.owner.clone(), DEADLINE, None)
     }
 
+    pub(crate) fn for_execution(ready: &super::ReadyExecutionJob<'_>) -> std::io::Result<Self> {
+        Self::start(ready.owner.clone(), DEADLINE, None)
+    }
+
     #[cfg(test)]
     pub(crate) fn stalled(ready: &super::ReadyJob<'_>, bound: Duration, gate: Arc<Notify>) -> Self {
         Self::start(ready.owner.clone(), bound, Some(gate)).expect("persistence worker")

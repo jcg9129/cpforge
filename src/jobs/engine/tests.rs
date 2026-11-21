@@ -1,5 +1,5 @@
 use super::*;
-use crate::jobs::{prepare_build_job, prepare_job};
+use crate::jobs::{ReadyJob, prepare_build_job, prepare_job};
 use crate::storage::inputs::CapturedSource;
 use crate::storage::prune::PrunePolicy;
 use crate::supervisor::{self, CancelToken, Stream};
@@ -1941,4 +1941,34 @@ fn caught_post_freeze_panic_preserves_report_and_abandons_delivery() {
     let bytes = String::from_utf8(stream.into_inner()).unwrap();
     assert!(!bytes.contains("\"event\":\"report\""));
     assert!(!bytes.contains("\"event\":\"job_finished\""));
+}
+
+#[test]
+fn cancelled_command_iteration_marks_remaining_iterations_cancelled() {
+    runtime(async {
+        for keep_going in [false, true] {
+            let f = Fixture::new();
+            let engine = command_engine(&f, CommandKind::Cmd, 3, keep_going);
+            let cancel = engine.cancellation();
+            let (entered, ready) = oneshot::channel();
+            let mut fake = Fake {
+                entered: Some(entered),
+                ..Fake::with([Behavior::WaitCancel])
+            };
+            let (report, ()) = tokio::join!(run(engine, &mut fake), async {
+                ready.await.unwrap();
+                cancel.request_cancel(CancelSource::Console);
+            });
+            assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
+            assert!(
+                report.data().executions[1..]
+                    .iter()
+                    .all(|e| e.result.coverage
+                        == Coverage::Skipped {
+                            reason: SkipReason::Cancelled
+                        })
+            );
+            assert_eq!(fake.runs.len(), 1);
+        }
+    });
 }

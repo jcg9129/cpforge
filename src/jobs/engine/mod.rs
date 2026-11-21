@@ -63,7 +63,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::build::{self, PlannedTarget, ValidatedBuild};
 use crate::config::{CapPolicy, Comparator, Platform};
-use crate::jobs::ReadyJob;
+use crate::jobs::ReadyExecutionJob;
 use crate::report::{
     self, BuildResult, CheckAdmission, Comparison, Coverage, ExecutionResult, InternalFailure,
     InternalLocus, Invariant, JobKind, JobVerdict, NotStartedReason, PostBuild, RunClass,
@@ -135,7 +135,7 @@ type Observer = dyn Fn(Point) + Send + Sync;
 
 #[derive(Debug)]
 pub struct Engine<'probe> {
-    ready: ReadyJob<'probe>,
+    ready: ReadyExecutionJob<'probe>,
     plan: Vec<PlannedExecution>,
     kind: JobKind,
     comparator: Option<Comparator>,
@@ -160,7 +160,11 @@ impl std::fmt::Debug for Observation {
 }
 
 impl<'probe> Engine<'probe> {
-    pub fn new(ready: ReadyJob<'probe>, request: JobRequest) -> Result<Self, PlanError> {
+    pub fn new(
+        ready: impl Into<ReadyExecutionJob<'probe>>,
+        request: JobRequest,
+    ) -> Result<Self, PlanError> {
+        let ready = ready.into();
         let cancel = CancelState::at(ready.started);
         Self::with_cancellation(ready, request, cancel)
     }
@@ -168,15 +172,16 @@ impl<'probe> Engine<'probe> {
     /// Use the invocation state installed before registration, preserving any
     /// cancellation received during admission or capture.
     pub fn with_cancellation(
-        ready: ReadyJob<'probe>,
+        ready: impl Into<ReadyExecutionJob<'probe>>,
         request: JobRequest,
         mut cancel: CancelState,
     ) -> Result<Self, PlanError> {
         // Report timing runs from admission (step 1) to F, as in `new`; the
         // shared verdict state and token are those installed earlier.
+        let ready = ready.into();
         cancel.start = ready.started;
         let mut plan = Vec::new();
-        let has_build = matches!(&ready.planned_target, PlannedTarget::Build(_));
+        let has_build = matches!(&ready.planned_target, Some(PlannedTarget::Build(_)));
         let (kind, comparator, keep_going, needs_build) = match &request {
             JobRequest::Build => (JobKind::Build, None, true, true),
             JobRequest::Test { comparator } => {
@@ -379,8 +384,9 @@ impl<'probe> Engine<'probe> {
             validated: None,
         };
         match ready.planned_target {
-            PlannedTarget::Build(pending) => target.pending = Some(pending),
-            PlannedTarget::BuildFree(free) => target.free = Some(free),
+            Some(PlannedTarget::Build(pending)) => target.pending = Some(pending),
+            Some(PlannedTarget::BuildFree(free)) => target.free = Some(free),
+            None => {}
         }
         let context = Context {
             dir: &ready.dir,
@@ -390,6 +396,7 @@ impl<'probe> Engine<'probe> {
             cancel: &cancel,
             events: &events,
             output_events,
+            cwd_bytes: ready.cwd_bytes,
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer: observer.as_ref(),
         };
@@ -408,7 +415,17 @@ impl<'probe> Engine<'probe> {
         let report_reservation = ready.budget.reserve(report_bytes).ok();
         let report_refused = report_reservation.is_none();
         let planned_count = plan.len() as u32;
+        let generated: Vec<_> = plan
+            .iter()
+            .filter_map(|p| match &p.recipe {
+                Recipe::Deferred(stage) => Some(stage.clone()),
+                _ => None,
+            })
+            .collect();
         for planned in plan {
+            if kind == JobKind::Cmd && executions.len() == 1 {
+                crate::storage::crash::barrier("command.between_iterations");
+            }
             let earlier_retention_refusal = admission_closed;
             #[cfg(any(test, feature = "storage-test-hooks"))]
             context.phase_point(Point::BeforeAdmission(planned.index));
@@ -421,6 +438,8 @@ impl<'probe> Engine<'probe> {
                 )
             {
                 Some(SkipReason::BuildNotSucceeded)
+            } else if cancel.lock().intent.is_some() {
+                Some(SkipReason::Cancelled)
             } else if stopped {
                 Some(SkipReason::StopPolicy)
             } else {
@@ -493,6 +512,22 @@ impl<'probe> Engine<'probe> {
                         Err(_) => post.invariant = Some(Invariant::BuildEvidence),
                     }
                 }
+                if target.validated.is_some() {
+                    for generated in &generated {
+                        if let Err(error) = generated
+                            .as_ref()
+                            .clone()
+                            .complete(&crate::exec::NativeProbe)
+                        {
+                            post = PostBuild::from_failure_kind(
+                                &build::BuildFailureKind::GeneratedProgramNotLaunchable(error),
+                                root.as_deref().expect("admitted build output root"),
+                            );
+                            target.validated = None;
+                            break;
+                        }
+                    }
+                }
                 let result = report::build_result(&execution.result, &post);
                 if let BuildResult::InternalError { invariant } = result {
                     record_internal(&cancel, invariant, InternalLocus::Build);
@@ -553,8 +588,28 @@ impl<'probe> Engine<'probe> {
                             ExecutionRecord::NotStarted(_) => None,
                         }),
                         budgets: vec![
-                            (report::Stream::Stdout, ready.target.run.stdout.bytes.value),
-                            (report::Stream::Stderr, ready.target.run.stderr.bytes.value),
+                            (
+                                report::Stream::Stdout,
+                                ready
+                                    .target
+                                    .as_ref()
+                                    .expect("test target")
+                                    .run
+                                    .stdout
+                                    .bytes
+                                    .value,
+                            ),
+                            (
+                                report::Stream::Stderr,
+                                ready
+                                    .target
+                                    .as_ref()
+                                    .expect("test target")
+                                    .run
+                                    .stderr
+                                    .bytes
+                                    .value,
+                            ),
                         ],
                         cleanup_unverified: execution
                             .summary
@@ -625,6 +680,28 @@ impl<'probe> Engine<'probe> {
         }
         if let Some(warning) = warnings::cleanup(&executions) {
             warnings.push(warning);
+        }
+        for execution in &executions {
+            if let Some(bytes) = execution
+                .summary
+                .as_ref()
+                .and_then(|s| s.cwd_overflow_bytes)
+            {
+                if details.warnings.len() == 24 {
+                    details.warnings_dropped += 1;
+                    continue;
+                }
+                details.warnings.push(WireWarning {
+                    kind: WarningKind::Retention {
+                        detail: "cwd_overflow",
+                        run: execution.run.as_ref().map(|r| r.as_str().to_owned()),
+                        bytes,
+                    },
+                    message: format!(
+                        "CwdOverflow: working directory exceeded its byte limit ({bytes} bytes)"
+                    ),
+                });
+            }
         }
         let primary: Vec<_> = executions.iter().map(|e| e.result.clone()).collect();
         let test_verdicts: Vec<_> = tests.iter().filter_map(|t| t.verdict.clone()).collect();
@@ -757,7 +834,7 @@ impl<'probe> Engine<'probe> {
                 warnings.push(Warning::LateCancellation);
             }
             let warning_slots = 24_usize.saturating_sub(details.warnings.len());
-            details.warnings_dropped = warnings.len().saturating_sub(warning_slots) as u32;
+            details.warnings_dropped += warnings.len().saturating_sub(warning_slots) as u32;
             warnings.truncate(warning_slots);
             details.pre_delivery_exit = pre_delivery_exit(kind, result.verdict, cancellation);
             let report = FinalizedReport {
@@ -777,9 +854,9 @@ impl<'probe> Engine<'probe> {
                     },
                     workspace: ready.workspace,
                     problem: ready.problem,
-                    target: capture_enabled.then_some(ready.target),
+                    target: ready.target.filter(|_| capture_enabled),
                     comparator,
-                    capture: capture_enabled.then_some(ready.capture_report),
+                    capture: ready.capture_report.filter(|_| capture_enabled),
                     build,
                     executions,
                     tests,
@@ -855,6 +932,7 @@ struct Context<'a> {
     cancel: &'a CancelState,
     events: &'a Events,
     output_events: bool,
+    cwd_bytes: Option<u64>,
     #[cfg(any(test, feature = "storage-test-hooks"))]
     observer: Option<&'a Observation>,
 }
@@ -932,6 +1010,17 @@ impl Context<'_> {
                             stage.cwd = directory.join("cwd");
                         }
                         Ok(stage)
+                    }
+                    Recipe::Deferred(stage) => {
+                        let mut resolved = stage
+                            .as_ref()
+                            .clone()
+                            .complete(&crate::exec::NativeProbe)
+                            .map_err(|_| ())?;
+                        if !resolved.shared_cwd {
+                            resolved.cwd = directory.join("cwd");
+                        }
+                        Ok(resolved)
                     }
                     Recipe::TargetRun => {
                         if let Some(build) = &target.validated {
@@ -1121,7 +1210,20 @@ impl Context<'_> {
                 {
                     return Err(Invariant::SummaryUnderivable);
                 }
-                let input = record.input(matches!(plan.role, Role::Test { .. }), policies);
+                let mut input = record.input(matches!(plan.role, Role::Test { .. }), policies);
+                if let Some(limit) = self.cwd_bytes.filter(|_| {
+                    plan.stage != Stage::Build
+                        && spec.as_ref().is_some_and(|s| !s.resolved.shared_cwd)
+                }) {
+                    let guard = crate::storage::WorkspaceGuard::leased(self.owner);
+                    let cwd = directory.join("cwd");
+                    if let Ok(measured) = crate::storage::measure_tree(&guard, &cwd) {
+                        if measured.bytes > limit {
+                            input.cwd_overflow_bytes = Some(measured.bytes);
+                            let _ = crate::storage::remove_tree(&guard, &cwd);
+                        }
+                    }
+                }
                 result.class = Some(report::classify_run(&input));
                 #[cfg(any(test, feature = "storage-test-hooks"))]
                 self.point(Point::BeforeSummary(plan.index));
@@ -1360,39 +1462,50 @@ fn summary_observation(record: &ExecutionRecord, job: &Path, setup: Duration) ->
 }
 
 fn report_details(
-    ready: &ReadyJob<'_>,
+    ready: &ReadyExecutionJob<'_>,
     capture: bool,
     comparator: Option<Comparator>,
     kind: JobKind,
 ) -> ReportDetails {
-    let id = ready
-        .problem
-        .id
-        .strip_prefix("local:")
-        .unwrap_or(&ready.problem.id);
-    let deadline = &ready.target.run.deadline.milliseconds;
-    let source = match &deadline.provenance {
-        crate::config::Provenance::Cli { .. } => "cli",
-        crate::config::Provenance::Derived { .. } => "derived",
-        crate::config::Provenance::BuiltIn => "default",
-        _ => "configured",
-    };
+    let target = ready.target.as_ref().filter(|_| capture);
     ReportDetails {
-        problem: Problem {
-            identity: format!("local:{id}"),
-            name: ready.report.problem_name.clone(),
-            kind: ready.report.problem_kind.clone(),
-            dir: ready.problem.dir.clone(),
-        },
-        target: capture.then(|| Target {
-            name: ready.report.target_name.clone(),
-            language: Some(ready.target.language.value.clone()),
-            profile: ready.target.profile.as_ref().map(|p| p.value.clone()),
-            build_free: ready.target.build.is_none(),
-            compare: comparator,
-            run_deadline: Some((deadline.value.saturating_mul(1000), source)),
-            published_limits: ready.report.published_limits,
-            local_limits: configured_limits(&ready.target.run.limits),
+        problem: ready
+            .problem
+            .as_ref()
+            .zip(ready.report.as_ref())
+            .map(|(problem, report)| Problem {
+                identity: format!(
+                    "local:{}",
+                    problem.id.strip_prefix("local:").unwrap_or(&problem.id)
+                ),
+                name: report.problem_name.clone(),
+                kind: report.problem_kind.clone(),
+                dir: problem.dir.clone(),
+            }),
+        target: target.map(|target| {
+            let deadline = &target.run.deadline.milliseconds;
+            let source = match &deadline.provenance {
+                crate::config::Provenance::Cli { .. } => "cli",
+                crate::config::Provenance::Derived { .. } => "derived",
+                crate::config::Provenance::BuiltIn => "default",
+                _ => "configured",
+            };
+            Target {
+                name: ready
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.target_name.clone()),
+                language: Some(target.language.value.clone()),
+                profile: target.profile.as_ref().map(|p| p.value.clone()),
+                build_free: target.build.is_none(),
+                compare: comparator,
+                run_deadline: Some((deadline.value.saturating_mul(1000), source)),
+                published_limits: ready
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.published_limits),
+                local_limits: configured_limits(&target.run.limits),
+            }
         }),
         fingerprints: None,
         fact: (kind == JobKind::Test).then_some(Fact {

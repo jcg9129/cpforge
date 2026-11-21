@@ -790,8 +790,11 @@ repeat = 5
 - **Context requirements** are derived from **all** fields: a selected
   problem is needed iff any placeholder of §5.2 needs one, `cwd.selector =
   "problem"`, `needs_build` or `for_each_test`; a workspace iff any of those,
-  `{workspace}` or `cwd.selector = "workspace"`. Otherwise the command runs
-  anywhere.
+  `{workspace}` or `cwd.selector = "workspace"`. Otherwise the command needs
+  no problem. In the CLI foundation every `cpf cmd` still needs a workspace,
+  because its job directory lives there (storage contract §6): outside a
+  workspace it is refused before admission (workspace class, exit 8).
+  Running such commands outside any workspace is a later design.
 - **Exit status of `cpf cmd`:** selected by report contract §5.2, whose
   precedence governs. In its terms: usage 2; forced cancellation per report
   contract §5.3; an internal failure 70; a delivery failure of

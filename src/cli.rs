@@ -27,6 +27,17 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run a configured command in a managed job.
+    Cmd {
+        name: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[command(flatten)]
+        machine: MachineArgs,
+        /// Arguments appended verbatim to the configured command.
+        #[arg(last = true)]
+        extra: Vec<std::ffi::OsString>,
+    },
     /// Compile the selected problem in a fresh job directory.
     Build {
         /// Select a language profile for this build.

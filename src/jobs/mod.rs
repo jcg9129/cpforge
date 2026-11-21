@@ -102,6 +102,97 @@ pub struct ReadyJob<'probe> {
     pub prune_report: AdmissionReport,
 }
 
+/// Engine inputs shared by target jobs and commands that need no target.
+/// Only preparation can construct this capability.
+#[derive(Debug)]
+pub struct ReadyExecutionJob<'probe> {
+    pub(crate) owner: JobOwner,
+    pub(crate) workspace: PathBuf,
+    pub(crate) problem: Option<ProblemBinding>,
+    pub(crate) report: Option<engine::ReportPresentation>,
+    pub(crate) target: Option<TargetPlan>,
+    pub(crate) platform: Platform,
+    pub(crate) id: JobId,
+    pub(crate) started_at: std::time::SystemTime,
+    pub(crate) started: std::time::Instant,
+    pub(crate) dir: PathBuf,
+    pub(crate) sequence: (Epoch, u64),
+    pub(crate) manifest: FrozenManifest,
+    pub(crate) capture_report: Option<engine::CaptureReport>,
+    pub(crate) planned_target: Option<PlannedTarget<'probe>>,
+    pub(crate) budget: Arc<JobBudget>,
+    pub(crate) prune_report: AdmissionReport,
+    pub(crate) cwd_bytes: Option<u64>,
+}
+
+impl<'probe> From<ReadyJob<'probe>> for ReadyExecutionJob<'probe> {
+    fn from(ready: ReadyJob<'probe>) -> Self {
+        Self {
+            owner: ready.owner,
+            workspace: ready.workspace,
+            problem: Some(ready.problem),
+            report: Some(ready.report),
+            target: Some(ready.target),
+            platform: ready.platform,
+            id: ready.id,
+            started_at: ready.started_at,
+            started: ready.started,
+            dir: ready.dir,
+            sequence: ready.sequence,
+            manifest: ready.manifest,
+            capture_report: Some(ready.capture_report),
+            planned_target: Some(ready.planned_target),
+            budget: ready.budget,
+            prune_report: ready.prune_report,
+            cwd_bytes: None,
+        }
+    }
+}
+
+/// Freeze a command's selected tests without resolving or capturing a target.
+/// As with target preparation, the workspace lock has already been released.
+pub(crate) fn prepare_command_job(
+    registered: RegisteredJob,
+    workspace: PathBuf,
+    selected: Option<(ProblemBinding, engine::ReportPresentation)>,
+    tests: &[crate::names::Identifier],
+) -> Result<ReadyExecutionJob<'static>, ReadyError> {
+    let manifest = if tests.is_empty() {
+        FrozenManifest::empty()
+    } else {
+        let (problem, _) = selected
+            .as_ref()
+            .expect("test selection requires a problem");
+        crate::tests_store::TestStore::new(problem.dir.clone())
+            .freeze_into(tests, &registered.inputs())
+            .map_err(|error| ReadyError::Freeze(FreezeInputsError::Tests(error)))?
+    };
+    registered
+        .inputs()
+        .ensure_active()
+        .map_err(|_| ReadyError::FailedInputs)?;
+    let (problem, report) = selected.map_or((None, None), |(p, r)| (Some(p), Some(r)));
+    Ok(ReadyExecutionJob {
+        owner: registered.owner,
+        workspace,
+        problem,
+        report,
+        target: None,
+        platform: Platform::host(),
+        id: registered.id,
+        started_at: registered.started_at,
+        started: registered.started,
+        dir: registered.dir,
+        sequence: registered.sequence,
+        manifest,
+        capture_report: None,
+        planned_target: None,
+        budget: registered.budget,
+        prune_report: registered.prune_report,
+        cwd_bytes: None,
+    })
+}
+
 #[derive(Debug)]
 pub enum ReadyError {
     WrongJob {

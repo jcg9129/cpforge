@@ -44,6 +44,19 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
         .into());
     }
     match cli.command {
+        Some(Command::Cmd {
+            name,
+            profile,
+            machine,
+            extra,
+        }) => {
+            return job_command::run(
+                &job_command::NamedCommand { name, extra },
+                cli.problem.as_deref(),
+                profile,
+                machine,
+            );
+        }
         Some(Command::Build { profile, machine }) => {
             return job_command::run(
                 &job_command::BuildCommand,

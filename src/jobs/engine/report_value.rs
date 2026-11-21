@@ -117,7 +117,7 @@ pub struct PreDeliveryExit {
 }
 #[derive(Clone, Debug)]
 pub struct ReportDetails {
-    pub problem: Problem,
+    pub problem: Option<Problem>,
     pub target: Option<Target>,
     pub fingerprints: Option<([u8; 32], [u8; 32])>,
     pub fact: Option<Fact>,

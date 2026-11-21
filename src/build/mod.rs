@@ -315,6 +315,15 @@ pub enum PlannedTarget<'probe> {
     Build(PendingBuild<'probe>),
 }
 
+impl PlannedTarget<'_> {
+    pub(crate) fn command_bindings(&self) -> TargetBindings {
+        match self {
+            Self::Build(pending) => pending.recipe.bindings.clone(),
+            Self::BuildFree(free) => free.recipe.bindings.clone(),
+        }
+    }
+}
+
 /// A resolved build-free run recipe, with no output root or build identity.
 #[derive(Debug)]
 pub struct PreflightedBuildFree {
@@ -452,6 +461,10 @@ pub(crate) struct TargetPreflight {
     layout: Option<ArtifactLayout>,
 }
 impl TargetPreflight {
+    pub(crate) fn command_bindings(&self) -> TargetBindings {
+        self.recipe.bindings.clone()
+    }
+
     pub(crate) fn source_stage(&self) -> (&ResolvedStage, &ExpandedArguments) {
         let (resolution, arguments) = self.build.as_ref().unwrap_or(&self.run);
         let Resolution::Resolved(stage) = resolution else {

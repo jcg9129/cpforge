@@ -165,7 +165,7 @@ pub enum Resolution {
 /// Private pending state exposes no launchable program. The orchestrator calls
 /// `complete` only after the known producer succeeded; this type cannot observe
 /// producer success itself. Completion uses the frozen stage environment.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DeferredStage {
     prepared: PreparedStage,
     platform: Platform,

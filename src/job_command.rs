@@ -5,18 +5,24 @@
 //! commands supply phase hooks (build uses `NoHooks`, test can publish facts/hooks).
 //! No executor can see original source bindings or an incomplete capture.
 
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::build::{self, PlanInputs};
 use crate::cancel_signals::CancelSignals;
 use crate::config::{
-    ConfigRequest, Environment, LoadedConfig, Operation, Platform, TargetPlan, load_config,
+    CommandPlan, ConfigRequest, Environment, LoadedConfig, Operation, Platform, Stdin, TargetPlan,
+    load_config,
 };
 use crate::error::Error;
-use crate::exec::{Baseline, InvocationDirs, NativeProbe, ProblemBinding};
+use crate::exec::{
+    self, Baseline, CommandBindings, Context, InvocationDirs, LanguageBinding, NativeProbe,
+    ProblemBinding, Resolution, TargetBindings, TestBinding,
+};
 use crate::exit::{ExitCode, ExitInputs, exit_status};
 use crate::jobs::engine::{
     CancelState, Engine, ExecutionRecord, FinalizedReport, JobIdentity, JobRequest, NoHooks,
@@ -43,6 +49,9 @@ use crate::transport::{self, Delivery, MachineArgs, MachineMode};
 pub trait JobCommand {
     fn kind(&self) -> JobKind;
     fn operation(&self) -> Operation;
+    fn named(&self) -> Option<(&str, &[OsString])> {
+        None
+    }
     fn deadline_ms(&self) -> Result<Option<u64>, Error> {
         Ok(None)
     }
@@ -64,6 +73,43 @@ pub trait JobCommand {
     }
     /// Bounded by the stderr writer, one rendered line per entry.
     fn summary(&self, report: &FinalizedReport) -> Vec<String>;
+}
+
+#[derive(Debug)]
+pub struct NamedCommand {
+    pub name: String,
+    pub extra: Vec<OsString>,
+}
+impl JobCommand for NamedCommand {
+    fn kind(&self) -> JobKind {
+        JobKind::Cmd
+    }
+    fn operation(&self) -> Operation {
+        Operation::Other
+    }
+    fn named(&self) -> Option<(&str, &[OsString])> {
+        Some((&self.name, &self.extra))
+    }
+    fn select_tests(
+        &self,
+        _selected: &Selected,
+        _config: &LoadedConfig,
+        _target: &TargetPlan,
+    ) -> Result<Vec<Identifier>, Error> {
+        unreachable!("named commands select from their command plan")
+    }
+    fn request(&self, _target: &TargetPlan) -> JobRequest {
+        unreachable!("named commands bind iterations after freezing")
+    }
+    fn summary(&self, report: &FinalizedReport) -> Vec<String> {
+        if report.data().result.verdict == JobVerdict::BuildFailed {
+            return build_summary(report);
+        }
+        vec![crate::report::render_label(&label(
+            LabelSubject::Job(report.data().result.verdict),
+            &DisplayContext::default(),
+        ))]
+    }
 }
 
 #[derive(Debug)]
@@ -348,70 +394,26 @@ pub fn run(
     let outcome = (|| {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             return Err(Error::Infrastructure(
-                "unsupported platform: build/test/run execution requires Linux or macOS".into(),
+                "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
             ));
         }
         let cwd = std::env::current_dir()
             .map_err(|e| Error::Workspace(format!("cannot read current directory: {e}")))?;
         let root = crate::workspace::find_root(&cwd)?;
         refusal.workspace = Some(root.clone());
-        let selected = selection::resolve(&root, &cwd, problem)?;
-        let presentation = presentation(&selected)?;
-        refusal.problem = Some(crate::jobs::engine::Problem {
-            identity: selected.identity.to_string(),
-            name: presentation.problem_name.clone(),
-            kind: presentation.problem_kind.clone(),
-            dir: selected.dir.clone(),
-        });
-        if presentation.problem_kind != "batch" {
-            return Err(Error::Config(format!(
-                "problem kind {:?}: build/test/run unsupported in this version",
-                presentation.problem_kind
-            )));
-        }
-        let config = load_config(
-            &selected.config_request(ConfigRequest {
-                environment: Environment {
-                    home: std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                        .map(PathBuf::from),
-                    xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
-                    appdata: std::env::var_os("APPDATA"),
-                },
-                current_dir: cwd,
-                platform: Platform::host(),
-                operation: command.operation(),
-                profile,
-                deadline_ms: command.deadline_ms()?,
-                ..ConfigRequest::default()
-            }),
-        );
-        let target = config.target().map_err(|error| {
-            refusal.diagnostics = diagnostics(&error.diagnostics);
-            Error::Config(error.to_string())
-        })?;
+        let plan = plan_invocation(command, &root, &cwd, problem, profile, &mut refusal)?;
+        let InvocationPlan {
+            config,
+            selected,
+            presentation,
+            target,
+            named,
+            tests,
+            baseline,
+        } = plan;
         let retention = config
             .retention()
             .map_err(|e| Error::Config(e.to_string()))?;
-        let tests = command.select_tests(&selected, &config, &target)?;
-        let primary_runs = tests.len().checked_add(usize::from(kind == JobKind::Run));
-        if primary_runs.is_none_or(|count| exceeds_run_cap(count, target.build.is_some())) {
-            return Err(Error::Config(
-                "planned runs exceed the 10 000 execution cap".into(),
-            ));
-        }
-        let request = command.request(&target);
-        let baseline = Baseline::capture();
-        let binding = ProblemBinding {
-            dir: selected.dir.clone(),
-            id: selected.identity.to_string(),
-        };
-        preflight(
-            &selected,
-            &target,
-            &baseline,
-            &binding,
-            retention.build_bytes.value,
-        )?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -427,7 +429,7 @@ pub fn run(
                 .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
         );
         check_cancel(&cancel)?;
-        let lock = WorkspaceLock::new(&selected.root)?;
+        let lock = WorkspaceLock::new(&root)?;
         let registered = register_job(
             lock.acquire("job command")?,
             PrunePolicy::new(retention.keep_jobs.value, retention.workspace_bytes.value),
@@ -447,32 +449,95 @@ pub fn run(
         });
         refusal.timing.started_at = registered.started_at;
         check_cancel(&cancel)?;
-        let inputs = PrepareJobInputs {
-            workspace_root: selected.root,
-            problem: binding,
-            report: presentation,
-            baseline,
-            platform: Platform::host(),
-            build_bytes: retention.build_bytes.value,
-            probe: &NativeProbe,
-        };
-        let ready = if matches!(kind, JobKind::Build | JobKind::Run) {
-            prepare_build_job(registered, &target, inputs)
+        let mut hooks: Box<dyn PhaseHooks> = Box::new(NoHooks);
+        let mut ready: crate::jobs::ReadyExecutionJob<'_> = if let Some(target) = target
+            .as_ref()
+            .filter(|_| named.as_ref().is_none_or(|p| p.needs_build.value))
+        {
+            let selected = selected.as_ref().expect("target selection");
+            let inputs = PrepareJobInputs {
+                workspace_root: root.clone(),
+                problem: problem_binding(selected),
+                report: presentation.clone().expect("problem presentation"),
+                baseline: baseline.clone(),
+                platform: Platform::host(),
+                build_bytes: retention.build_bytes.value,
+                probe: &NativeProbe,
+            };
+            // Test jobs freeze even an empty selection, as before; build, raw
+            // run and commands without tests only capture the target.
+            let ready = if matches!(kind, JobKind::Build | JobKind::Run)
+                || (kind == JobKind::Cmd && tests.is_empty())
+            {
+                prepare_build_job(registered, target, inputs)
+            } else {
+                let frozen = registered
+                    .inputs()
+                    .freeze(
+                        &TestStore::new(inputs.problem.dir.clone()),
+                        &tests,
+                        &CapturedSource::from_target(target),
+                        &inputs.problem.dir,
+                    )
+                    .map_err(|e| Error::Workspace(e.to_string()))?;
+                prepare_job(registered, frozen, target, inputs)
+            }
+            .map_err(ready_error)?;
+            hooks = command.phase_hooks(&ready, &config)?;
+            ready.into()
         } else {
-            let frozen = registered
-                .inputs()
-                .freeze(
-                    &TestStore::new(inputs.problem.dir.clone()),
-                    &tests,
-                    &CapturedSource::from_target(&target),
-                    &inputs.problem.dir,
-                )
-                .map_err(|e| Error::Workspace(e.to_string()))?;
-            prepare_job(registered, frozen, &target, inputs)
-        }
-        .map_err(ready_error)?;
-        let mut hooks = command.phase_hooks(&ready, &config)?;
-        let mut persistence = JobPersistence::new(&ready)
+            crate::jobs::prepare_command_job(
+                registered,
+                root.clone(),
+                selected
+                    .as_ref()
+                    .zip(presentation)
+                    .map(|(p, r)| (problem_binding(p), r)),
+                &tests,
+            )
+            .map_err(ready_error)?
+        };
+        // Commands measure each owned `cwd/` after the run; other job kinds keep
+        // their existing behaviour.
+        ready.cwd_bytes = (kind == JobKind::Cmd).then_some(retention.cwd_bytes.value);
+        let request = if let Some(named) = &named {
+            let bindings = ready.planned_target.as_ref().map(|p| p.command_bindings());
+            let frozen: Vec<_> = ready
+                .manifest
+                .entries()
+                .iter()
+                .map(|t| {
+                    (
+                        t.id.to_string(),
+                        TestBinding {
+                            input: t.input.path.clone(),
+                            answer: match &t.answer {
+                                crate::tests_store::FrozenAnswer::Absent => None,
+                                crate::tests_store::FrozenAnswer::Present { path, .. } => {
+                                    Some(path.clone())
+                                }
+                            },
+                        },
+                    )
+                })
+                .collect();
+            command_request(
+                named,
+                command.named().expect("named command").1,
+                CommandInputs {
+                    job: &ready.dir,
+                    workspace: &root,
+                    problem: ready.problem.clone(),
+                    target: target.as_ref(),
+                    bindings,
+                    tests: &frozen,
+                    baseline: &baseline,
+                },
+            )?
+        } else {
+            command.request(target.as_ref().expect("target job"))
+        };
+        let mut persistence = JobPersistence::for_execution(&ready)
             .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
         let engine = Engine::with_cancellation(ready, request, cancel.clone())
             .map_err(|e| Error::Config(e.to_string()))?
@@ -589,6 +654,385 @@ pub fn run(
     }
 }
 
+struct InvocationPlan {
+    config: LoadedConfig,
+    selected: Option<Selected>,
+    presentation: Option<ReportPresentation>,
+    target: Option<TargetPlan>,
+    named: Option<CommandPlan>,
+    tests: Vec<Identifier>,
+    baseline: Baseline,
+}
+
+fn problem_binding(selected: &Selected) -> ProblemBinding {
+    ProblemBinding {
+        dir: selected.dir.clone(),
+        id: selected.identity.to_string(),
+    }
+}
+
+fn plan_invocation(
+    command: &impl JobCommand,
+    root: &Path,
+    cwd: &Path,
+    problem: Option<&str>,
+    profile: Option<String>,
+    refusal: &mut wire::Refusal,
+) -> Result<InvocationPlan, Error> {
+    let mut request = ConfigRequest {
+        environment: Environment {
+            home: std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(PathBuf::from),
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
+            appdata: std::env::var_os("APPDATA"),
+        },
+        workspace_root: Some(root.to_owned()),
+        current_dir: cwd.to_owned(),
+        platform: Platform::host(),
+        operation: command.operation(),
+        profile,
+        deadline_ms: command.deadline_ms()?,
+        ..ConfigRequest::default()
+    };
+    // Commands are declared at user/workspace level. Resolve their requirements
+    // before attempting selection, so no saved selection or target is required
+    // by an independent command.
+    let initial = command.named().map(|_| {
+        load_config(&ConfigRequest {
+            profile: None,
+            ..request.clone()
+        })
+    });
+    let mut named = initial
+        .as_ref()
+        .zip(command.named())
+        .map(|(initial, (name, _))| initial.command(name))
+        .transpose()
+        .map_err(|e| {
+            refusal.diagnostics = diagnostics(&e.diagnostics);
+            Error::Config(e.to_string())
+        })?;
+    let selected = if named.as_ref().is_none_or(|p| p.context.problem) || problem.is_some() {
+        match selection::resolve(root, cwd, problem) {
+            // A command whose fields require a problem, run without one, is
+            // missing context: a plan error (C §5.2, §8.1; report §5.1 row 7).
+            Err(selection::SelectionError::NoSelection) if named.is_some() => {
+                return Err(Error::Config(format!(
+                    "command {:?} requires a selected problem: {}",
+                    command.named().map_or("", |(name, _)| name),
+                    selection::SelectionError::NoSelection
+                )));
+            }
+            result => Some(result?),
+        }
+    } else {
+        None
+    };
+    let presentation = selected.as_ref().map(presentation).transpose()?;
+    refusal.problem =
+        selected
+            .as_ref()
+            .zip(presentation.as_ref())
+            .map(|(p, r)| crate::jobs::engine::Problem {
+                identity: p.identity.to_string(),
+                name: r.problem_name.clone(),
+                kind: r.problem_kind.clone(),
+                dir: p.dir.clone(),
+            });
+    if let Some(selected) = &selected {
+        request = selected.config_request(request);
+    }
+    let config = match initial {
+        Some(initial) if selected.is_none() => initial,
+        _ => load_config(&request),
+    };
+    if let Some((name, _)) = command.named() {
+        named = Some(config.command(name).map_err(|e| {
+            refusal.diagnostics = diagnostics(&e.diagnostics);
+            Error::Config(e.to_string())
+        })?);
+    }
+    if named
+        .as_ref()
+        .is_none_or(|p| p.needs_build.value || p.for_each_test.value)
+        && presentation
+            .as_ref()
+            .is_some_and(|r| r.problem_kind != "batch")
+    {
+        return Err(Error::Config(format!(
+            "problem kind {:?}: build/test/run unsupported in this version",
+            presentation.as_ref().expect("presentation").problem_kind
+        )));
+    }
+    let needs_target = named.as_ref().is_none_or(|p| {
+        p.needs_build.value
+            || p.stage
+                .deferred
+                .iter()
+                .any(|v| v.placeholder == crate::config::Placeholder::Entry)
+    });
+    let target = needs_target
+        .then(|| config.target())
+        .transpose()
+        .map_err(|e| {
+            refusal.diagnostics = diagnostics(&e.diagnostics);
+            Error::Config(e.to_string())
+        })?;
+    let (tests, command_tests) = if let Some(named) = &named {
+        let entries = if named.for_each_test.value {
+            let selected = selected.as_ref().expect("test context");
+            TestStore::new(selected.dir.clone())
+                .catalog()
+                .map_err(Error::Workspace)?
+                .entries
+                .into_iter()
+                .filter(|t| t.enabled)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        (
+            entries.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            entries,
+        )
+    } else {
+        (
+            command.select_tests(
+                selected.as_ref().expect("selection"),
+                &config,
+                target.as_ref().expect("target"),
+            )?,
+            Vec::new(),
+        )
+    };
+    let build = named.as_ref().is_none_or(|p| p.needs_build.value)
+        && target.as_ref().is_some_and(|t| t.build.is_some());
+    let primary = if let Some(named) = &named {
+        planned_command_runs(named, tests.len(), build)?
+    } else {
+        tests
+            .len()
+            .checked_add(usize::from(command.kind() == JobKind::Run))
+    };
+    if primary.is_none_or(|count| exceeds_run_cap(count, build)) {
+        return Err(Error::Config(
+            "planned runs exceed the 10 000 execution cap".into(),
+        ));
+    }
+    let baseline = Baseline::capture();
+    let retention = config
+        .retention()
+        .map_err(|e| Error::Config(e.to_string()))?;
+    let bindings = if let Some(target) = target
+        .as_ref()
+        .filter(|_| named.as_ref().is_none_or(|p| p.needs_build.value))
+    {
+        let selected = selected.as_ref().expect("target selection");
+        Some(preflight(
+            selected,
+            target,
+            &baseline,
+            &problem_binding(selected),
+            retention.build_bytes.value,
+        )?)
+    } else {
+        None
+    };
+    if let Some(named) = &named {
+        let job = root.join(".cpforge/runs/00000000000000000-0000000000000000");
+        let frozen = command_tests
+            .iter()
+            .map(|t| {
+                (
+                    t.id.to_string(),
+                    TestBinding {
+                        input: job.join("inputs").join(format!("{}.in", t.id)),
+                        answer: matches!(t.answer, crate::tests_store::Answer::Named(_))
+                            .then(|| job.join("inputs").join(format!("{}.ans", t.id))),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        command_request(
+            named,
+            command.named().expect("named").1,
+            CommandInputs {
+                job: &job,
+                workspace: root,
+                problem: selected.as_ref().map(problem_binding),
+                target: target.as_ref(),
+                bindings,
+                tests: &frozen,
+                baseline: &baseline,
+            },
+        )?;
+    }
+    Ok(InvocationPlan {
+        config,
+        selected,
+        presentation,
+        target,
+        named,
+        tests,
+        baseline,
+    })
+}
+
+fn planned_command_runs(
+    plan: &CommandPlan,
+    tests: usize,
+    build: bool,
+) -> Result<Option<usize>, Error> {
+    if plan.for_each_test.value && tests == 0 {
+        return Err(Error::Config(
+            "for_each_test requires at least one enabled test".into(),
+        ));
+    }
+    let count = if plan.for_each_test.value { tests } else { 1 };
+    let primary = usize::try_from(plan.repeat.value)
+        .ok()
+        .and_then(|repeat| count.checked_mul(repeat));
+    if primary.is_none_or(|count| exceeds_run_cap(count, build)) {
+        return Err(Error::Config(
+            "planned runs exceed the 10 000 execution cap".into(),
+        ));
+    }
+    Ok(primary)
+}
+
+struct CommandInputs<'a> {
+    job: &'a Path,
+    workspace: &'a Path,
+    problem: Option<ProblemBinding>,
+    target: Option<&'a TargetPlan>,
+    bindings: Option<TargetBindings>,
+    tests: &'a [(String, TestBinding)],
+    baseline: &'a Baseline,
+}
+
+fn command_request(
+    plan: &CommandPlan,
+    extra: &[OsString],
+    inputs: CommandInputs<'_>,
+) -> Result<JobRequest, Error> {
+    use crate::jobs::engine::{CommandKind, Iteration, Recipe, Role};
+    let mut iterations = Vec::new();
+    let mut errors = command_limit_errors(&plan.stage.limits);
+    let tests: Vec<_> = if plan.for_each_test.value {
+        inputs.tests.iter().map(Some).collect()
+    } else {
+        vec![None]
+    };
+    for test in tests {
+        for iteration in 1..=plan.repeat.value {
+            let result = (|| {
+                let context = Context::command(
+                    plan,
+                    InvocationDirs {
+                        run_cwd: inputs.job.join("run/cwd"),
+                        problem: inputs.problem.clone(),
+                        workspace: Some(inputs.workspace.to_owned()),
+                    },
+                    CommandBindings {
+                        target: inputs.bindings.clone(),
+                        test: test.map(|(_, t)| t.clone()),
+                        iteration: plan
+                            .stage
+                            .explicit_fields
+                            .contains("repeat")
+                            .then(|| NonZeroU64::new(iteration).expect("positive iteration")),
+                        language: inputs.target.map(LanguageBinding::from_target),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                let prepared = exec::prepare(
+                    &plan.stage,
+                    &context,
+                    inputs.baseline,
+                    Platform::host(),
+                    extra,
+                )
+                .map_err(|e| e.to_string())?;
+                let resolution = exec::resolve(prepared, &NativeProbe, Platform::host())
+                    .map_err(|e| e.to_string())?;
+                let recipe = match resolution {
+                    Resolution::Resolved(stage) => {
+                        stage
+                            .launch_command(Platform::host())
+                            .map_err(|e| e.to_string())?;
+                        Recipe::Resolved(Box::new(stage))
+                    }
+                    Resolution::AwaitingProducer(stage) => Recipe::Deferred(Box::new(stage)),
+                };
+                Ok::<_, String>(Iteration {
+                    role: Role::Command {
+                        test: test.map(|(id, _)| id.clone()),
+                        iteration: iteration as u32,
+                    },
+                    recipe,
+                    stdin: test
+                        .filter(|_| plan.stdin.value == Stdin::Test)
+                        .map(|(_, t)| t.input.clone()),
+                    depends_on_build: plan.needs_build.value,
+                })
+            })();
+            match result {
+                Ok(iteration) => iterations.push(iteration),
+                Err(error) => errors.push(format!(
+                    "test {} iteration {iteration}: {error}",
+                    test.map_or("(none)", |(id, _)| id.as_str())
+                )),
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(Error::Config(errors.join("\n")));
+    }
+    Ok(JobRequest::Iterations {
+        kind: CommandKind::Cmd,
+        iterations,
+        needs_build: plan.needs_build.value,
+        keep_going: plan.keep_going.value,
+    })
+}
+
+fn command_limit_errors(limits: &crate::config::Limits) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (name, value) in [
+        ("address_space", &limits.address_space),
+        ("job_commit", &limits.job_commit),
+    ] {
+        let Some(value) = value else { continue };
+        #[cfg(target_os = "linux")]
+        let supported = name == "address_space";
+        #[cfg(not(target_os = "linux"))]
+        let supported = false;
+        if !supported {
+            errors.push(format!(
+                "{}: limits.{name} unsupported on this platform",
+                value.origin
+            ));
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: sysconf takes no pointer arguments and only reads the page size.
+            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let normalised = u64::try_from(page)
+                .ok()
+                .filter(|p| *p > 0)
+                .and_then(|p| value.value.checked_add(p - 1).map(|bytes| bytes / p * p));
+            if normalised.is_none_or(|bytes| bytes == 0 || bytes >= libc::RLIM_INFINITY) {
+                errors.push(format!(
+                    "{}: limits.{name} outside the platform range after page rounding",
+                    value.origin
+                ));
+            }
+        }
+    }
+    errors
+}
+
 fn presentation(selected: &Selected) -> Result<ReportPresentation, Error> {
     let path = selected.dir.join("problem.toml");
     let record = crate::storage::read_user_record(&path, 1, |document| {
@@ -669,7 +1113,7 @@ fn preflight(
     baseline: &Baseline,
     problem: &ProblemBinding,
     build_bytes: u64,
-) -> Result<(), Error> {
+) -> Result<TargetBindings, Error> {
     // Same depth and spelling as a real job, without creating any storage.
     // The actual plan is checked again after capture; this is not a capability.
     let job = selected
@@ -717,7 +1161,7 @@ fn preflight(
         Platform::host(),
     )
     .map_err(|e| Error::Config(e.to_string()))?;
-    Ok(())
+    Ok(plan.command_bindings())
 }
 
 fn execute(

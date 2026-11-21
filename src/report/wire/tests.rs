@@ -122,12 +122,12 @@ pub(super) fn passing() -> e::ReportData {
     };
     e::ReportData {
         details: e::ReportDetails {
-            problem: Problem {
+            problem: Some(Problem {
                 identity: "local:a".into(),
                 name: "a".into(),
                 kind: "batch".into(),
                 dir: "problems/a".into(),
-            },
+            }),
             target: None,
             fingerprints: None,
             fact: Some(Fact {
@@ -152,10 +152,10 @@ pub(super) fn passing() -> e::ReportData {
         command: r::JobKind::Test,
         job: identity(),
         workspace: "workspace".into(),
-        problem: crate::exec::ProblemBinding {
+        problem: Some(crate::exec::ProblemBinding {
             dir: "problems/a".into(),
             id: "a".into(),
-        },
+        }),
         target: None,
         comparator: Some(crate::config::Comparator::Tokens),
         capture: None,
@@ -727,7 +727,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
     }
     assert!(run::supervisor_token("(+)").is_err());
     let mut report = passing();
-    report.details.problem.identity = "local:b".into();
+    report.details.problem.as_mut().unwrap().identity = "local:b".into();
     assert!(encode_report_data(&report).is_err());
 }
 

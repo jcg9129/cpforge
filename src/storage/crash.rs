@@ -32,7 +32,8 @@
 //!
 //! Pause barriers: set `CPF_STORAGE_PAUSE_AT=<name>` to print
 //! `CPF-PAUSED <name>` to stdout and block until one byte arrives on stdin.
-//! Barriers: `inputs.source_copied` (after the first captured source copy).
+//! Barriers: `inputs.source_copied` (after the first captured source copy),
+//! `command.between_iterations` (after the first command job execution).
 
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 pub(super) fn force_link_fallback() -> bool {

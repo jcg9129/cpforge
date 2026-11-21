@@ -56,6 +56,8 @@ pub enum Role {
 pub enum Recipe {
     TargetRun,
     Resolved(Box<ResolvedStage>),
+    /// Generated program, checked only after the producer has succeeded.
+    Deferred(Box<crate::exec::DeferredStage>),
 }
 
 #[derive(Clone, Debug)]
@@ -355,7 +357,7 @@ pub struct ReportData {
     pub command: JobKind,
     pub job: JobIdentity,
     pub workspace: PathBuf,
-    pub problem: ProblemBinding,
+    pub problem: Option<ProblemBinding>,
     pub target: Option<TargetPlan>,
     pub comparator: Option<Comparator>,
     pub capture: Option<CaptureReport>,
