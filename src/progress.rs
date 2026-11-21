@@ -57,12 +57,17 @@ fn bounded_line(line: &str) -> String {
 
 impl ProgressQueue {
     fn dropped(&self) {
-        let _ = self
-            .0
-            .drops
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                (value & CLOSED == 0).then_some(value.saturating_add(1).min(CLOSED - 1))
-            });
+        // A hand-written update loop: `fetch_update` is deprecated on current
+        // toolchains while its replacement is newer than the supported 1.85.
+        let drops = &self.0.drops;
+        let mut value = drops.load(Ordering::Acquire);
+        while value & CLOSED == 0 {
+            let next = value.saturating_add(1).min(CLOSED - 1);
+            match drops.compare_exchange_weak(value, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(actual) => value = actual,
+            }
+        }
     }
     /// Never waits for either the writer or queue space.
     pub fn offer(&self, line: &str) -> bool {

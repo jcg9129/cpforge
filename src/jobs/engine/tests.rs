@@ -1736,8 +1736,7 @@ fn signal_job_helper() {
     let report = runtime(async {
         let (report, ()) = tokio::join!(run(engine, &mut fake), async {
             wait.await.unwrap();
-            use std::io::Write;
-            writeln!(std::io::stderr(), "SIGNAL_READY").unwrap();
+            eprintln!("SIGNAL_READY");
         });
         report
     });
