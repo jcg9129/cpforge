@@ -229,7 +229,8 @@ mod tests {
             let start = Instant::now();
             let outcome = unix::wait(Box::new(root), controls()).await;
             assert_eq!(outcome.status, Termination::Exited { code: 3 });
-            assert!(outcome.errors.contains(&SupervisorError::Reap));
+            // A zero wait4 is retried without an error on macOS (§4.2).
+            assert!(!outcome.errors.contains(&SupervisorError::Reap));
             assert!(!outcome.errors.contains(&SupervisorError::ReapTimeout));
             assert!(start.elapsed() >= Duration::from_millis(7)); // 1 + 2 + 4 ms
             assert!(
@@ -256,7 +257,7 @@ mod tests {
                 outcome.status,
                 Termination::Signalled { signal: 9, .. }
             ));
-            assert_eq!(outcome.errors, [SupervisorError::Reap]);
+            assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
             assert!(start.elapsed() >= Duration::from_millis(7));
             assert!(!outcome.notes.contains(&Note::Transferred));
         });
