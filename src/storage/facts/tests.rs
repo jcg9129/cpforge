@@ -298,8 +298,11 @@ fn held_workspace_lock_is_a_warning_outcome() {
     fs::write(f.path(), &old).unwrap();
     let lock = WorkspaceLock::new(&f.0).unwrap();
     let _guard = lock.acquire("hold").unwrap();
+    // The update fills the fields that exist only with the test features.
+    #[allow(clippy::needless_update)]
     let options = LockOptions {
         timeout: Duration::ZERO,
+        ..LockOptions::default()
     };
     let result = publish_fact_with_options(
         &f.0,
