@@ -359,7 +359,9 @@ fn cwd_path_is_lexically_joined_not_canonicalized() {
     let target = built_target(&f, "argv = ['cc']\ncwd = { path = 'uncreated/../work' }");
     let mut encoded = Vec::new();
     encode_build(&mut encoded, target.build.as_ref().unwrap()).unwrap();
-    let path = f.0.join("uncreated").join("..").join("work");
+    // Joined as the loader joins it: the configured spelling is kept, so on
+    // Windows its `/` separators stay as written.
+    let path = f.0.join("uncreated/../work");
     let path = native_bytes(path.as_os_str());
     let mut expected = from_hex("0001000000000000000200000000000000636301");
     expected.extend_from_slice(&(path.len() as u64).to_le_bytes());
