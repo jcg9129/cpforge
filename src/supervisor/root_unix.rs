@@ -76,10 +76,16 @@ struct Lease {
     pid: i32,
     key: u64,
     capable: Arc<Mutex<bool>>,
+    #[cfg(all(test, target_os = "macos"))]
+    skip_kill: bool,
 }
 
 impl Lease {
     fn kill(&self) -> io::Result<()> {
+        #[cfg(all(test, target_os = "macos"))]
+        if self.skip_kill {
+            return Ok(());
+        }
         let capable = self.capable.lock().unwrap_or_else(|e| e.into_inner());
         if *capable {
             sys::kill_group(self.pid)
@@ -362,6 +368,8 @@ pub(in crate::supervisor) fn spawn_prepared(
         pid,
         key: admission.key(),
         capable: Arc::new(Mutex::new(true)),
+        #[cfg(all(test, target_os = "macos"))]
+        skip_kill: false,
     };
     {
         let mut leases = SIGNAL_LEASES.lock().unwrap_or_else(|e| e.into_inner());
@@ -413,6 +421,16 @@ pub(in crate::supervisor) fn spawn_prepared(
             errors,
         }),
     };
+    // Darwin reserves its entire enumeration buffer before the root can be
+    // transferred. Neither Drop nor the cleanup service needs to allocate it.
+    #[cfg(target_os = "macos")]
+    match sys::cleanup_scan(pid, None) {
+        Ok(mut scan) => {
+            scan.set_entry_delay(opts.cleanup_entry_delay);
+            root.scan = Some(scan);
+        }
+        Err(reason) => root.outcome().termination.cleanup = Cleanup::Unverified { reason },
+    }
     sys::register_observer(&mut root, pid, opts);
     Ok(root)
 }
@@ -512,6 +530,7 @@ async fn finish_observed(
     request_kill(root.lease.as_ref().unwrap(), root.outcome.as_mut().unwrap());
     let cleanup_deadline = Instant::now() + Duration::from_secs(1);
     root.cleanup_started = true;
+    #[cfg(target_os = "linux")]
     match sys::cleanup_scan(pid, root.observer.as_ref()) {
         Ok(mut scan) => {
             scan.set_entry_delay(root.opts.cleanup_entry_delay);
@@ -715,6 +734,7 @@ impl Transfer {
             record_exit(&mut self.outcome, self.deadline);
             request_kill(lease, &mut self.outcome);
             self.cleanup_started = true;
+            #[cfg(target_os = "linux")]
             match sys::cleanup_scan(lease.pid, self.observer.as_ref()) {
                 Ok(scan) => self.scan = Some(scan),
                 Err(reason) => self.outcome.termination.cleanup = Cleanup::Unverified { reason },

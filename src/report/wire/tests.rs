@@ -832,3 +832,17 @@ fn uncaptured_started_stream_is_incomplete_even_after_eof() {
     assert_eq!(value["complete"], false);
     assert!(value["file"].is_null());
 }
+
+#[test]
+fn darwin_cleanup_failures_use_contract_reason_tokens() {
+    for (reason, token) in [
+        (p::UnverifiedReason::Io, "io"),
+        (p::UnverifiedReason::InfoFailed, "info_failed"),
+        (p::UnverifiedReason::Truncated, "truncated"),
+    ] {
+        assert_eq!(
+            encode(&run::cleanup(p::Cleanup::Unverified { reason })),
+            format!(r#"{{"kind":"unverified","reason":"{token}"}}"#).as_bytes(),
+        );
+    }
+}

@@ -126,7 +126,7 @@ fn processes() -> Vec<Process> {
         .collect()
 }
 
-// Test observations only; the production Darwin verifier stays unsupported.
+// Test observations include zombies to distinguish them from live members.
 #[cfg(target_os = "macos")]
 fn process(pid: u32) -> Option<Process> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
@@ -194,16 +194,7 @@ fn allowance(milliseconds: u64) -> Duration {
 }
 
 fn expected_cleanup() -> Cleanup {
-    #[cfg(target_os = "linux")]
-    {
-        Cleanup::Confirmed
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Cleanup::Unverified {
-            reason: UnverifiedReason::Unsupported,
-        }
-    }
+    Cleanup::Confirmed
 }
 
 fn children() -> BTreeSet<u32> {
@@ -2377,6 +2368,7 @@ fn unreaped_measurements_remain_absent_and_frozen_after_late_reap() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn unverified_cleanup_marks_reaped_measurements_partial() {
     run_test(async {
@@ -2661,7 +2653,7 @@ fn linux_capabilities_report_support_and_runtime_probes() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_capabilities_advertise_kqueue_accounting_and_no_local_limits() {
+fn macos_capabilities_advertise_kqueue_cleanup_accounting_and_no_local_limits() {
     run_test(async {
         let before = fd_count();
         let capabilities = cpforge::supervisor::capabilities();
@@ -2685,6 +2677,12 @@ fn macos_capabilities_advertise_kqueue_accounting_and_no_local_limits() {
             .find(|observer| observer.kind == "kqueue")
             .unwrap();
         assert!(observer.compiled && observer.probe.is_ok());
+        let cleanup = capabilities
+            .observers
+            .iter()
+            .find(|observer| observer.kind == "libproc cleanup verification")
+            .unwrap();
+        assert!(cleanup.compiled && cleanup.probe.is_ok());
         assert_eq!(fd_count(), before);
     });
 }

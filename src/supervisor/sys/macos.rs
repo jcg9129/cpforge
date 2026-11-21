@@ -1,7 +1,6 @@
 //! Darwin native operations. No application code runs between fork and exec.
 use super::super::{
-    Cleanup, InstalledLimit, LocalLimit, NotStarted, OutputSpec, ProgramSpec, StdinSpec,
-    Termination, UnverifiedReason,
+    InstalledLimit, LocalLimit, NotStarted, OutputSpec, ProgramSpec, StdinSpec, Termination,
 };
 use super::RawRusage;
 use std::fs::File;
@@ -403,29 +402,11 @@ pub(in crate::supervisor) fn kill_root(pid: i32) -> io::Result<()> {
     }
 }
 
-/// No libproc verification is claimed until its supported views are validated.
-/// `cleanup_scan` never starts a scan, so this type is never constructed.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(in crate::supervisor) struct CleanupScan;
-impl CleanupScan {
-    pub(in crate::supervisor) fn set_entry_delay(&mut self, _delay: Duration) {}
-    pub(in crate::supervisor) fn poll(
-        &mut self,
-        _deadline: Instant,
-        _reap_deadline: Option<Instant>,
-    ) -> Option<Cleanup> {
-        Some(Cleanup::Unverified {
-            reason: UnverifiedReason::Unsupported,
-        })
-    }
-}
-pub(in crate::supervisor) fn cleanup_scan(
-    _pid: i32,
-    _observer: Option<&Observer>,
-) -> Result<CleanupScan, UnverifiedReason> {
-    Err(UnverifiedReason::Unsupported)
-}
+#[path = "macos_proc.rs"]
+mod cleanup;
+#[cfg(test)]
+pub(in crate::supervisor) use cleanup::test_members;
+pub(in crate::supervisor) use cleanup::{CleanupScan, cleanup_scan, probe_cleanup};
 
 /// Run before worker startup, like Linux's procfs fallback. Enumeration is never
 /// performed in pre_exec and never closes std's private spawn-error descriptor.

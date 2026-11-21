@@ -79,6 +79,9 @@ pub enum UnverifiedReason {
     ScanIncomplete,
     ReapDeadline,
     Unsupported,
+    Io,
+    InfoFailed,
+    Truncated,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]

@@ -198,11 +198,18 @@ pub fn capabilities() -> Capabilities {
                 probe: unsupported(),
             })
             .collect(),
-        observers: vec![Capability {
-            kind: "kqueue",
-            compiled: true,
-            probe: super::sys::macos::probe_observer().map_err(|error| error.to_string()),
-        }],
+        observers: vec![
+            Capability {
+                kind: "kqueue",
+                compiled: true,
+                probe: super::sys::macos::probe_observer().map_err(|error| error.to_string()),
+            },
+            Capability {
+                kind: "libproc cleanup verification",
+                compiled: true,
+                probe: super::sys::macos::probe_cleanup().map_err(|reason| format!("{reason:?}")),
+            },
+        ],
         deferred: [
             "cgroup accounting",
             "cgroup containment",

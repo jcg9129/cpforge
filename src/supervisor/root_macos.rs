@@ -174,12 +174,7 @@ mod tests {
             );
             let outcome = unix::wait(Box::new(root), controls()).await;
             assert_eq!(outcome.status, Termination::Exited { code: 7 });
-            assert_eq!(
-                outcome.termination.cleanup,
-                Cleanup::Unverified {
-                    reason: UnverifiedReason::Unsupported
-                }
-            );
+            assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
         });
     }
 
@@ -279,6 +274,238 @@ mod tests {
                 unix::wait(Box::new(exited), controls()).await.status,
                 Termination::Exited { code: 0 }
             );
+        });
+    }
+    struct Group {
+        root: Option<Root>,
+        pid: i32,
+        child: i32,
+        directory: std::path::PathBuf,
+    }
+
+    impl Group {
+        async fn new(zombie: bool) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::current_dir()
+                .unwrap()
+                .join("target")
+                .join(format!(
+                    "darwin-group-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed),
+                ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let child_script = if zombie {
+                "exit:0".to_owned()
+            } else {
+                format!("wait-file:{},exit:0", directory.join("child").display())
+            };
+            let root = root(
+                &[
+                    &format!("spawn:1:{child_script}"),
+                    &format!("wait-file:{}", directory.join("root").display()),
+                    "exit:0",
+                ],
+                false,
+            );
+            let pid = root.pid() as i32;
+            // Install the guard before waiting for readiness, including on panic.
+            let mut group = Self {
+                root: Some(root),
+                pid,
+                child: 0,
+                directory,
+            };
+            loop {
+                if let Some(info) = macos::test_members(pid).into_iter().find(|info| {
+                    info.pbi_ppid == pid as u32 && (info.pbi_status == libc::SZOMB) == zombie
+                }) {
+                    group.child = info.pbi_pid as i32;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            group
+        }
+
+        fn release_root(&self) {
+            std::fs::write(self.directory.join("root"), b"").unwrap();
+        }
+
+        async fn wait_root_exit(&self) {
+            self.release_root();
+            while !macos::observe(self.pid).unwrap() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        async fn finish(mut self) {
+            std::fs::write(self.directory.join("child"), b"").unwrap();
+            self.release_root();
+            drop(self.root.take());
+            loop {
+                if macos::test_members(self.pid)
+                    .iter()
+                    .all(|info| info.pbi_status == libc::SZOMB)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            std::fs::remove_dir_all(&self.directory).unwrap();
+        }
+    }
+
+    impl Drop for Group {
+        fn drop(&mut self) {
+            // A skipped kill never strands a fixture: both gates also self-release
+            // during unwinding. Keep files until the processes have seen them.
+            if self.directory.exists() {
+                let _ = std::fs::write(self.directory.join("child"), b"");
+                let _ = std::fs::write(self.directory.join("root"), b"");
+            }
+        }
+    }
+
+    #[test]
+    fn group_kill_removes_a_live_descendant_before_confirmation() {
+        test(async {
+            let mut group = Group::new(false).await;
+            group.wait_root_exit().await;
+            assert!(macos::test_members(group.pid).iter().any(|info| {
+                info.pbi_pid == group.child as u32 && info.pbi_status != libc::SZOMB
+            }));
+            // Read the live member once, then let the real post-exit group kill
+            // and repeated scans establish confirmation while the root is pinned.
+            let scan = group.root.as_mut().unwrap().scan.as_mut().unwrap();
+            assert_eq!(
+                scan.poll(Instant::now() + Duration::from_secs(1), None),
+                None
+            );
+            let outcome = unix::wait(Box::new(group.root.take().unwrap()), controls()).await;
+            assert_eq!(outcome.status, Termination::Exited { code: 0 });
+            assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
+            group.finish().await;
+        });
+    }
+
+    #[test]
+    fn one_run_with_a_skipped_kill_reports_one_live_survivor() {
+        test(async {
+            let mut group = Group::new(false).await;
+            group.wait_root_exit().await;
+            // Per-lease injection, retained on transfer and absent from release
+            // builds. Other runs and the cleanup service have no global switch.
+            group
+                .root
+                .as_mut()
+                .unwrap()
+                .lease
+                .as_mut()
+                .unwrap()
+                .skip_kill = true;
+            let start = Instant::now();
+            let outcome = unix::wait(Box::new(group.root.take().unwrap()), controls()).await;
+            assert_eq!(
+                outcome.termination.cleanup,
+                Cleanup::Incomplete { survivors: 1 }
+            );
+            assert!(start.elapsed() >= Duration::from_secs(1));
+            assert!(macos::test_members(group.pid).iter().any(|info| {
+                info.pbi_pid == group.child as u32 && info.pbi_status != libc::SZOMB
+            }));
+            group.finish().await;
+        });
+    }
+
+    #[test]
+    fn zombie_lookup_includes_an_unreaped_descendant_but_does_not_count_it_live() {
+        test(async {
+            let mut group = Group::new(true).await;
+            // Its parent is still alive and has deliberately not waited. arg=1
+            // must return the full zombie record, rather than arg=0's ESRCH.
+            let info = macos::test_members(group.pid)
+                .into_iter()
+                .find(|info| info.pbi_pid == group.child as u32)
+                .unwrap();
+            let (status, pgid) = (info.pbi_status, info.pbi_pgid);
+            assert_eq!(status, libc::SZOMB);
+            assert_eq!(pgid, group.pid as u32);
+            let root = group.root.as_mut().unwrap();
+            root.lease.as_mut().unwrap().skip_kill = true;
+            root.lease.as_ref().unwrap().kill().unwrap();
+            let scan = root.scan.as_mut().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let cleanup = loop {
+                if let Some(cleanup) = scan.poll(deadline, None) {
+                    break cleanup;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            };
+            assert_eq!(cleanup, Cleanup::Confirmed);
+            root.lease.as_mut().unwrap().skip_kill = false;
+            group.release_root();
+            let outcome = unix::wait(Box::new(group.root.take().unwrap()), controls()).await;
+            assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
+            group.finish().await;
+        });
+    }
+
+    #[test]
+    fn libproc_failures_are_unverified_and_keep_measurements_partial() {
+        test(async {
+            use crate::supervisor::Completeness;
+            for reason in [
+                UnverifiedReason::Io,
+                UnverifiedReason::InfoFailed,
+                UnverifiedReason::Truncated,
+            ] {
+                let mut group = Group::new(false).await;
+                group.wait_root_exit().await;
+                // Keep a real member present until pidinfo sees the injected
+                // short return. The fixture self-releases after the outcome.
+                let root = group.root.as_mut().unwrap();
+                root.lease.as_mut().unwrap().skip_kill = true;
+                let scan = root.scan.as_mut().unwrap();
+                match reason {
+                    UnverifiedReason::Io => scan.inject_list_error(libc::EACCES),
+                    UnverifiedReason::InfoFailed => scan.inject_short_info(),
+                    UnverifiedReason::Truncated => scan.inject_full_lists(),
+                    _ => unreachable!(),
+                }
+                let outcome = unix::wait(Box::new(group.root.take().unwrap()), controls()).await;
+                assert_eq!(outcome.termination.cleanup, Cleanup::Unverified { reason });
+                assert!(outcome.measurements.iter().all(|measurement| {
+                    measurement.value.is_some() && measurement.completeness == Completeness::Partial
+                }));
+                group.finish().await;
+            }
+        });
+    }
+
+    #[test]
+    fn transferred_slow_scan_yields_so_another_run_can_finish() {
+        test(async {
+            let mut slow = root(&["hold"], true);
+            let slow_ticket = slow.ticket();
+            // Delay is scheduled, never slept on by the cleanup service.
+            slow.scan
+                .as_mut()
+                .unwrap()
+                .set_entry_delay(Duration::from_secs(2));
+            drop(slow);
+            let fast = root(&["exit:0"], false);
+            let fast_ticket = fast.ticket();
+            drop(fast);
+            let outcome = fast_ticket.outcome().await.unwrap();
+            assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
+            // The first slot's scan is still pending when the second slot has
+            // completed. One run cannot occupy the poller until its deadline.
+            assert!(crate::supervisor::debug_counters().slots_in_use >= 1);
+            let transferred = slow_ticket.outcome().await.unwrap();
+            // Logical publication can precede the physical scan cutoff (§3.3).
+            assert_ne!(transferred.termination.cleanup, Cleanup::Confirmed);
         });
     }
 }
