@@ -53,7 +53,7 @@ impl Fixture {
             snapshot(&self.0),
             "inspection changed workspace: {args:?}"
         );
-        assert!(!self.0.join(".cpforge/lock").exists());
+        assert!(!under(&self.0, ".cpforge/lock").exists());
         output
     }
     fn problem(&self, name: &str, config: &str) {
@@ -98,6 +98,14 @@ fn json(output: &Output) -> Value {
 fn text(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
+/// Join a `/`-separated fixture path per component, so Windows paths use the
+/// native separator like the paths cpf reports.
+fn under(root: &Path, relative: &str) -> std::path::PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
 fn native(path: &Path) -> Value {
     serde_json::from_slice(&cpforge::report::wire::encode_native(path.as_os_str())).unwrap()
 }
@@ -144,9 +152,9 @@ fn show_layers_profile_provenance_deferred_and_native_values() {
         "three"
     );
     for path in [
-        f.0.join("user/cpforge/config.toml"),
+        under(&f.0, "user/cpforge/config.toml"),
         f.0.join("cpforge.toml"),
-        f.0.join("problems/A/problem.toml"),
+        under(&f.0, "problems/A/problem.toml"),
     ] {
         assert!(
             doc["origins"]
@@ -308,7 +316,7 @@ fn tools_report_found_missing_generated_and_unavailable_without_executing() {
 #[test]
 fn paths_report_selected_files_and_missing_user_file() {
     let f = Fixture::new(true);
-    fs::remove_file(f.0.join("user/cpforge/config.toml")).unwrap();
+    fs::remove_file(under(&f.0, "user/cpforge/config.toml")).unwrap();
     f.problem("B", "language='python'\n");
     let output = text(&f.run(&["--problem", "B", "config", "paths"], 0));
     assert_eq!(output.lines().count(), 4, "{output}");
@@ -366,7 +374,7 @@ fn explicit_problem_overrides_cwd_and_unresolved_language_is_valid() {
     f.problem("B", "language='python'\n");
     let output = f
         .command()
-        .current_dir(f.0.join("problems/A"))
+        .current_dir(under(&f.0, "problems/A"))
         .args(["--problem", "B", "config", "show", "--json"])
         .output()
         .unwrap();
