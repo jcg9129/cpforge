@@ -179,8 +179,20 @@ impl Fixture {
     pub fn await_ready(&mut self, count: usize) -> Vec<Identity> {
         let result = (|| -> io::Result<Vec<Identity>> {
             let mut identities = Vec::with_capacity(count);
-            for _ in 0..count {
-                let line = self.control.receive(HANDSHAKE_TIMEOUT)?;
+            let started = std::time::Instant::now();
+            for index in 0..count {
+                // Name the step that failed so an intermittent failure can be
+                // told apart: a READY that never arrived or an ACK not sent.
+                let line = self.control.receive(HANDSHAKE_TIMEOUT).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "waiting for READY {} of {count} after {:?}: {error}",
+                            index + 1,
+                            started.elapsed()
+                        ),
+                    )
+                })?;
                 let fields: Vec<_> = line.split_whitespace().collect();
                 if fields.len() != 3 || fields[0] != "READY" || !line.ends_with('\n') {
                     return Err(io::Error::other(format!("invalid READY: {line:?}")));
@@ -196,7 +208,12 @@ impl Fixture {
                     start_id,
                     process,
                 });
-                self.control.acknowledge(pid)?;
+                self.control.acknowledge(pid).map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!("sending ACK {} of {count} to {pid}: {error}", index + 1),
+                    )
+                })?;
             }
             Ok(identities)
         })();
