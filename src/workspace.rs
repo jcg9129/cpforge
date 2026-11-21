@@ -191,10 +191,18 @@ pub(crate) fn cleanup_warning(report: &mut Report, cleanup: &Cleanup) {
 
 /// Find the nearest regular workspace marker; callers canonicalise the root at entry.
 pub(crate) fn find_root(current: &Path) -> Result<PathBuf, Error> {
+    find_optional_root(current)?.ok_or_else(|| {
+        Error::Workspace(
+            "outside a workspace: no cpforge.toml found in this directory or its ancestors".into(),
+        )
+    })
+}
+
+pub(crate) fn find_optional_root(current: &Path) -> Result<Option<PathBuf>, Error> {
     for ancestor in current.ancestors() {
         let marker = ancestor.join("cpforge.toml");
         match fs::metadata(&marker) {
-            Ok(metadata) if metadata.is_file() => return Ok(paths::plain(ancestor)),
+            Ok(metadata) if metadata.is_file() => return Ok(Some(paths::plain(ancestor))),
             Ok(_) => {}
             Err(error)
                 if matches!(
@@ -204,9 +212,7 @@ pub(crate) fn find_root(current: &Path) -> Result<PathBuf, Error> {
             Err(error) => return Err(StorageError::io(marker, error).into()),
         }
     }
-    Err(Error::Workspace(
-        "outside a workspace: no cpforge.toml found in this directory or its ancestors".into(),
-    ))
+    Ok(None)
 }
 
 #[cfg(all(test, feature = "storage-test-hooks"))]

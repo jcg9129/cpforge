@@ -31,6 +31,14 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect configuration without creating jobs or changing the workspace.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Inspect configuration, toolchains and machine capabilities.
+    Doctor,
+
     /// Run a configured command in a managed job.
     Cmd {
         name: String,
@@ -146,4 +154,26 @@ pub enum Color {
     Auto,
     Always,
     Never,
+}
+
+/// Read-only configuration inspection.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Show effective declarative values and job-time requirements.
+    Show {
+        #[arg(long)]
+        origin: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Validate all layers, languages, profiles and commands.
+    Check {
+        /// Also locate external programs; missing programs are informative.
+        #[arg(long)]
+        tools: bool,
+    },
+    /// List discovered configuration files and their existence.
+    Paths,
 }

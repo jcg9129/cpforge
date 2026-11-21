@@ -10,6 +10,7 @@ pub mod cancel_signals;
 pub mod cli;
 pub mod compare;
 pub mod config;
+mod config_commands;
 pub mod error;
 pub mod exec;
 pub mod exit;
@@ -45,6 +46,13 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
         .into());
     }
     match cli.command {
+        Some(Command::Config { command }) => {
+            return config_commands::run(command, cli.problem.as_deref(), cli.config);
+        }
+        Some(Command::Doctor) => {
+            return config_commands::doctor(cli.problem.as_deref(), cli.config);
+        }
+
         Some(Command::Cmd {
             name,
             profile,

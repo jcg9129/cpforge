@@ -287,6 +287,8 @@ fn record_stream(v: Option<&p::StreamCapture>, file: Option<&std::path::Path>) -
 pub enum ConfigValue {
     String(String),
     Integer(i64),
+    /// Metadata coordinates, rather than a TOML integer.
+    U32(u32),
     Float(f64),
     Boolean(bool),
     Array(Vec<ConfigValue>),
@@ -303,10 +305,34 @@ pub fn encode_config_show(platform: &str, value: &ConfigValue) -> Result<Vec<u8>
     bytes.push(b'}');
     Ok(bytes)
 }
+/// Inspection metadata follows the configuration mapping, using the same
+/// canonical writer. The schema permits additive members (§3.6).
+pub fn encode_config_inspection(
+    platform: &str,
+    value: &ConfigValue,
+    metadata: &[(String, ConfigValue)],
+) -> Result<Vec<u8>> {
+    let mut bytes = encode_config_show(platform, value)?;
+    bytes.pop();
+    let mut seen = std::collections::BTreeSet::from(["schema", "document", "platform", "config"]);
+    for (key, value) in metadata {
+        if !seen.insert(key.as_str()) {
+            return Err(Error("duplicate configuration metadata key"));
+        }
+        bytes.push(b',');
+        bytes.extend(encode(&s(key)));
+        bytes.push(b':');
+        config(value, &mut bytes)?;
+    }
+    bytes.push(b'}');
+    Ok(bytes)
+}
+
 fn config(v: &ConfigValue, out: &mut Vec<u8>) -> Result<()> {
     match v {
         ConfigValue::String(v) => out.extend(encode(&s(v))),
         ConfigValue::Integer(v) => out.extend(encode(&s(v.to_string()))),
+        ConfigValue::U32(v) => out.extend(encode(&n(*v))),
         ConfigValue::Float(v) => out.extend(encode(&float(*v))),
         ConfigValue::Boolean(v) => out.extend(encode(&b(*v))),
         ConfigValue::Native(v) => out.extend(encode(&ns(&native_bytes(v)))),

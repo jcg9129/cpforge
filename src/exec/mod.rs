@@ -19,6 +19,7 @@
 
 mod context;
 mod error;
+mod inspect;
 mod prepare;
 mod probe;
 mod resolve;
@@ -34,6 +35,7 @@ pub use context::{
     TestBinding,
 };
 pub use error::{PrepareError, PrepareErrorKind, PrepareErrors};
+pub(crate) use inspect::{ToolStatus, inspect_program};
 pub use prepare::prepare;
 pub use probe::{Executable, NativeProbe, Probe, ProbeResult};
 pub use resolve::{

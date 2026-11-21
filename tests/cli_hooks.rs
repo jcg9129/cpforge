@@ -407,12 +407,13 @@ fn read_only_commands_never_admit_hooks() {
     for args in [
         vec!["--problem", "A", "current"],
         vec!["--problem", "A", "test", "ls"],
-        vec!["config", "show"],
-        vec!["config", "check"],
+        vec!["--problem", "A", "config", "show"],
+        vec!["--problem", "A", "config", "check", "--tools"],
+        vec!["config", "paths"],
+        vec!["--problem", "A", "doctor"],
     ] {
         let output = w.run(&args);
-        // Config subcommands are not implemented yet; even refusal is read-only.
-        assert!(matches!(output.status.code(), Some(0 | 2)), "{output:?}");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
         assert!(!w.path("hooked").exists());
         assert!(!w.path(".cpforge/runs").exists());
     }

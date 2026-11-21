@@ -360,7 +360,7 @@ impl Expansion<'_> {
     }
 }
 
-fn environment(
+pub(super) fn environment(
     baseline: &Baseline,
     edits: &[EnvEdit],
     platform: Platform,

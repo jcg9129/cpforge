@@ -253,6 +253,10 @@ impl StagePlan {
             ValidatedStage::Run(resolved) => &resolved.target().run,
             ValidatedStage::Executable(executable) => executable.stage(),
         };
+        Self::from_composed(stage)
+    }
+
+    fn from_composed(stage: &super::ComposedStage) -> Self {
         let node = &stage.node;
         let command = if let Some(argv) = node.get("argv") {
             StageCommand::Argv(array(argv).iter().map(text).collect())
@@ -613,6 +617,13 @@ pub struct LoadedConfig {
     hook_settings: HookSettings,
 }
 
+#[derive(Debug)]
+pub(crate) struct InspectionStage {
+    pub name: String,
+    pub stage: StagePlan,
+    pub entry: Option<String>,
+}
+
 impl LoadedConfig {
     /// Every phase-1/2 diagnostic, including errors in unused definitions.
     pub fn diagnostics(&self) -> &[Diagnostic] {
@@ -634,6 +645,57 @@ impl LoadedConfig {
     /// Inspect composed stages and derived defaults without an execution capability.
     pub fn universe(&self) -> &super::ComposedUniverse {
         self.report.universe()
+    }
+
+    /// All validated inspection stages, including every profile and the selected
+    /// problem. This grants no phase-3 context and performs no tool probes.
+    pub(crate) fn inspection_stages(&self) -> Result<Vec<InspectionStage>, ConfigErrors> {
+        self.clean()?;
+        let mut stages = Vec::new();
+        let mut target_stages = |name: String, target: &super::ComposedTarget| {
+            let entry = target
+                .settings
+                .entry
+                .as_ref()
+                .and_then(EffectiveNode::string)
+                .map(str::to_owned);
+            if let Some(build) = &target.build {
+                stages.push(InspectionStage {
+                    name: format!("{name}.build"),
+                    stage: StagePlan::from_composed(build),
+                    entry: entry.clone(),
+                });
+            }
+            stages.push(InspectionStage {
+                name: format!("{name}.run"),
+                stage: StagePlan::from_composed(&target.run),
+                entry,
+            });
+        };
+        for ((language, profile), target) in &self.universe().languages {
+            let name = profile.as_ref().map_or_else(
+                || format!("languages.{language}"),
+                |p| format!("languages.{language}.profiles.{p}"),
+            );
+            target_stages(name, target);
+        }
+        if let Some(target) = &self.universe().selected {
+            target_stages("target".into(), target);
+        }
+        for (name, stage) in &self.universe().commands {
+            stages.push(InspectionStage {
+                name: format!("commands.{name}"),
+                stage: StagePlan::from_composed(stage),
+                entry: self
+                    .universe()
+                    .selected
+                    .as_ref()
+                    .and_then(|target| target.settings.entry.as_ref())
+                    .and_then(EffectiveNode::string)
+                    .map(str::to_owned),
+            });
+        }
+        Ok(stages)
     }
 
     /// Raw default-user trust inputs, available for inspection even after errors.

@@ -18,6 +18,18 @@ pub enum CaptureCheckReason {
     ShellStage,
 }
 
+/// Declarative prediction only: phase 3 must still expand operands and pass the
+/// accident guard before this check can be recorded on a job.
+pub fn planned_capture_check(stage: &crate::config::ComposedStage) -> CaptureCheck {
+    if stage.node.get("shell").is_some() {
+        CaptureCheck::Unchecked {
+            reasons: vec![CaptureCheckReason::ShellStage],
+        }
+    } else {
+        CaptureCheck::Checked
+    }
+}
+
 /// A phase-3 configuration error. Native bytes are preserved for comparison;
 /// only the diagnostic candidate is rendered lossily if it is not Unicode.
 #[derive(Clone, Debug, PartialEq, Eq)]

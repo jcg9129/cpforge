@@ -65,6 +65,7 @@ implemented.
 - [Checkers and interactors](docs/design-checkers.md)
 - [Managed workspaces](docs/design-workspace.md)
 - [Configured commands (`cpf cmd`)](docs/commands.md)
+- [Configuration inspection (`cpf config`, `cpf doctor`)](docs/config-inspection.md)
 - [Comparator specification](docs/compare-spec.md)
 - [Execution contract](docs/contracts/execution.md)
 - [Storage contract](docs/contracts/storage.md)
