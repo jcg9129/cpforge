@@ -550,19 +550,24 @@ fn overflow_preserves_validation_order_and_removal_evidence() {
             // even though the missing declared output supplies the primary cause.
             assert!(post.generated_program_invalid.is_some());
         } else if !generated {
-            assert!(matches!(
-                error.kind.as_ref(),
-                BuildFailureKind::GeneratedProgramNotLaunchable(_)
-            ));
+            assert!(
+                matches!(
+                    error.kind.as_ref(),
+                    BuildFailureKind::GeneratedProgramNotLaunchable(_)
+                ),
+                "{id}: {:?}",
+                error.kind
+            );
             assert!(matches!(
                 cause,
                 report::BuildCause::GeneratedProgramInvalid { .. }
             ));
         } else {
-            assert!(matches!(
-                error.kind.as_ref(),
-                BuildFailureKind::BuildOutputTooLarge
-            ));
+            assert!(
+                matches!(error.kind.as_ref(), BuildFailureKind::BuildOutputTooLarge),
+                "{id}: {:?}",
+                error.kind
+            );
             assert_eq!(
                 cause,
                 report::BuildCause::OutputTooLarge {
