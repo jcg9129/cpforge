@@ -156,14 +156,18 @@ fn terminate_source(source: CancelSource) -> ! {
             libc::SIGINT
         };
         // SAFETY: restore and unblock only the signal that will terminate this
-        // process. These operations and kill are async-signal-safe as well.
+        // process. These operations and raise are async-signal-safe as well.
+        // `raise` targets this thread, where the signal is now unblocked with
+        // its default action, so it terminates the process before returning;
+        // `kill(getpid())` may be delivered asynchronously to another thread
+        // (macOS), letting the `_exit` below win.
         unsafe {
             libc::signal(signal, libc::SIG_DFL);
             let mut mask: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut mask);
             libc::sigaddset(&mut mask, signal);
             libc::pthread_sigmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
-            libc::kill(libc::getpid(), signal);
+            libc::raise(signal);
         }
     }
     #[cfg(not(unix))]
