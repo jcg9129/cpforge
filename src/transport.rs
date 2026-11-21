@@ -382,13 +382,16 @@ impl<W: Write + Send + 'static> Delivery<W> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::Failing;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[derive(Debug)]
-    struct Failing {
-        bytes: Vec<u8>,
-        limit: usize,
-        flush_fails: bool,
+    pub(crate) struct Failing {
+        pub(crate) bytes: Vec<u8>,
+        pub(crate) limit: usize,
+        pub(crate) flush_fails: bool,
     }
     impl Write for Failing {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -431,6 +434,9 @@ mod tests {
             assert_eq!(result.unwrap_err().exit_code(), ExitCode::Delivery);
             assert_eq!(admitted, !closed);
             let length = delivery.writer.bytes.len();
+            // A recovered sink must not permit any output after failure.
+            delivery.writer.limit = usize::MAX;
+            delivery.writer.flush_fails = false;
             assert_eq!(
                 delivery.document(b"second").unwrap_err().exit_code(),
                 ExitCode::Delivery

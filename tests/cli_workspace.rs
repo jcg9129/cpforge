@@ -1240,6 +1240,50 @@ fn concurrent_adoptions_keep_both_entries() {
 #[cfg(feature = "storage-test-hooks")]
 mod record_command_crashes {
     use super::*;
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn run_bounded(mut command: Command) -> Output {
+        fn reader(mut stream: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+            let (send, receive) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                let _ = send.send(bytes);
+            });
+            receive
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdout = reader(child.stdout.take().unwrap());
+        let stderr = reader(child.stderr.take().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("record command exceeded its deadline");
+            }
+            std::thread::yield_now();
+        };
+        Output {
+            status,
+            stdout: stdout
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap(),
+            stderr: stderr
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap(),
+        }
+    }
 
     fn abort_at(workspace: &Workspace, args: &[&str], point: &str) -> Output {
         let mut command = workspace.command();
@@ -1274,13 +1318,94 @@ mod record_command_crashes {
                 }
             });
         }
-        let output = command.output().unwrap();
+        let output = run_bounded(command);
         assert!(!output.status.success(), "{point}: {output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(&format!("CPF-CRASH-AT {point}")),
             "{point}: {output:?}"
         );
         output
+    }
+
+    #[test]
+    fn gitignore_crash_boundaries() {
+        let patterns =
+            b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n";
+        let block = [b"# >>> cpforge\n".as_slice(), patterns, b"# <<< cpforge\n"].concat();
+        let prefix = b"# user rules\r\n\xffcache/\r\n# >>> cpforge\r\n";
+        let suffix = b"# <<< cpforge\r\n!keep\r\nlast-without-newline";
+        let original = [prefix.as_slice(), b"old-rule\n", suffix].concat();
+        let replaced = [prefix.as_slice(), patterns, suffix].concat();
+        let append = b"# user rules\r\n\xffcache/\r\nlast-without-newline";
+        let appended = [append.as_slice(), b"\n", &block].concat();
+        for (old, new) in [
+            (None, block.as_slice()),
+            (Some(append.as_slice()), appended.as_slice()),
+            (Some(original.as_slice()), replaced.as_slice()),
+        ] {
+            let mut points = vec![("gitignore.locked", false), ("gitignore.published", true)];
+            if old.is_some() {
+                points.extend([
+                    ("atomic_replace.temp_synced", false),
+                    ("atomic_replace.renamed", true),
+                    ("atomic_replace.directory_synced", true),
+                ]);
+            } else {
+                points.extend([
+                    ("file_noclobber.before_publish", false),
+                    ("file_noclobber.after_publish", true),
+                    ("file_noclobber.directory_synced", true),
+                ]);
+                #[cfg(target_os = "linux")]
+                points.push(("file_noclobber.linked", true));
+            }
+            for (point, committed) in points {
+                let workspace = Workspace::new();
+                let path = workspace.path(&[".gitignore"]);
+                if let Some(bytes) = old {
+                    workspace.write(&[".gitignore"], bytes);
+                }
+                let output = abort_at(&workspace, &["gitignore", "--write"], point);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    assert_eq!(
+                        output.status.signal(),
+                        Some(libc::SIGABRT),
+                        "{point}: {output:?}"
+                    );
+                }
+                #[cfg(windows)]
+                {
+                    let code = output.status.code().unwrap() as u32;
+                    assert!(
+                        code == 3 || code == 0x4000_0015 || code >= 0x8000_0000,
+                        "{point}: {output:?}"
+                    );
+                }
+                let expected = if committed { Some(new) } else { old };
+                match expected {
+                    Some(bytes) => assert_eq!(fs::read(&path).unwrap(), bytes, "{point}"),
+                    None => assert!(!path.try_exists().unwrap(), "{point}"),
+                }
+                // Exact byte equality above includes CRLF markers, non-UTF-8
+                // user rules and the suffix's missing trailing newline.
+                for _ in 0..2 {
+                    let mut command = workspace.command();
+                    command.args(["gitignore", "--write"]);
+                    let output = run_bounded(command);
+                    assert_eq!(output.status.code(), Some(0), "{point}: {output:?}");
+                    assert_eq!(fs::read(&path).unwrap(), new, "{point}");
+                    assert!(fs::read_dir(&workspace.0).unwrap().all(|entry| {
+                        !entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".cpf-tmp-")
+                    }));
+                }
+            }
+        }
     }
 
     #[test]

@@ -109,3 +109,78 @@ pub(crate) fn prepare(
         })
         .collect()
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::authorize;
+    use crate::config::{HookSettings, Origin, Provenance, Sourced};
+    use crate::exec::Baseline;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    struct Directory(PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn windows_trust_path_spellings() {
+        let directory = Directory(Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(
+            format!("hooks-trust-{}", crate::build::BuildId::generate().unwrap()),
+        ));
+        let root = directory.0.join("WorkSpace");
+        let sibling = directory.0.join("WorkSpace-other");
+        let child = root.join("child");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        let verbatim = fs::canonicalize(&root).unwrap();
+        assert!(verbatim.to_str().unwrap().starts_with(r"\\?\"));
+        let plain = crate::storage::paths::plain(&verbatim);
+        let text = plain.to_str().unwrap();
+        let variants = [
+            PathBuf::from(text.to_ascii_uppercase()),
+            PathBuf::from(text.to_ascii_lowercase()),
+            PathBuf::from(text.replace('\\', "/")),
+            verbatim.clone(),
+            PathBuf::from(verbatim.to_str().unwrap().to_ascii_uppercase()),
+        ];
+        let baseline = Baseline::default();
+        for trusted in variants {
+            let settings = HookSettings {
+                trusted_workspaces: Some(vec![Sourced {
+                    value: trusted.clone(),
+                    origin: Origin {
+                        file: directory.0.join("user.toml"),
+                        line: Some(3),
+                        col: Some(1),
+                        key_path: "hooks.trusted_workspaces[0]".into(),
+                        span: None,
+                    },
+                    provenance: Provenance::File {
+                        path: directory.0.join("user.toml"),
+                        line: Some(3),
+                        col: Some(1),
+                    },
+                    overlay: None,
+                }]),
+                ..HookSettings::default()
+            };
+            for spelling in [&plain, &verbatim] {
+                assert_eq!(
+                    authorize(&settings, spelling, &baseline),
+                    Ok(()),
+                    "{trusted:?}"
+                );
+            }
+            for different in [&sibling, &child] {
+                assert_eq!(
+                    authorize(&settings, different, &baseline),
+                    Err("untrusted"),
+                    "{trusted:?} vs {different:?}"
+                );
+            }
+        }
+    }
+}

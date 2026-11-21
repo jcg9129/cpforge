@@ -28,7 +28,9 @@ pub(crate) fn gitignore(write: bool) -> Result<ExitCode, Error> {
     if write {
         let lock = WorkspaceLock::new(&root)?;
         let guard = lock.acquire("gitignore")?;
+        storage::crash::point("gitignore.locked");
         let published = write_gitignore(&guard)?;
+        storage::crash::point("gitignore.published");
         let mut report = crate::workspace::Report::default();
         crate::workspace::publication_warnings(&mut report, &root.join(".gitignore"), &published);
         for warning in report.warnings {

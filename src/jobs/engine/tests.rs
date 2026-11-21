@@ -1691,6 +1691,161 @@ fn disconnected_delivery_does_not_stop_execution_or_persistence() {
 }
 
 #[test]
+fn report_epipe_preserves_persistence_and_stops_output() {
+    use crate::exit::ExitCode;
+    use crate::transport::{Delivery, Failing, MachineMode, delivered_status};
+
+    for offset in [0, 100] {
+        for code in [0, 9] {
+            let f = Fixture::new();
+            let ready = ready(&f, "python", 1, &Tools);
+            let path = ready.dir.join("report.json");
+            let mut persistence = crate::jobs::persist::JobPersistence::new(&ready).unwrap();
+            let engine = Engine::new(
+                ready,
+                JobRequest::Test {
+                    comparator: Comparator::Tokens,
+                },
+            )
+            .unwrap();
+            let report = runtime(async {
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    engine.run(
+                        &mut Fake::with([Behavior::Exit(code)]),
+                        &mut persistence,
+                        &mut NoHooks,
+                    ),
+                )
+                .await
+                .expect("report persistence deadline")
+            });
+            let persisted = fs::read(&path).unwrap();
+            let document = crate::report::wire::encode_stdout_report(&report).unwrap();
+            assert!(document.len() > 100);
+            let mut delivery = Delivery::new(
+                Failing {
+                    bytes: Vec::new(),
+                    limit: offset,
+                    flush_fails: false,
+                },
+                false,
+            );
+            let result = delivery.report(&report);
+            assert!(delivery.failed());
+            assert_eq!(
+                delivered_status(&report, MachineMode::Json, &result),
+                ExitCode::Delivery
+            );
+            assert_eq!(
+                report.data().details.pre_delivery_exit.code,
+                if code == 0 { 0 } else { 1 }
+            );
+            // Neither retrying the report nor the panic fallback may append a
+            // second document after the first write error.
+            assert!(delivery.report(&report).is_err());
+            delivery
+                .escaped_job_panic(JobKind::Test, MachineMode::Json)
+                .unwrap();
+            assert_eq!(delivery.into_inner().bytes, document[..offset]);
+            assert_eq!(fs::read(&path).unwrap(), persisted);
+            let saved: serde_json::Value = serde_json::from_slice(&persisted).unwrap();
+            assert_eq!(saved["document"], "job_report");
+            assert_eq!(
+                saved["result"]["verdict"],
+                if code == 0 { "passed" } else { "nonzero_exit" }
+            );
+        }
+    }
+}
+
+#[test]
+fn event_overflow_delivers_final_report() {
+    use crate::exit::ExitCode;
+    use crate::transport::{Delivery, MachineMode, delivered_status};
+
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let path = ready.dir.join("report.json");
+    let mut persistence = crate::jobs::persist::JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let events = engine.events();
+    let receiver = events.subscribe().unwrap();
+    let engine = engine.observe(move |point| {
+        if point == Point::Closure {
+            // Keep the consumer connected but unread through phase E. Fill the
+            // real 8 MiB queue with cheap events, without launching 10 000 jobs.
+            for done in 0..10_000 {
+                events.offer(EventPayload::Progress {
+                    done,
+                    total: 10_000,
+                });
+            }
+        }
+    });
+    let mut delivery = Delivery::new(Vec::new(), false);
+    let (report, delivered) = runtime(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let report = engine
+                .run(&mut Fake::default(), &mut persistence, &mut NoHooks)
+                .await;
+            let delivered = delivery.events(receiver, JobKind::Test, false).await;
+            (report, delivered)
+        })
+        .await
+        .expect("event delivery deadline")
+    });
+    assert_eq!(
+        delivered_status(&report, MachineMode::Events { output: false }, &delivered),
+        ExitCode::Success
+    );
+    delivered.unwrap();
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert!(report.data().events.dropped > 0);
+    let bytes = delivery.into_inner();
+    assert_eq!(bytes.last(), Some(&b'\n'));
+    let lines: Vec<serde_json::Value> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(lines[0]["document"], "event_stream");
+    assert_eq!(lines[1]["event"], "job_started");
+    let terminal = &lines[lines.len() - 2];
+    assert_eq!(terminal["event"], "job_finished");
+    let sequence: Vec<u64> = lines[1..lines.len() - 1]
+        .iter()
+        .map(|event| event["seq"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(sequence[0], 0);
+    assert!(sequence.windows(2).all(|pair| pair[0] < pair[1]));
+    let retained = (lines.len() - 3) as u64;
+    assert_eq!(retained, (EVENT_BUDGET / EVENT_BOUND) as u64);
+    let dropped = report.data().events.dropped;
+    assert_eq!(sequence.last().unwrap() - retained, dropped);
+    assert_eq!(terminal["dropped"], dropped.to_string());
+    let final_line = lines.last().unwrap();
+    assert_eq!(final_line["event"], "report");
+    assert_eq!(
+        final_line["report"]["events"]["dropped"],
+        dropped.to_string()
+    );
+    assert_eq!(
+        final_line["report"]["persistence"]["report"]["kind"],
+        "published"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(final_line["report"]["events"], saved["events"]);
+    assert_eq!(final_line["report"]["result"], saved["result"]);
+}
+
+#[test]
 fn progress_drop_warning_is_frozen_at_e() {
     let f = Fixture::new();
     let queue = crate::progress::ProgressQueue::default();

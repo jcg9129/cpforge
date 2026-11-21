@@ -122,7 +122,8 @@ impl Workspace {
         w
     }
     fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
+        name.split('/')
+            .fold(self.0.clone(), |path, part| path.join(part))
     }
     fn write(&self, name: &str, text: &str) {
         let path = self.path(name);
@@ -232,8 +233,12 @@ impl Running {
         let mut child = command.spawn().unwrap();
         let (out_tx, stdout) = mpsc::channel();
         let (bar_tx, _barriers) = mpsc::channel();
-        let out = child.stdout.take().unwrap();
+        let out = child.stdout.take();
         std::thread::spawn(move || {
+            let Some(out) = out else {
+                let _ = out_tx.send(Vec::new());
+                return;
+            };
             if broken_stdout {
                 drop(out);
                 let _ = out_tx.send(Vec::new());
@@ -320,6 +325,128 @@ impl Drop for Running {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn test_reaps_background_descendants() {
+    for holds_stdout in [false, true] {
+        let w = Workspace::new(Job::Test, false);
+        let original_config = fs::read_to_string(w.path("cpforge.toml")).unwrap();
+        // One test makes the identity files unambiguous; a second invocation
+        // below checks that the next job can acquire resources and pass.
+        w.write("problems/A/tests.toml", "schema = 1\n[[test]]\nid = 'a'\ninput = 'tests/a.in'\nanswer = 'tests/a.ans'\norigin = 'custom'\nenabled = true\n");
+        let child_steps = format!(
+            "spawn:1:close:stderr,{}identity-file:{},wait-file:{}",
+            if holds_stdout { "" } else { "close:stdout," },
+            w.path("child").display(),
+            w.path("never-release-child").display(),
+        );
+        let argv = serde_json::to_string(&[
+            fixture_path().to_str().unwrap().to_owned(),
+            format!("identity-file:{}", w.path("root").display()),
+            child_steps,
+            format!("wait-file:{}", w.path("release-root").display()),
+            "exit:0".into(),
+        ])
+        .unwrap();
+        w.write("cpforge.toml", &format!(
+            "schema = 1\n[run]\ndeadline_s = 15\n[languages.fixture]\nextensions = ['sh']\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = {argv}\n"
+        ));
+        let mut child = Running::spawn(w.command(Job::Test, true));
+        let identities: Vec<_> = ["root", "child"]
+            .iter()
+            .map(|name| {
+                child.until(|| w.path(name).exists());
+                Identity::from_file(&w.path(name)).unwrap()
+            })
+            .collect();
+        assert!(identities.iter().all(Identity::is_live));
+        // The descendant has closed (or retained) stdout and published its
+        // identity. Only now can the root exit, leaving a live background child.
+        fs::write(w.path("release-root"), b"go\n").unwrap();
+        let output = child.wait();
+        assert_all_gone(&identities, Duration::from_secs(2));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "holds_stdout={holds_stdout}: {output:?}"
+        );
+        let report = w.report();
+        let delivered: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(delivered["executions"], report["executions"]);
+        assert_eq!(delivered["result"], report["result"]);
+        assert_eq!(report["result"]["verdict"], "passed");
+        assert_eq!(report["tests"][0]["verdict"]["kind"], "passed");
+        assert_eq!(report["tests"][0]["check"]["kind"], "passed");
+        let executions = report["executions"].as_array().unwrap();
+        assert_eq!(executions.len(), 1);
+        let summary = &executions[0]["summary"];
+        assert_eq!(summary["class"]["kind"], "exited_zero");
+        assert_eq!(summary["execution"]["status"]["kind"], "exited");
+        assert_eq!(summary["execution"]["status"]["code"], 0);
+        assert!(summary["execution"]["stop_trigger"].is_null());
+        assert!(summary["execution"]["kill_attempts"].as_u64().unwrap() > 0);
+        assert_eq!(summary["stdout"]["eof"], true);
+        assert_eq!(summary["stdout"]["complete"], true);
+        assert!(summary["stdout"]["losses"].as_array().unwrap().is_empty());
+        let notes = summary["notes"].as_array().unwrap();
+        match summary["execution"]["cleanup"]["kind"].as_str().unwrap() {
+            "confirmed" => assert!(!notes.iter().any(|note| note == "cleanup_unverified")),
+            "unverified" => {
+                assert!(summary["execution"]["cleanup"]["reason"].as_str().is_some());
+                assert!(notes.iter().any(|note| note == "cleanup_unverified"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("cleanup not verified"));
+                assert!(
+                    report["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|warning| warning["kind"] == "cleanup_unverified")
+                );
+            }
+            other => panic!("unexpected cleanup outcome {other}: {report}"),
+        }
+        let first_job = w.jobs().pop().unwrap();
+        let first_bytes = fs::read(first_job.join("report.json")).unwrap();
+        w.write("cpforge.toml", &original_config);
+        let next = Running::spawn(w.command(Job::Test, true)).wait();
+        assert_eq!(next.status.code(), Some(0), "{next:?}");
+        let next_report: Value = serde_json::from_slice(&next.stdout).unwrap();
+        assert_eq!(next_report["result"]["verdict"], "passed");
+        assert_eq!(w.jobs().len(), 2);
+        let next_job = w
+            .jobs()
+            .into_iter()
+            .find(|path| path != &first_job)
+            .unwrap();
+        let saved: Value =
+            serde_json::from_slice(&fs::read(next_job.join("report.json")).unwrap()).unwrap();
+        assert_eq!(next_report["result"], saved["result"]);
+        assert_eq!(
+            fs::read(first_job.join("report.json")).unwrap(),
+            first_bytes
+        );
+        assert_all_gone(&identities, Duration::from_secs(2));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stdout_enospc_preserves_report() {
+    let w = Workspace::new(Job::Test, false);
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let mut command = w.command(Job::Test, true);
+    command.stdout(full);
+    let output = Running::spawn(command).wait();
+    assert_eq!(output.status.code(), Some(11), "{output:?}");
+    let report = w.report();
+    assert_eq!(report["document"], "job_report");
+    assert_eq!(report["result"]["verdict"], "passed");
+    assert_eq!(report["result"]["pre_delivery_exit"]["code"], 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot deliver machine output"));
 }
 
 fn assert_cancelled(w: &Workspace, job: Job, output: &Output, signal: i32, json: bool) {
