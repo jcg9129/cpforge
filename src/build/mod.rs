@@ -27,6 +27,7 @@ use crate::exec::{
     ResolveErrors, ResolvedStage, TargetBindings,
 };
 use crate::names::{Identifier, NameError};
+use crate::report::{self, PostBuild, RunClass, RunInput, StreamEvidence};
 use crate::storage::{self, StorageError, WalkReport};
 use crate::supervisor::{self, RootOutcome, StopTrigger, SupervisorError, Termination, Violation};
 
@@ -519,10 +520,13 @@ pub struct BuildExecutionOutcome {
     pub enforced_at: Option<Duration>,
     pub cleanup: supervisor::Cleanup,
     pub errors: Vec<SupervisorError>,
+    pub stdout: StreamEvidence,
+    pub stderr: StreamEvidence,
 }
 
 impl From<&RootOutcome> for BuildExecutionOutcome {
     fn from(outcome: &RootOutcome) -> Self {
+        let record = RunInput::from_root(outcome, false, [supervisor::Exceed::Discard; 2]);
         Self {
             termination: outcome.status,
             violations: outcome.violations.clone(),
@@ -530,18 +534,59 @@ impl From<&RootOutcome> for BuildExecutionOutcome {
             enforced_at: outcome.enforced_at,
             cleanup: outcome.termination.cleanup,
             errors: outcome.errors.clone(),
+            stdout: record.stdout,
+            stderr: record.stderr,
         }
     }
 }
 
 impl BuildExecutionOutcome {
-    fn successful(&self) -> bool {
-        self.termination == (Termination::Exited { code: 0 })
-            && self.violations.is_empty()
-            && self.stop_trigger.is_none()
-            && self.enforced_at.is_none()
-            && !matches!(self.cleanup, supervisor::Cleanup::Incomplete { .. })
-            && self.errors.is_empty()
+    /// Adapt the finalized evidence using the producer's frozen stream policies.
+    /// Build streams are never consumed. `enforced_at` is timing evidence, not
+    /// a classification rule; stop triggers and violations decide the class.
+    pub fn run_input(&self, policies: [crate::config::CapPolicy; 2]) -> RunInput {
+        let mut stdout = self.stdout.clone();
+        let mut stderr = self.stderr.clone();
+        stdout.kill_on_breach = policies[0] == crate::config::CapPolicy::Kill;
+        stderr.kill_on_breach = policies[1] == crate::config::CapPolicy::Kill;
+        RunInput {
+            execution: report::ExecutionEvidence::Started(self.termination),
+            cleanup: self.cleanup,
+            stop_trigger: self.stop_trigger,
+            wall_violation: self
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::WallDeadline { .. })),
+            budget_violations: report::BudgetStreams {
+                stdout: self.violations.iter().any(|v| {
+                    matches!(
+                        v,
+                        Violation::OutputBudget {
+                            stream: supervisor::Stream::Stdout,
+                            ..
+                        }
+                    )
+                }),
+                stderr: self.violations.iter().any(|v| {
+                    matches!(
+                        v,
+                        Violation::OutputBudget {
+                            stream: supervisor::Stream::Stderr,
+                            ..
+                        }
+                    )
+                }),
+            },
+            supervisor_errors: self.errors.iter().copied().map(Into::into).collect(),
+            stdout,
+            stderr,
+            consumes_stdout: false,
+            cwd_overflow_bytes: None,
+        }
+    }
+
+    fn successful(&self, policies: [crate::config::CapPolicy; 2]) -> bool {
+        report::classify_run(&self.run_input(policies)) == RunClass::ExitedZero
     }
 }
 
@@ -558,33 +603,43 @@ pub struct BuildFailure {
     pub id: BuildId,
     pub output_root: PathBuf,
     pub kind: Box<BuildFailureKind>,
+    /// Independent overflow and cleanup evidence, even when another cause wins.
+    pub over_cap: Option<Box<BuildOutputOverflow>>,
+    /// Finalized observations made before any overflow removal. Paths name
+    /// declared outputs, including when an ancestor is missing or is a link.
+    pub post_build: Box<PostBuild>,
+}
+
+#[derive(Debug)]
+pub struct BuildOutputOverflow {
+    pub bytes: u64,
+    pub limit: u64,
+    /// Retains inspection errors when measured bytes already prove overflow.
+    pub measurement: WalkReport,
+    /// Errors or skipped boundaries in an Ok report mean incomplete removal.
+    pub removal: Result<WalkReport, StorageError>,
 }
 
 #[derive(Debug)]
 pub enum BuildFailureKind {
-    ProducerFailed(BuildExecutionOutcome),
+    ProducerFailed(Box<BuildExecutionOutcome>),
     OutputMissing(PathBuf),
     OutputNotRegular(PathBuf),
     OutputThroughLink(PathBuf),
     OutputInspection(StorageError),
     Measurement(StorageError),
     IncompleteMeasurement(WalkReport),
-    BuildOutputTooLarge {
-        bytes: u64,
-        limit: u64,
-        /// Also retains any inspection errors when already-measured bytes
-        /// suffice to prove overflow despite an incomplete measurement.
-        measurement: WalkReport,
-        /// Inspect both errors and skipped boundaries in an Ok report. Either
-        /// means removal was incomplete; the build remains a failure regardless.
-        removal: Result<WalkReport, StorageError>,
-    },
+    BuildOutputTooLarge,
     GeneratedProgramNotLaunchable(ResolveErrors),
 }
 
 impl fmt::Display for BuildFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "build {}: {:?}", self.id, self.kind)
+        write!(f, "build {}: {:?}", self.id, self.kind)?;
+        if let Some(overflow) = &self.over_cap {
+            write!(f, "; over cap: {overflow:?}")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for BuildFailure {}
@@ -628,10 +683,12 @@ pub fn finish_build(
     let fail = |kind| BuildFailure {
         id: pending.outputs.id.clone(),
         output_root: pending.outputs.root.clone(),
+        post_build: Box::new(PostBuild::from_failure_kind(&kind, &pending.outputs.root)),
         kind: Box::new(kind),
+        over_cap: None,
     };
-    if !outcome.successful() {
-        return Err(fail(BuildFailureKind::ProducerFailed(outcome)));
+    if !outcome.successful([pending.build.stdout.policy, pending.build.stderr.policy]) {
+        return Err(fail(BuildFailureKind::ProducerFailed(Box::new(outcome))));
     }
     let root = &pending.outputs.root;
     storage::checked_path(&pending.outputs.area, root, false)
@@ -641,40 +698,86 @@ pub fn finish_build(
     if !metadata.is_dir() {
         return Err(fail(BuildFailureKind::OutputNotRegular(root.clone())));
     }
-    let report = storage::measure_owned_tree(&pending.outputs.area, root)
+    let measured = storage::measure_owned_tree(&pending.outputs.area, root)
         .map_err(|error| fail(BuildFailureKind::Measurement(error)))?;
     let limit = pending.build_bytes;
-    if report.bytes > limit {
-        return Err(fail(BuildFailureKind::BuildOutputTooLarge {
-            bytes: report.bytes,
-            limit,
-            measurement: report,
-            removal: storage::remove_owned_tree(&pending.outputs.area, root),
-        }));
+    let over_cap = measured.bytes > limit;
+    if !over_cap && (!measured.errors.is_empty() || !measured.skipped.is_empty()) {
+        return Err(fail(BuildFailureKind::IncompleteMeasurement(measured)));
     }
-    if !report.errors.is_empty() || !report.skipped.is_empty() {
-        return Err(fail(BuildFailureKind::IncompleteMeasurement(report)));
-    }
+    let mut primary = None;
+    let mut post_build = PostBuild::default();
     for path in &pending.required {
-        storage::checked_path(&pending.outputs.area, path, false)
-            .map_err(|error| fail(output_error(error)))?;
-        let metadata = fs::symlink_metadata(path)
-            .map_err(|error| fail(output_error(StorageError::io(path, error))))?;
-        if !metadata.is_file() {
-            return Err(fail(BuildFailureKind::OutputNotRegular(path.clone())));
+        if let Err(kind) = inspect_output(&pending.outputs.area, path) {
+            match &kind {
+                BuildFailureKind::OutputMissing(_)
+                | BuildFailureKind::OutputNotRegular(_)
+                | BuildFailureKind::OutputThroughLink(_) => post_build.missing_outputs.push(
+                    path.strip_prefix(root)
+                        .expect("declared output beneath root")
+                        .as_os_str()
+                        .to_owned(),
+                ),
+                _ => post_build.invariant = Some(report::Invariant::BuildEvidence),
+            }
+            if primary.is_none() {
+                primary = Some(kind);
+            }
         }
     }
     let stage = match pending.run {
-        Resolution::Resolved(stage) => stage,
-        Resolution::AwaitingProducer(stage) => stage
-            .complete(pending.probe.0)
-            .map_err(|error| fail(BuildFailureKind::GeneratedProgramNotLaunchable(error)))?,
+        Resolution::Resolved(stage) => Some(stage),
+        Resolution::AwaitingProducer(stage) => match stage.complete(pending.probe.0) {
+            Ok(stage) => Some(stage),
+            Err(error) => {
+                let kind = BuildFailureKind::GeneratedProgramNotLaunchable(error);
+                let generated = PostBuild::from_failure_kind(&kind, root);
+                post_build.generated_program_invalid = generated.generated_program_invalid;
+                post_build.invariant = post_build.invariant.or(generated.invariant);
+                if primary.is_none() {
+                    primary = Some(kind);
+                }
+                None
+            }
+        },
     };
+    // Validation must observe the original tree. Overflow cleanup is retained
+    // independently of whichever earlier contract row supplies the cause.
+    let overflow = if over_cap {
+        post_build.output_too_large = Some((measured.bytes, limit));
+        Some(Box::new(BuildOutputOverflow {
+            bytes: measured.bytes,
+            limit,
+            measurement: measured,
+            removal: storage::remove_owned_tree(&pending.outputs.area, root),
+        }))
+    } else {
+        None
+    };
+    if let Some(kind) = primary.or(over_cap.then_some(BuildFailureKind::BuildOutputTooLarge)) {
+        return Err(BuildFailure {
+            id: pending.outputs.id,
+            output_root: pending.outputs.root,
+            kind: Box::new(kind),
+            over_cap: overflow,
+            post_build: Box::new(post_build),
+        });
+    }
     Ok(ValidatedBuild {
         outputs: pending.outputs,
         recipe: pending.recipe,
-        stage,
+        stage: stage.expect("generated program validated"),
     })
+}
+
+fn inspect_output(area: &Path, path: &Path) -> Result<(), BuildFailureKind> {
+    storage::checked_path(area, path, false).map_err(output_error)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| output_error(StorageError::io(path, error)))?;
+    if !metadata.is_file() {
+        return Err(BuildFailureKind::OutputNotRegular(path.to_path_buf()));
+    }
+    Ok(())
 }
 
 fn output_error(error: StorageError) -> BuildFailureKind {

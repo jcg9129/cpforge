@@ -172,6 +172,8 @@ fn success() -> BuildExecutionOutcome {
         enforced_at: None,
         cleanup: crate::supervisor::Cleanup::Confirmed,
         errors: Vec::new(),
+        stdout: StreamEvidence::default(),
+        stderr: StreamEvidence::default(),
     }
 }
 
@@ -405,14 +407,30 @@ fn linked_artifact_and_required_class_through_link_are_refused() {
     ));
 
     let java = directory.target("java", "[languages.java]\nentry = 'a.b.Grader'\n");
-    let pending = directory.pending(&java, "linked-class", 100, &probe);
+    let pending = directory.pending(&java, "linked-class", 1, &probe);
+    let root = pending.output_root().to_owned();
+    fs::write(root.join("auxiliary"), "oversized").unwrap();
     fs::create_dir_all(directory.path("classes/b")).unwrap();
     fs::write(directory.path("classes/b/Grader.class"), "class").unwrap();
     symlink(directory.path("classes"), pending.output_root().join("a")).unwrap();
+    let error = finish_build(pending, success()).unwrap_err();
     assert!(matches!(
-        *finish_build(pending, success()).unwrap_err().kind,
+        error.kind.as_ref(),
         BuildFailureKind::OutputThroughLink(_)
     ));
+    assert_eq!(
+        reported_build(RunClass::ExitedZero, Err(&error)),
+        report::BuildResult::Failed {
+            cause: report::BuildCause::MissingOutput {
+                names: vec![under(Path::new(""), "a/b/Grader.class").into_os_string()],
+                names_dropped: 0,
+            },
+        }
+    );
+    let removal = error.over_cap.as_ref().unwrap().removal.as_ref().unwrap();
+    assert!(removal.errors.is_empty() && removal.skipped.is_empty());
+    assert!(!root.exists());
+    assert!(directory.path("classes/b/Grader.class").is_file());
 }
 
 #[test]
@@ -429,9 +447,6 @@ fn zero_exit_does_not_override_timeout_output_limit_or_supervisor_errors() {
     let mut output_limit = success();
     output_limit.stop_trigger = Some(StopTrigger::OutputBudget(Stream::Stdout));
     outcomes.push(output_limit);
-    let mut enforced = success();
-    enforced.enforced_at = Some(Duration::from_millis(1));
-    outcomes.push(enforced);
     let mut error = success();
     error.errors.push(SupervisorError::Wait(5));
     outcomes.push(error);
@@ -461,19 +476,262 @@ fn auxiliary_bytes_count_and_overflow_removes_the_whole_build() {
     fs::write(root.join("Main.class"), "class").unwrap();
     fs::write(root.join("auxiliary"), "0123456789").unwrap();
     let error = finish_build(pending, success()).unwrap_err();
-    let BuildFailureKind::BuildOutputTooLarge {
-        bytes,
-        limit,
-        removal,
-        ..
-    } = *error.kind
-    else {
-        panic!("overflow")
-    };
-    assert_eq!((bytes, limit), (15, 10));
-    let report = removal.unwrap();
+    assert!(matches!(*error.kind, BuildFailureKind::BuildOutputTooLarge));
+    let overflow = error.over_cap.unwrap();
+    assert_eq!((overflow.bytes, overflow.limit), (15, 10));
+    let report = overflow.removal.unwrap();
     assert!(report.errors.is_empty() && report.skipped.is_empty());
     assert!(!root.exists());
+}
+
+fn reported_build(
+    class: RunClass,
+    validation: Result<&ValidatedBuild, &BuildFailure>,
+) -> report::BuildResult {
+    report::build_result(
+        &report::ExecutionResult {
+            coverage: report::Coverage::Started,
+            class: Some(class),
+            invariant: None,
+        },
+        &PostBuild::from_validation(validation),
+    )
+}
+
+#[test]
+fn overflow_preserves_validation_order_and_removal_evidence() {
+    let directory = Directory::new();
+    let target = directory.target(
+        "cpp",
+        "[languages.cpp.run]\nargv = ['{artifact_dir}/launcher.exe']\n",
+    );
+    let probe = Tools::new(&directory);
+    for (id, declared, generated) in [
+        ("missing", false, false),
+        ("invalid", true, false),
+        ("oversize-only", true, true),
+    ] {
+        let pending = directory.pending(&target, id, 1, &probe);
+        let root = pending.output_root().to_owned();
+        let artifact = file_artifact(&pending, &target);
+        fs::write(root.join("auxiliary"), "oversized").unwrap();
+        if declared {
+            fs::write(&artifact, "data").unwrap();
+        }
+        if generated {
+            write_executable(&root.join("launcher.exe"));
+        }
+        let error = finish_build(pending, success()).unwrap_err();
+        let post = PostBuild::from_validation(Err(&error));
+        let overflow = error.over_cap.as_ref().expect("overflow retained");
+        assert_eq!(overflow.measurement.bytes, overflow.bytes);
+        assert_eq!(post.output_too_large, Some((overflow.bytes, 1)));
+        let removal = overflow.removal.as_ref().unwrap();
+        assert!(removal.errors.is_empty() && removal.skipped.is_empty());
+        assert!(!root.exists());
+        let report::BuildResult::Failed { cause } =
+            reported_build(RunClass::ExitedZero, Err(&error))
+        else {
+            panic!("expected build failure: {error}");
+        };
+        if !declared {
+            assert!(matches!(
+                error.kind.as_ref(),
+                BuildFailureKind::OutputMissing(_)
+            ));
+            assert_eq!(
+                cause,
+                report::BuildCause::MissingOutput {
+                    names: vec![artifact.strip_prefix(&root).unwrap().as_os_str().to_owned()],
+                    names_dropped: 0,
+                }
+            );
+            // The generated program was inspected before the tree was removed,
+            // even though the missing declared output supplies the primary cause.
+            assert!(post.generated_program_invalid.is_some());
+        } else if !generated {
+            assert!(matches!(
+                error.kind.as_ref(),
+                BuildFailureKind::GeneratedProgramNotLaunchable(_)
+            ));
+            assert!(matches!(
+                cause,
+                report::BuildCause::GeneratedProgramInvalid { .. }
+            ));
+        } else {
+            assert!(matches!(
+                error.kind.as_ref(),
+                BuildFailureKind::BuildOutputTooLarge
+            ));
+            assert_eq!(
+                cause,
+                report::BuildCause::OutputTooLarge {
+                    bytes: overflow.bytes,
+                    cap: 1
+                }
+            );
+            assert!(post.generated_program_invalid.is_none());
+        }
+        assert!(error.to_string().contains("removal: Ok"));
+    }
+}
+
+#[test]
+fn overflow_with_nonregular_declared_output_is_missing_output() {
+    let directory = Directory::new();
+    let target = directory.target("cpp", "[languages.cpp.run]\nargv = ['java']\n");
+    let probe = Tools::new(&directory);
+    let pending = directory.pending(&target, "nonregular-overflow", 1, &probe);
+    fs::create_dir(file_artifact(&pending, &target)).unwrap();
+    fs::write(pending.output_root().join("auxiliary"), "oversized").unwrap();
+    let root = pending.output_root().to_owned();
+    let error = finish_build(pending, success()).unwrap_err();
+    assert!(matches!(
+        error.kind.as_ref(),
+        BuildFailureKind::OutputNotRegular(_)
+    ));
+    assert!(matches!(
+        reported_build(RunClass::ExitedZero, Err(&error)),
+        report::BuildResult::Failed {
+            cause: report::BuildCause::MissingOutput { .. }
+        }
+    ));
+    assert!(error.over_cap.as_ref().unwrap().removal.is_ok());
+    assert!(!root.exists());
+}
+
+#[test]
+fn discard_breaches_and_enforcement_timing_do_not_skip_validation() {
+    let directory = Directory::new();
+    let target = directory.target("cpp", "");
+    let probe = Tools::new(&directory);
+    let mut outcome = success();
+    outcome.stderr.exceeded = true;
+    outcome
+        .stderr
+        .losses
+        .push(supervisor::CaptureLoss::BudgetDiscard);
+    outcome.violations.push(Violation::OutputBudget {
+        stream: Stream::Stderr,
+        offset: 5,
+    });
+    outcome.enforced_at = Some(Duration::from_millis(1));
+    for valid in [false, true] {
+        let mut pending = directory.pending(
+            &target,
+            if valid {
+                "discard-valid"
+            } else {
+                "discard-missing"
+            },
+            100,
+            &probe,
+        );
+        pending.build.stderr.policy = crate::config::CapPolicy::Discard;
+        let record = outcome.run_input([pending.build.stdout.policy, pending.build.stderr.policy]);
+        assert_eq!(report::classify_run(&record), RunClass::ExitedZero);
+        assert!(report::run_notes(&record).contains(&report::RunNote::TruncatedStderr));
+        if valid {
+            write_executable(&file_artifact(&pending, &target));
+        }
+        let validation = finish_build(pending, outcome.clone());
+        if valid {
+            let validated = validation.unwrap();
+            assert_eq!(
+                reported_build(RunClass::ExitedZero, Ok(&validated)),
+                report::BuildResult::Succeeded
+            );
+            assert!(validated.run(directory.path("run-one")).is_ok());
+        } else {
+            let failure = validation.unwrap_err();
+            assert!(matches!(
+                failure.kind.as_ref(),
+                BuildFailureKind::OutputMissing(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn producer_failures_follow_run_class_and_never_validate_outputs() {
+    let directory = Directory::new();
+    let target = directory.target("cpp", "");
+    let probe = Tools::new(&directory);
+    let mut kill = success();
+    kill.stop_trigger = Some(StopTrigger::OutputBudget(Stream::Stderr));
+    kill.stderr.exceeded = true;
+    let mut incomplete = success();
+    incomplete.cleanup = supervisor::Cleanup::Incomplete { survivors: 1 };
+    let mut capture_loss = success();
+    capture_loss
+        .stdout
+        .losses
+        .push(supervisor::CaptureLoss::WriteError(5));
+    for (id, outcome, expected) in [
+        (
+            "kill",
+            kill,
+            RunClass::OutputBudget {
+                streams: report::BudgetStreams {
+                    stdout: false,
+                    stderr: true,
+                },
+            },
+        ),
+        (
+            "incomplete",
+            incomplete,
+            RunClass::Infrastructure {
+                causes: report::InfrastructureCauses::new([
+                    report::InfrastructureCause::CleanupIncomplete { survivors: 1 },
+                ]),
+            },
+        ),
+        (
+            "capture-loss",
+            capture_loss,
+            RunClass::Infrastructure {
+                causes: report::InfrastructureCauses::new([
+                    report::InfrastructureCause::CaptureLoss {
+                        stream: report::Stream::Stdout,
+                        loss: report::LossKind::WriteError,
+                    },
+                ]),
+            },
+        ),
+    ] {
+        let pending = directory.pending(&target, id, 1, &probe);
+        let record = outcome.run_input([pending.build.stdout.policy, pending.build.stderr.policy]);
+        let class = report::classify_run(&record);
+        assert_eq!(class, expected);
+        // Missing outputs and overflow would fail validation if it ran. Leaving
+        // this tree untouched proves the producer gate precedes that work.
+        let auxiliary = pending.output_root().join("auxiliary");
+        fs::write(&auxiliary, "oversized").unwrap();
+        let failure = finish_build(pending, outcome).unwrap_err();
+        assert!(matches!(
+            failure.kind.as_ref(),
+            BuildFailureKind::ProducerFailed(_)
+        ));
+        assert!(failure.over_cap.is_none());
+        assert_eq!(
+            PostBuild::from_validation(Err(&failure)),
+            PostBuild::default()
+        );
+        assert!(auxiliary.is_file());
+        let result = reported_build(class, Err(&failure));
+        match expected {
+            RunClass::Infrastructure { causes } => {
+                assert_eq!(result, report::BuildResult::Infrastructure { causes })
+            }
+            class => assert_eq!(
+                result,
+                report::BuildResult::Failed {
+                    cause: report::BuildCause::Run(class)
+                }
+            ),
+        }
+    }
 }
 
 #[test]
@@ -663,6 +921,12 @@ fn every_explicit_java_requirement_is_enforced() {
         "[languages.java]\nartifacts = { dir = true, required = ['Main.class', 'Aux.class'] }\n",
     );
     let probe = Tools::new(&directory);
+    let absent = directory.pending(&target, "all-absent", 100, &probe);
+    let failure = finish_build(absent, success()).unwrap_err();
+    assert_eq!(
+        PostBuild::from_validation(Err(&failure)).missing_outputs,
+        vec![OsString::from("Main.class"), OsString::from("Aux.class")]
+    );
     let pending = directory.pending(&target, "required", 100, &probe);
     fs::write(pending.output_root().join("Main.class"), "class").unwrap();
     let missing = pending.output_root().join("Aux.class");

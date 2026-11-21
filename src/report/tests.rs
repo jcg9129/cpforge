@@ -2842,6 +2842,27 @@ fn supervisor_adapter_fixtures() {
         },
     ];
     for row in rows {
+        if let RunRecord::Started(root) = &row.record {
+            let policies = row.policies.map(|policy| match policy {
+                supervisor::Exceed::Kill => crate::config::CapPolicy::Kill,
+                supervisor::Exceed::Discard => crate::config::CapPolicy::Discard,
+            });
+            let build = crate::build::BuildExecutionOutcome::from(&**root);
+            let build_input = build.run_input(policies);
+            let report_input = RunInput::from_root(root, false, row.policies);
+            assert_eq!(
+                classify_run(&build_input),
+                classify_run(&report_input),
+                "{} build",
+                row.name
+            );
+            assert_eq!(
+                run_notes(&build_input),
+                run_notes(&report_input),
+                "{} build notes",
+                row.name
+            );
+        }
         let actual = RunInput::from_record(&row.record, row.consumes_stdout, row.policies)
             .map(|input| classify_run(&input));
         assert_eq!(actual, row.expected, "{}", row.name);
@@ -2901,17 +2922,9 @@ fn build_validation_adapter_fixtures() {
             },
         ),
         (
-            "output_too_large",
-            F::BuildOutputTooLarge {
-                bytes: 101,
-                limit: 100,
-                measurement: crate::storage::WalkReport::default(),
-                removal: Ok(crate::storage::WalkReport::default()),
-            },
-            PostBuild {
-                output_too_large: Some((101, 100)),
-                ..PostBuild::default()
-            },
+            "overflow_is_independent_of_primary_diagnostics",
+            F::BuildOutputTooLarge,
+            PostBuild::default(),
         ),
         (
             "empty_generated_program_diagnostics",
@@ -2926,7 +2939,9 @@ fn build_validation_adapter_fixtures() {
         let failure = BuildFailure {
             id: BuildId::new("build").unwrap(),
             output_root: root.clone(),
+            post_build: Box::new(PostBuild::from_failure_kind(&kind, &root)),
             kind: Box::new(kind),
+            over_cap: None,
         };
         assert_eq!(
             PostBuild::from_validation(Err(&failure)),

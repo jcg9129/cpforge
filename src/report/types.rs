@@ -697,28 +697,29 @@ pub struct DisplayContext {
 }
 
 impl PostBuild {
-    /// Adapt completed build validation without rerunning it. Producer failure
-    /// needs the original run record for classification: BuildExecutionOutcome
-    /// omits captures. A declared output that is absent, not a regular file, or
-    /// reached through a link fails the configuration contract's output rule, so
-    /// it is `missing_output`, named by the offending path beneath the output
-    /// root. Unspecified inspection/measurement failures are explicit invariants
-    /// rather than invented ordinary build causes. Build validation stops at its
-    /// first failure and checks the output cap before declared outputs and the
-    /// generated program, so with simultaneous failures it can report a cause
-    /// other than the first in report §2.3 order. Populate `PostBuild` directly
-    /// when all simultaneous post-build facts are available.
+    /// Adapt finalized observations without inspecting the removed output tree
+    /// or inferring independent facts from the primary failure cause. Producer
+    /// classification uses the run record, separately from these observations.
     pub fn from_validation(
         result: Result<&crate::build::ValidatedBuild, &crate::build::BuildFailure>,
     ) -> Self {
+        match result {
+            Ok(_) => Self::default(),
+            Err(failure) => (*failure.post_build).clone(),
+        }
+    }
+
+    /// Diagnostics for a single validation failure. Finalization collects all
+    /// declared names separately, so a failed ancestor is never used as a name.
+    pub(crate) fn from_failure_kind(
+        kind: &crate::build::BuildFailureKind,
+        output_root: &std::path::Path,
+    ) -> Self {
         use crate::build::BuildFailureKind as F;
-        let Err(failure) = result else {
-            return Self::default();
-        };
         let mut post = Self::default();
-        match failure.kind.as_ref() {
+        match kind {
             F::OutputMissing(path) | F::OutputNotRegular(path) | F::OutputThroughLink(path) => {
-                match path.strip_prefix(&failure.output_root) {
+                match path.strip_prefix(output_root) {
                     Ok(name) if !name.as_os_str().is_empty() => {
                         post.missing_outputs.push(name.as_os_str().to_owned())
                     }
@@ -736,13 +737,11 @@ impl PostBuild {
                     post.invariant = Some(Invariant::BuildEvidence);
                 }
             }
-            F::BuildOutputTooLarge { bytes, limit, .. } => {
-                post.output_too_large = Some((*bytes, *limit))
+            // These have independent observations, populated by finalization.
+            F::BuildOutputTooLarge | F::ProducerFailed(_) => {}
+            F::OutputInspection(_) | F::Measurement(_) | F::IncompleteMeasurement(_) => {
+                post.invariant = Some(Invariant::BuildEvidence)
             }
-            F::ProducerFailed(_)
-            | F::OutputInspection(_)
-            | F::Measurement(_)
-            | F::IncompleteMeasurement(_) => post.invariant = Some(Invariant::BuildEvidence),
         }
         post
     }

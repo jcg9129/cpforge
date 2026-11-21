@@ -291,6 +291,8 @@ fn producer_success() -> cpforge::build::BuildExecutionOutcome {
         enforced_at: None,
         cleanup: cpforge::supervisor::Cleanup::Confirmed,
         errors: Vec::new(),
+        stdout: cpforge::report::StreamEvidence::default(),
+        stderr: cpforge::report::StreamEvidence::default(),
     }
 }
 
@@ -347,8 +349,12 @@ fn managed_build_output_limit_failure_exposes_no_consumer_and_removes_outputs() 
     let failure = cpforge::build::finish_build(pending, producer_success()).unwrap_err();
     assert!(matches!(
         *failure.kind,
-        cpforge::build::BuildFailureKind::BuildOutputTooLarge { .. }
+        cpforge::build::BuildFailureKind::BuildOutputTooLarge
     ));
+    let overflow = failure.over_cap.unwrap();
+    assert_eq!(overflow.limit, 1);
+    let removal = overflow.removal.unwrap();
+    assert!(removal.errors.is_empty() && removal.skipped.is_empty());
     assert!(!root.exists());
 }
 
