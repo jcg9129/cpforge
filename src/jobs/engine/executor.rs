@@ -33,13 +33,13 @@ impl Drop for RunResources {
 /// resources to cleanup before returning when physical work remains. Futures
 /// need not be Send: creation and a ready job's planning probe are thread-bound.
 pub trait Executor {
-    fn execute<'a>(
-        &'a mut self,
+    fn execute(
+        &mut self,
         spec: Arc<ExecutionSpec>,
         cancel: CancelToken,
         events: RunEvents,
         resources: RunResources,
-    ) -> JobFuture<'a, ExecutionRecord>;
+    ) -> JobFuture<'_, ExecutionRecord>;
 }
 
 #[cfg(target_os = "linux")]
@@ -50,13 +50,13 @@ pub struct SupervisorExecutor {
 
 #[cfg(target_os = "linux")]
 impl Executor for SupervisorExecutor {
-    fn execute<'a>(
-        &'a mut self,
+    fn execute(
+        &mut self,
         spec: Arc<ExecutionSpec>,
         cancel: CancelToken,
         events: RunEvents,
         resources: RunResources,
-    ) -> JobFuture<'a, ExecutionRecord> {
+    ) -> JobFuture<'_, ExecutionRecord> {
         use crate::supervisor::{
             self, OutputSpec, ProgramSpec, RunControls, Sink, StdinSpec, StreamPolicy,
         };

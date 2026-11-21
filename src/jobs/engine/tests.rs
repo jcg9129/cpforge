@@ -130,13 +130,13 @@ impl Fake {
     }
 }
 impl Executor for Fake {
-    fn execute<'a>(
-        &'a mut self,
+    fn execute(
+        &mut self,
         spec: Arc<ExecutionSpec>,
         cancel: CancelToken,
         events: RunEvents,
         resources: RunResources,
-    ) -> JobFuture<'a, ExecutionRecord> {
+    ) -> JobFuture<'_, ExecutionRecord> {
         Box::pin(async move {
             let _resources = resources;
             self.runs.push(spec.run.clone());
