@@ -254,7 +254,7 @@ fn invalid_catalogs_and_capture_errors_publish_nothing_and_remove_captures() {
         let before = snapshot(&workspace.path(""));
         failure(
             workspace.add(true),
-            1,
+            8,
             &[
                 "tests.toml",
                 if text.contains('[') {
@@ -275,7 +275,7 @@ fn invalid_catalogs_and_capture_errors_publish_nothing_and_remove_captures() {
     ] {
         let workspace = Workspace::new();
         let before = snapshot(&workspace.path(""));
-        failure(workspace.run(&args), 1, &["cannot capture"]);
+        failure(workspace.run(&args), 8, &["cannot capture"]);
         assert_eq!(snapshot(&workspace.path("")), before);
         assert!(!workspace.path(".cpforge").exists());
         workspace.no_captures();
@@ -428,7 +428,7 @@ fn an_explicit_fifo_is_streamed_and_tool_written_links_are_refused() {
         workspace.path("problems/A/tests"),
     )
     .unwrap();
-    failure(workspace.add(true), 1, &["link"]);
+    failure(workspace.add(true), 8, &["link"]);
     assert_eq!(
         fs::read_dir(workspace.path("elsewhere")).unwrap().count(),
         0
@@ -718,7 +718,7 @@ fn partial_registration_failure_reports_paths_step_and_cause_and_removes_capture
     let output = workspace.add(true);
     failure(
         output,
-        1,
+        9,
         &[
             "tests/custom-1.in",
             "tests/custom-1.ans",

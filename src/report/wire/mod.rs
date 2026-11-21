@@ -202,7 +202,13 @@ pub fn encode_stdout_report_data(
 }
 
 fn refusal_value(v: &Refusal) -> Result<Value> {
-    if matches!(v.class, FailureClass::Usage | FailureClass::Partial) {
+    if !matches!(
+        v.class,
+        FailureClass::Config
+            | FailureClass::Workspace
+            | FailureClass::Cancelled
+            | FailureClass::Internal
+    ) {
         return Err(Error("invalid refusal class"));
     }
     if v.cpf_version.len() > 32 || !v.cpf_version.is_ascii() {

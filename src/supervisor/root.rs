@@ -338,3 +338,10 @@ pub fn init_process() -> io::Result<()> {
     }
     cleanup::init()
 }
+
+/// Signal-control thread's force-exit barrier. It uses only live capabilities;
+/// creation and physical cleanup are never awaited.
+pub(crate) fn force_kill_active() {
+    #[cfg(target_os = "linux")]
+    unix::force_kill_active();
+}

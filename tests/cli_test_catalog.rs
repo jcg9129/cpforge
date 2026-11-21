@@ -90,7 +90,7 @@ fn success(output: Output) -> Output {
 }
 
 fn failure(output: Output, words: &[&str]) {
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     let message = String::from_utf8_lossy(&output.stderr);
     for word in words {
         assert!(message.contains(word), "missing {word:?}: {output:?}");
@@ -362,7 +362,8 @@ fn catalog_classifications_refuse_mutations_but_allow_discovery() {
             failure(workspace.test(&args), &[reason, "tests.toml"]);
             assert_eq!(workspace.catalog_bytes(), text.as_bytes());
         }
-        let output = success(workspace.test(&["ls"]));
+        let output = workspace.test(&["ls"]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).contains(reason));
         assert!(String::from_utf8_lossy(&output.stdout).contains("candidate tests/new.in"));
         assert_eq!(workspace.catalog_bytes(), text.as_bytes());
@@ -375,7 +376,8 @@ fn catalog_classifications_refuse_mutations_but_allow_discovery() {
     );
     failure(workspace.test(&["enable", "new"]), &["unreadable"]);
     failure(workspace.test(&["disable", "new"]), &["unreadable"]);
-    let output = success(workspace.test(&["ls"]));
+    let output = workspace.test(&["ls"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("unreadable"));
     assert!(workspace.path("problems/A/tests.toml").is_dir());
 }

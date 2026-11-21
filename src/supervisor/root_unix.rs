@@ -32,7 +32,7 @@
 
 use super::*;
 use crate::supervisor::capture::{self, Captures};
-use std::sync::Mutex;
+use std::sync::{Mutex, Weak};
 
 #[cfg(target_os = "linux")]
 #[path = "root_linux.rs"]
@@ -41,21 +41,43 @@ use os as sys;
 pub(super) use os::init_process;
 use os::observe_root as observe;
 
+#[derive(Debug)]
+struct SignalLease {
+    pid: i32,
+    capable: Weak<Mutex<bool>>,
+}
+static SIGNAL_LEASES: Mutex<Vec<SignalLease>> = Mutex::new(Vec::new());
+
+pub(super) fn force_kill_active() {
+    let mut leases = SIGNAL_LEASES.lock().unwrap_or_else(|e| e.into_inner());
+    leases.retain(|lease| {
+        let Some(capable) = lease.capable.upgrade() else {
+            return false;
+        };
+        let capable = capable.lock().unwrap_or_else(|e| e.into_inner());
+        if *capable {
+            let _ = sys::kill_group(lease.pid);
+        }
+        true
+    });
+}
+
 pub(in crate::supervisor) const REAP_DEADLINE: Duration = Duration::from_secs(2);
 
 /// A registry entry moves with its sole owner (root, then cleanup service).
-/// No signalling handle escapes this entry, so unrelated runs never contend
-/// for its capability lock. The admission key distinguishes reused numeric PIDs.
+/// The control thread holds only a weak capability for forced termination.
+/// Revocation serializes with that thread before identity protection is lost.
+/// The admission key distinguishes reused numeric PIDs.
 #[derive(Debug)]
 struct Lease {
     pid: i32,
     key: u64,
-    capable: Mutex<bool>,
+    capable: Arc<Mutex<bool>>,
 }
 
 impl Lease {
     fn kill(&self) -> io::Result<()> {
-        let capable = self.capable.try_lock().expect("exclusive lease owner");
+        let capable = self.capable.lock().unwrap_or_else(|e| e.into_inner());
         if *capable {
             sys::kill_group(self.pid)
         } else {
@@ -65,9 +87,9 @@ impl Lease {
 
     #[cfg(test)]
     fn kill_and_revoke(&self) -> io::Result<()> {
-        // Only this lease's owner can access the capability; try_lock therefore
-        // cannot fail. In particular, transfer never waits for a registry lock.
-        let mut capable = self.capable.try_lock().expect("exclusive lease owner");
+        // Revocation and forced signalling share only this short capability lock;
+        // no process creation or wait takes place while it is held.
+        let mut capable = self.capable.lock().unwrap_or_else(|e| e.into_inner());
         let result = if *capable {
             sys::kill_group(self.pid)
         } else {
@@ -78,7 +100,7 @@ impl Lease {
     }
 
     fn revoke(&mut self) {
-        *self.capable.get_mut().unwrap_or_else(|e| e.into_inner()) = false;
+        *self.capable.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 }
 
@@ -336,8 +358,19 @@ pub(in crate::supervisor) fn spawn_prepared(
     let lease = Lease {
         pid,
         key: admission.key(),
-        capable: Mutex::new(true),
+        capable: Arc::new(Mutex::new(true)),
     };
+    {
+        let mut leases = SIGNAL_LEASES.lock().unwrap_or_else(|e| e.into_inner());
+        leases.retain(|entry| entry.capable.strong_count() != 0);
+        leases.push(SignalLease {
+            pid,
+            capable: Arc::downgrade(&lease.capable),
+        });
+        if crate::cancel_signals::force_exit_started() {
+            let _ = sys::kill_group(pid);
+        }
+    }
     let mut root = Root {
         lease: Some(lease),
         admission: Some(admission),
@@ -787,7 +820,9 @@ impl Root {
         let Some(lease) = self.lease.as_ref() else {
             return Ok(());
         };
-        if !*lease.capable.try_lock().expect("exclusive lease owner") {
+        // The force-exit thread may hold the capability briefly; only the
+        // owner revokes it, so a blocking read is enough here.
+        if !*lease.capable.lock().unwrap_or_else(|e| e.into_inner()) {
             return Ok(());
         }
         let pid = lease.pid;

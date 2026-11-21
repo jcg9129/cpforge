@@ -25,12 +25,31 @@ fn store_error(error: StoreError) -> Error {
     for warning in error.warnings {
         eprintln!("cpf: warning: {warning}");
     }
-    Error::Failure(error.message)
+    Error::Workspace(error.message)
 }
 
-pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result<(), Error> {
+pub(crate) fn run(
+    problem: Option<&str>,
+    command: Option<TestCommand>,
+    machine: crate::cli::MachineArgs,
+) -> Result<(), Error> {
+    if command.is_some() && machine.mode().requested() {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::ArgumentConflict,
+            "machine output is available for test jobs, not catalog subcommands",
+        )
+        .into());
+    }
     let Some(command) = command else {
-        return Err(Error::Failure("cpf test: running tests is not yet available; use cpf test add, ls, register, enable or disable".into()));
+        let mut delivery = machine.prepare(crate::report::JobKind::Test)?;
+        let error = Error::Workspace("cpf test: running tests is not yet available; use cpf test add, ls, register, enable or disable".into());
+        if machine.mode().requested() {
+            delivery.refusal(
+                &crate::transport::early_refusal(crate::report::JobKind::Test, &error),
+                machine.mode(),
+            )?;
+        }
+        return Err(error);
     };
     if let TestCommand::Add {
         input,
@@ -46,11 +65,15 @@ pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result
         }
     }
     let cwd = std::env::current_dir()
-        .map_err(|error| Error::Failure(format!("cannot read current directory: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("cannot read current directory: {error}")))?;
     let selected = selection::resolve(&find_root(&cwd)?, &cwd, problem)?;
     let store = TestStore::new(selected.dir);
     if matches!(command, TestCommand::Ls) {
         let listing = store.list()?;
+        let healthy = matches!(
+            &listing.catalog,
+            crate::storage::Record::Missing | crate::storage::Record::Valid(_)
+        );
         for entry in &listing.registered {
             print!(
                 "{} {} answer {}",
@@ -85,14 +108,18 @@ pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result
         for diagnostic in listing.diagnostics {
             eprintln!("cpf: {diagnostic}");
         }
-        return Ok(());
+        return if healthy {
+            Ok(())
+        } else {
+            Err(Error::Workspace("test catalog is unhealthy".into()))
+        };
     }
     // Capture both streams before creating or acquiring a workspace lock.
     // A failure drops any earlier capture and has published nothing.
     let captures = if let TestCommand::Add { input, answer } = &command {
         let capture = |path: &std::path::Path| {
             CapturedFile::from_source(path).map_err(|error| {
-                Error::Failure(format!("cannot capture {}: {error}", path.display()))
+                Error::Workspace(format!("cannot capture {}: {error}", path.display()))
             })
         };
         Some((capture(input)?, answer.as_deref().map(capture).transpose()?))
@@ -102,7 +129,7 @@ pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result
     // Register paths are lexical from the physical current directory (§5.7).
     let cwd = std::fs::canonicalize(&cwd)
         .map(|path| crate::storage::paths::plain(&path))
-        .map_err(|error| Error::Failure(format!("cannot resolve current directory: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("cannot resolve current directory: {error}")))?;
     let lock = WorkspaceLock::new(&selected.root)?;
     let guard = lock.acquire("test catalog")?;
     if let Some(warning) = guard.recovery_warning() {
@@ -133,10 +160,15 @@ pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                return Err(Error::Failure(format!(
+                let message = format!(
                     "published: {paths}; not registered; {} failed: {}",
                     failure.step, failure.cause,
-                )));
+                );
+                return Err(if outcome.published.is_empty() {
+                    Error::Workspace(message)
+                } else {
+                    Error::Partial(message)
+                });
             }
             println!("{}", outcome.id);
         }

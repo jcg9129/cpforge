@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+// Flatten into each job command as it is implemented. Existing catalog and
+// metadata commands have no schema-1 machine document.
+pub use crate::transport::MachineArgs;
+
 /// Command-line arguments for `cpf`.
 #[derive(Debug, Parser)]
 #[command(name = "cpf", version, about)]
@@ -25,6 +29,8 @@ pub struct Cli {
 pub enum Command {
     /// Manage the selected problem's test catalog.
     Test {
+        #[command(flatten)]
+        machine: MachineArgs,
         #[command(subcommand)]
         command: Option<TestCommand>,
     },

@@ -279,7 +279,7 @@ fn configuration_and_template_errors_publish_nothing() {
         workspace.user_config(config);
         fs::write(workspace.path("cpforge.toml"), workspace_config).unwrap();
         fs::write(workspace.path("user/cpforge/t.cpp"), b"template").unwrap();
-        failure(&workspace.add(&["one", "--language", language]), 1, message);
+        failure(&workspace.add(&["one", "--language", language]), 7, message);
         assert!(!workspace.path("problems/one").exists());
         workspace.empty_staging();
     }
@@ -291,7 +291,7 @@ fn template_directory_and_staging_destination_conflicts_are_refused() {
     workspace
         .user_config("default_language = 'cpp'\n[languages.cpp]\ntemplate = { path = 't.cpp' }\n");
     fs::create_dir(workspace.path("user/cpforge/t.cpp")).unwrap();
-    failure(&workspace.add(&["one"]), 1, "t.cpp");
+    failure(&workspace.add(&["one"]), 7, "t.cpp");
     workspace.empty_staging();
     fs::remove_dir(workspace.path("user/cpforge/t.cpp")).unwrap();
     fs::write(workspace.path("user/cpforge/t.cpp"), b"template").unwrap();
@@ -300,7 +300,7 @@ fn template_directory_and_staging_destination_conflicts_are_refused() {
         "[languages.cpp]\nsources = ['problem.toml']\n",
     )
     .unwrap();
-    failure(&workspace.add(&["one"]), 1, "problem.toml");
+    failure(&workspace.add(&["one"]), 7, "problem.toml");
     assert!(!workspace.path("problems/one").exists());
     workspace.empty_staging();
 }
@@ -331,19 +331,19 @@ fn identifiers_labels_and_contest_ids_are_validated_before_creation() {
     for name in [
         "", "../bad", "a..b", "a/b", "bad.", "CON", "nul.txt", "LPT9", "é",
     ] {
-        failure(&workspace.add(&[name]), 1, "invalid problem name");
+        failure(&workspace.add(&[name]), 8, "invalid problem name");
     }
     for contest in ["../bad", "COM1", "bad."] {
         failure(
             &workspace.add(&["one", "--contest", contest]),
-            1,
+            8,
             "invalid contest id",
         );
     }
     for label in ["", "has space", "é", "abcdefghijklmnopq", "A."] {
         failure(
             &workspace.add(&["one", "--contest", "round", "--label", label]),
-            1,
+            8,
             "label must be",
         );
     }
@@ -374,7 +374,7 @@ fn existing_problem_entries_are_classified_and_never_overwritten() {
             fs::write(&path, bytes).unwrap();
         }
         fs::write(workspace.path("problems/one/keep"), b"protected").unwrap();
-        failure(&workspace.add(&["one"]), 1, message);
+        failure(&workspace.add(&["one"]), 8, message);
         if let Some(bytes) = bytes {
             assert_eq!(fs::read(path).unwrap(), bytes);
         }
@@ -386,7 +386,7 @@ fn existing_problem_entries_are_classified_and_never_overwritten() {
     let workspace = Workspace::new();
     fs::create_dir_all(workspace.path("problems")).unwrap();
     fs::write(workspace.path("problems/one"), b"file").unwrap();
-    failure(&workspace.add(&["one"]), 1, "NotADirectory");
+    failure(&workspace.add(&["one"]), 8, "NotADirectory");
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn portable_spelling_collisions_name_the_existing_entry() {
             .unwrap()
             .unwrap()
             .file_name();
-        failure(&workspace.add(&[name]), 1, &actual.to_string_lossy());
+        failure(&workspace.add(&[name]), 8, &actual.to_string_lossy());
         assert_eq!(fs::read_dir(workspace.path("problems")).unwrap().count(), 1);
     }
 }
@@ -438,11 +438,12 @@ fn contest_label_conflicts_leave_membership_untouched() {
     let bytes = fs::read(&path).unwrap();
     success(&workspace.add(&["one", "--contest", "round"]));
     assert_eq!(fs::read(&path).unwrap(), bytes);
-    for args in [
-        vec!["one", "--contest", "round", "--label", "B"],
-        vec!["two", "--contest", "round", "--label", "A"],
+    // An existing problem commits nothing (8); a newly created one is partial (9).
+    for (args, code) in [
+        (vec!["one", "--contest", "round", "--label", "B"], 8),
+        (vec!["two", "--contest", "round", "--label", "A"], 9),
     ] {
-        failure(&workspace.add(&args), 1, "label conflict");
+        failure(&workspace.add(&args), code, "label conflict");
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
     assert!(workspace.path("problems/two/problem.toml").is_file());
@@ -482,7 +483,7 @@ fn bad_contest_records_allow_problem_publication_and_rerun_completes_membership(
         let path = workspace.path("contests/round/contest.toml");
         fs::write(&path, bytes).unwrap();
         let output = workspace.add(&["two", "--contest", "round", "--label", "B"]);
-        failure(&output, 1, "problem created; contest membership failed:");
+        failure(&output, 9, "problem created; contest membership failed:");
         assert!(String::from_utf8_lossy(&output.stderr).contains(classification));
         assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
         let problem_path = workspace.path("problems/two/problem.toml");
@@ -525,7 +526,7 @@ fn discovery_uses_the_nearest_regular_marker_and_supports_nested_invocations() {
             .args(["add", "two"])
             .output()
             .unwrap(),
-        1,
+        8,
         "outside a workspace",
     );
     assert!(!workspace.path("problems/two").exists());
@@ -540,7 +541,7 @@ fn linked_problem_and_contest_directories_are_refused() {
     fs::create_dir_all(workspace.path("protected")).unwrap();
     fs::write(workspace.path("protected/keep"), b"protected").unwrap();
     symlink(workspace.path("protected"), workspace.path("problems/one")).unwrap();
-    failure(&workspace.add(&["one"]), 1, "LinkInPath");
+    failure(&workspace.add(&["one"]), 8, "LinkInPath");
     fs::create_dir_all(workspace.path("contests")).unwrap();
     symlink(
         workspace.path("protected"),
@@ -549,7 +550,7 @@ fn linked_problem_and_contest_directories_are_refused() {
     .unwrap();
     failure(
         &workspace.add(&["two", "--contest", "round"]),
-        1,
+        9,
         "problem created; contest membership failed:",
     );
     assert_eq!(
@@ -570,7 +571,7 @@ fn linked_problems_and_contests_roots_are_refused() {
         workspace.path("problems"),
     )
     .unwrap();
-    failure(&workspace.add(&["one"]), 1, "refusing a link");
+    failure(&workspace.add(&["one"]), 8, "refusing a link");
     assert_eq!(
         fs::read_dir(workspace.path("elsewhere/problems"))
             .unwrap()
@@ -585,7 +586,7 @@ fn linked_problems_and_contests_roots_are_refused() {
     .unwrap();
     failure(
         &workspace.add(&["one", "--contest", "round"]),
-        1,
+        9,
         "problem created; contest membership failed:",
     );
     assert!(workspace.path("problems/one/problem.toml").is_file());
@@ -610,7 +611,7 @@ fn non_portable_template_destinations_are_refused_before_staging() {
             format!("[languages.cpp]\nsources = ['{source}']\n"),
         )
         .unwrap();
-        failure(&workspace.add(&["one"]), 1, "template destination");
+        failure(&workspace.add(&["one"]), 7, "template destination");
         assert!(!workspace.path("problems/one").exists(), "{source}");
         workspace.empty_staging();
     }
@@ -867,7 +868,15 @@ fn oversized_records_are_refused_with_the_size_reason() {
         let bytes = vec![b'x'; 1024 * 1024 + 1];
         fs::write(&path, &bytes).unwrap();
         let output = workspace.add(&["one", "--contest", "round"]);
-        failure(&output, 1, "1048576-byte size limit");
+        failure(
+            &output,
+            match target {
+                "cpforge.toml" => 7,
+                "contests/round/contest.toml" => 9,
+                _ => 8,
+            },
+            "1048576-byte size limit",
+        );
         assert_eq!(fs::read(path).unwrap(), bytes);
         if target == "contests/round/contest.toml" {
             assert!(workspace.path("problems/one/problem.toml").is_file());
@@ -888,7 +897,7 @@ fn all_configuration_diagnostics_are_reported_before_creating_a_problem() {
     workspace.user_config("default_language = 42\n[languages.cpp]\nsources = 17\n");
     fs::write(workspace.path("cpforge.toml"), "schema = 99\n").unwrap();
     let output = workspace.add(&["one"]);
-    failure(&output, 1, "configuration failed");
+    failure(&output, 7, "configuration failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("default_language"), "{stderr}");
     assert!(stderr.contains("sources"), "{stderr}");
@@ -913,7 +922,7 @@ fn unreadable_templates_and_records_are_reported_without_overwriting() {
     fs::set_permissions(&template, fs::Permissions::from_mode(0o000)).unwrap();
     let output = workspace.add(&["one"]);
     fs::set_permissions(&template, fs::Permissions::from_mode(0o600)).unwrap();
-    failure(&output, 1, "t.cpp");
+    failure(&output, 7, "t.cpp");
     assert!(!workspace.path("problems/one").exists());
     workspace.empty_staging();
     fs::create_dir_all(workspace.path("problems/one")).unwrap();
@@ -922,7 +931,7 @@ fn unreadable_templates_and_records_are_reported_without_overwriting() {
     fs::set_permissions(&record, fs::Permissions::from_mode(0o000)).unwrap();
     let output = workspace.add(&["one"]);
     fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
-    failure(&output, 1, "unreadable");
+    failure(&output, 8, "unreadable");
     assert_eq!(fs::read(record).unwrap(), problem("one").as_bytes());
 }
 

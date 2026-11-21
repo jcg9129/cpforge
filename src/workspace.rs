@@ -54,7 +54,7 @@ fn initialize_locked(guard: &WorkspaceGuard<'_>, report: &mut Report) -> Result<
             .map_err(|error| StorageError::io(&config, error))?
             .is_file()
     {
-        return Err(Error::Failure(format!(
+        return Err(Error::Workspace(format!(
             "{} is not a regular workspace marker",
             config.display()
         )));
@@ -117,7 +117,7 @@ fn ensure_initial_sequence(guard: &WorkspaceGuard<'_>, report: &mut Report) -> R
     if matches!(&record, Record::Missing) {
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|error| {
-            Error::Failure(format!(
+            Error::Workspace(format!(
                 "cannot generate epoch for {}: {error}",
                 path.display()
             ))
@@ -156,7 +156,7 @@ fn ensure_initial_sequence(guard: &WorkspaceGuard<'_>, report: &mut Report) -> R
             format!("too_new: schema {schema}, supported {supported}")
         }
     };
-    Err(Error::Failure(format!(
+    Err(Error::Workspace(format!(
         "{} is {reason}; cpforge.toml was not published (inspect it, or remove it if \
          no jobs of this workspace need their numbering kept, then rerun `cpf init`)",
         path.display()
@@ -204,7 +204,7 @@ pub(crate) fn find_root(current: &Path) -> Result<PathBuf, Error> {
             Err(error) => return Err(StorageError::io(marker, error).into()),
         }
     }
-    Err(Error::Failure(
+    Err(Error::Workspace(
         "outside a workspace: no cpforge.toml found in this directory or its ancestors".into(),
     ))
 }
@@ -310,7 +310,7 @@ mod tests {
                 );
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.exit_code(), crate::exit::ExitCode::Failure);
+                assert_eq!(error.exit_code(), crate::exit::ExitCode::Workspace);
                 assert!(error.to_string().contains(classification));
                 assert!(!dir.0.join("cpforge.toml").exists());
             }

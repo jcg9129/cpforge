@@ -122,14 +122,14 @@ fn failure(output: &Output, code: i32, messages: &[&str]) {
 fn fresh_workspace_and_empty_saved_state_have_no_selection() {
     let workspace = Workspace::new();
     for args in [vec!["current"], vec!["current", "--path"]] {
-        failure(&workspace.run("", &args), 1, &["NoSelection"]);
+        failure(&workspace.run("", &args), 8, &["NoSelection"]);
     }
     workspace.state("schema = 1\n");
-    failure(&workspace.run("", &["current"]), 1, &["NoSelection"]);
+    failure(&workspace.run("", &["current"]), 8, &["NoSelection"]);
     // An unresolvable flag inside the workspace is an error, not NoSelection.
     failure(
         &workspace.run("user", &["current", "--problem", "missing"]),
-        1,
+        8,
         &["--problem", "not found"],
     );
     let output = workspace
@@ -139,7 +139,7 @@ fn fresh_workspace_and_empty_saved_state_have_no_selection() {
         .output()
         .unwrap();
     // Outside a workspace the existing workspace-required error is reported.
-    failure(&output, 1, &["outside a workspace"]);
+    failure(&output, 8, &["outside a workspace"]);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn flag_wins_without_reading_broken_cwd_problem_or_state() {
     // A failed flag must not inspect lower sources, even when both are broken.
     failure(
         &workspace.run("problems/A", &["current", "--problem", "missing"]),
-        1,
+        8,
         &["--problem flag", "local:missing", "not found"],
     );
 }
@@ -194,18 +194,18 @@ fn invalid_flag_never_falls_back_to_valid_cwd_or_saved_selection() {
     ] {
         failure(
             &workspace.run("problems/A", &["current", "--problem", reference]),
-            1,
+            8,
             &["--problem flag", "invalid problem reference"],
         );
         failure(
             &workspace.run("", &["switch", reference]),
-            1,
+            8,
             &["invalid problem reference"],
         );
     }
     failure(
         &workspace.run("problems/A", &["current", "--problem", "missing"]),
-        1,
+        8,
         &["--problem flag", "local:missing", "not found"],
     );
 }
@@ -227,13 +227,13 @@ fn cwd_wins_over_broken_state_and_a_broken_cwd_never_falls_back() {
     workspace.metadata("A", "[problem]\nid = 'local:other'\n");
     failure(
         &workspace.run("problems/A/nested", &["current"]),
-        1,
+        8,
         &["this directory problems/A", "IdentityMismatch"],
     );
     fs::create_dir(workspace.path("problems/invalid name")).unwrap();
     failure(
         &workspace.run("problems/invalid name", &["current"]),
-        1,
+        8,
         &[
             "this directory problems/invalid name",
             "invalid problem reference",
@@ -279,7 +279,7 @@ fn stale_saved_problem_is_named_and_can_be_replaced_without_resolving_it() {
     fs::remove_dir_all(workspace.path("problems/gone")).unwrap();
     failure(
         &workspace.run("", &["current"]),
-        1,
+        8,
         &["saved identity local:gone", "not found"],
     );
     selected(&workspace.run("", &["switch", "local:other"]), "other");
@@ -310,10 +310,10 @@ fn invalid_state_is_refused_byte_identically_only_when_needed_by_current() {
         workspace.state(text);
         failure(
             &workspace.run("", &["current"]),
-            1,
+            8,
             &["saved selection", message],
         );
-        failure(&workspace.run("", &["switch", "A"]), 1, &[message]);
+        failure(&workspace.run("", &["switch", "A"]), 8, &[message]);
         assert_eq!(
             fs::read(workspace.path(".cpforge/state.toml")).unwrap(),
             text.as_bytes()
@@ -323,16 +323,16 @@ fn invalid_state_is_refused_byte_identically_only_when_needed_by_current() {
     }
     let oversized = vec![b' '; 1024 * 1024 + 1];
     fs::write(workspace.path(".cpforge/state.toml"), &oversized).unwrap();
-    failure(&workspace.run("", &["current"]), 1, &["size limit"]);
-    failure(&workspace.run("", &["switch", "A"]), 1, &["size limit"]);
+    failure(&workspace.run("", &["current"]), 8, &["size limit"]);
+    failure(&workspace.run("", &["switch", "A"]), 8, &["size limit"]);
     assert_eq!(
         fs::read(workspace.path(".cpforge/state.toml")).unwrap(),
         oversized
     );
     fs::remove_file(workspace.path(".cpforge/state.toml")).unwrap();
     fs::create_dir(workspace.path(".cpforge/state.toml")).unwrap();
-    failure(&workspace.run("", &["current"]), 1, &["unreadable"]);
-    failure(&workspace.run("", &["switch", "A"]), 1, &["unreadable"]);
+    failure(&workspace.run("", &["current"]), 8, &["unreadable"]);
+    failure(&workspace.run("", &["switch", "A"]), 8, &["unreadable"]);
     assert!(workspace.path(".cpforge/state.toml").is_dir());
 }
 
@@ -355,33 +355,33 @@ fn problem_metadata_errors_are_the_same_for_references_and_cwd() {
         workspace.metadata("A", text);
         failure(
             &workspace.run("", &["current", "--problem", "A"]),
-            1,
+            8,
             &["--problem flag", reason],
         );
         failure(
             &workspace.run("problems/A", &["current"]),
-            1,
+            8,
             &["this directory problems/A", reason],
         );
-        failure(&workspace.run("", &["switch", "A"]), 1, &[reason]);
+        failure(&workspace.run("", &["switch", "A"]), 8, &[reason]);
     }
     fs::remove_file(workspace.path("problems/A/problem.toml")).unwrap();
     for (directory, reason) in [(false, "MetadataMissing"), (true, "MetadataUnreadable")] {
         if directory {
             fs::create_dir(workspace.path("problems/A/problem.toml")).unwrap();
         }
-        failure(&workspace.run("", &["switch", "A"]), 1, &[reason]);
-        failure(&workspace.run("problems/A", &["current"]), 1, &[reason]);
+        failure(&workspace.run("", &["switch", "A"]), 8, &[reason]);
+        failure(&workspace.run("problems/A", &["current"]), 8, &[reason]);
     }
     fs::write(workspace.path("problems/file"), b"not a directory").unwrap();
     failure(
         &workspace.run("", &["switch", "file"]),
-        1,
+        8,
         &["NotADirectory"],
     );
     failure(
         &workspace.run("", &["current", "--problem", "file"]),
-        1,
+        8,
         &["NotADirectory"],
     );
 }
@@ -392,18 +392,18 @@ fn different_spelling_names_the_existing_entry() {
     workspace.problem("CamelCase");
     failure(
         &workspace.run("", &["switch", "camelcase"]),
-        1,
+        8,
         &["DifferentSpelling", "CamelCase"],
     );
     failure(
         &workspace.run("", &["current", "--problem", "local:camelcase"]),
-        1,
+        8,
         &["DifferentSpelling", "CamelCase"],
     );
     workspace.saved("camelcase");
     failure(
         &workspace.run("", &["current"]),
-        1,
+        8,
         &[
             "saved identity local:camelcase",
             "DifferentSpelling",
@@ -421,17 +421,17 @@ fn colliding_entries_cannot_be_selected_by_any_source() {
     for name in ["A", "a"] {
         failure(
             &workspace.run("", &["switch", name]),
-            1,
+            8,
             &["SeveralEntries", "problems/A", "problems/a"],
         );
         failure(
             &workspace.run("", &["current", "--problem", name]),
-            1,
+            8,
             &["SeveralEntries", "problems/A", "problems/a"],
         );
         failure(
             &workspace.run(format!("problems/{name}"), &["current"]),
-            1,
+            8,
             &[
                 "this directory",
                 "SeveralEntries",
@@ -442,7 +442,7 @@ fn colliding_entries_cannot_be_selected_by_any_source() {
         workspace.saved(name);
         failure(
             &workspace.run("", &["current"]),
-            1,
+            8,
             &[
                 "saved identity",
                 "SeveralEntries",
@@ -464,18 +464,18 @@ fn links_are_refused_by_reference_and_cwd_ancestry_is_physical() {
     symlink("b", workspace.path("problems/a")).unwrap();
     failure(
         &workspace.run("", &["switch", "a"]),
-        1,
+        8,
         &["LinkInPath", "problems/a"],
     );
     failure(
         &workspace.run("", &["current", "--problem", "a"]),
-        1,
+        8,
         &["LinkInPath"],
     );
     workspace.saved("a");
     failure(
         &workspace.run("", &["current"]),
-        1,
+        8,
         &["saved identity local:a", "LinkInPath"],
     );
     workspace.saved("saved");
@@ -567,7 +567,7 @@ fn current_never_creates_lock_recovers_or_changes_workspace_bytes() {
     assert!(output.stderr.is_empty());
     failure(
         &workspace.run("", &["current", "--problem", "missing"]),
-        1,
+        8,
         &["not found"],
     );
     assert_eq!(tree(&workspace.0), before);
@@ -842,7 +842,7 @@ fn read_only_metadata_links_are_allowed_and_state_writes_refuse_links() {
     selected(&workspace.run("", &["current"]), "A");
     failure(
         &workspace.run("", &["switch", "A"]),
-        1,
+        8,
         &["refusing a link"],
     );
     assert_eq!(fs::read(workspace.path("user/state.toml")).unwrap(), before);

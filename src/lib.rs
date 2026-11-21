@@ -6,6 +6,7 @@ extern crate self as cpforge;
 
 mod add;
 pub mod build;
+pub mod cancel_signals;
 pub mod cli;
 pub mod compare;
 pub mod config;
@@ -14,12 +15,15 @@ pub mod exec;
 pub mod exit;
 pub mod jobs;
 pub mod names;
+pub mod process;
+pub mod progress;
 pub mod report;
 pub mod selection;
 pub mod storage;
 pub mod supervisor;
 mod test_commands;
 pub mod tests_store;
+pub mod transport;
 mod workspace;
 
 use clap::{CommandFactory, error::ErrorKind};
@@ -39,8 +43,8 @@ pub fn run(cli: Cli) -> Result<(), Error> {
         .into());
     }
     match cli.command {
-        Some(Command::Test { command }) => {
-            return test_commands::run(cli.problem.as_deref(), command);
+        Some(Command::Test { command, machine }) => {
+            return test_commands::run(cli.problem.as_deref(), command, machine);
         }
         Some(Command::Current { path }) => return selection::current(cli.problem.as_deref(), path),
         Some(Command::Switch { reference }) => return selection::switch(&reference),

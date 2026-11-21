@@ -23,16 +23,16 @@ pub(crate) fn add(
     language: Option<&str>,
 ) -> Result<(), Error> {
     let name = Identifier::new(name)
-        .map_err(|error| Error::Failure(format!("invalid problem name: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("invalid problem name: {error}")))?;
     let contest = contest
         .map(Identifier::new)
         .transpose()
-        .map_err(|error| Error::Failure(format!("invalid contest id: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("invalid contest id: {error}")))?;
     if let Some(label) = label {
-        validate_label(label).map_err(Error::Failure)?;
+        validate_label(label).map_err(Error::Workspace)?;
     }
     let current = std::env::current_dir()
-        .map_err(|error| Error::Failure(format!("cannot read current directory: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("cannot read current directory: {error}")))?;
     let root = find_root(&current)?;
     let lock = WorkspaceLock::new(root)?;
     let guard = lock.acquire("add")?;
@@ -87,10 +87,17 @@ fn add_locked(
     if let Some(contest) = contest {
         let identity = ProblemIdentity::local(name.clone()).to_string();
         if let Err(error) = add_membership(guard, contest, &identity, label, report) {
-            return Err(Error::Failure(format!(
+            // Partial only when this invocation committed the problem (S §5.2
+            // step 5); an existing problem leaves nothing committed.
+            let message = format!(
                 "problem {}; contest membership failed: {error}",
                 if created { "created" } else { "already exists" }
-            )));
+            );
+            return Err(if created {
+                Error::Partial(message)
+            } else {
+                Error::Workspace(message)
+            });
         }
     }
     Ok(())
@@ -114,7 +121,7 @@ fn problem_exists(guard: &WorkspaceGuard<'_>, name: &Identifier) -> Result<bool,
                 })
                 .collect::<Vec<String>>()
                 .join(", ");
-            Err(Error::Failure(format!(
+            Err(Error::Workspace(format!(
                 "name collision with {entries}: {reason:?}{detail}"
             )))
         }
@@ -128,7 +135,7 @@ fn configuration_error(diagnostics: &[crate::config::Diagnostic]) -> Error {
         message.push_str("\n  ");
         message.push_str(&diagnostic.to_string());
     }
-    Error::Failure(message)
+    Error::Config(message)
 }
 
 fn create_problem(
@@ -180,7 +187,7 @@ fn create_problem(
     let template = if let Some(target) = target {
         target
             .template_destination()
-            .map_err(|error| Error::Failure(error.to_string()))?
+            .map_err(|error| Error::Config(error.to_string()))?
             .map(|(template, destination)| {
                 let destination = solution_destination(destination.value.components())?;
                 let bytes = read_template(&template.value)?;
@@ -223,7 +230,7 @@ fn solution_destination(components: &[String]) -> Result<String, Error> {
     let path = components.join("/");
     for component in components {
         names::PortableComponent::new(component.as_str()).map_err(|error| {
-            Error::Failure(format!(
+            Error::Config(format!(
                 "template destination {path} is not portable: {component:?}: {error}"
             ))
         })?;
@@ -231,7 +238,7 @@ fn solution_destination(components: &[String]) -> Result<String, Error> {
     if components.len() == 1
         && names::collides_with_native("problem.toml", std::ffi::OsStr::new(&components[0]))
     {
-        return Err(Error::Failure(format!(
+        return Err(Error::Config(format!(
             "template destination {path} would replace problem.toml"
         )));
     }
@@ -285,7 +292,7 @@ fn publish_problem(
     let stage = loop {
         let mut bits = [0_u8; 16];
         getrandom::fill(&mut bits)
-            .map_err(|error| Error::Failure(format!("cannot generate staging id: {error}")))?;
+            .map_err(|error| Error::Workspace(format!("cannot generate staging id: {error}")))?;
         let path = guard.check_path(format!(
             ".cpforge/staging/{:032x}",
             u128::from_le_bytes(bits)
@@ -322,7 +329,7 @@ fn publish_problem(
                     if problem_exists(guard, name)? {
                         return Ok(false);
                     }
-                    return Err(Error::Failure(format!(
+                    return Err(Error::Workspace(format!(
                         "name collision: native destination exists for {}: {error}",
                         name.as_str()
                     )));
@@ -386,19 +393,19 @@ fn read_template(path: &Path) -> Result<Vec<u8>, Error> {
     }
     let mut file = options
         .open(path)
-        .map_err(|error| StorageError::io(path, error))?;
+        .map_err(|error| Error::Config(format!("template {}: {error}", path.display())))?;
     let metadata = file
         .metadata()
-        .map_err(|error| StorageError::io(path, error))?;
+        .map_err(|error| Error::Config(format!("template {}: {error}", path.display())))?;
     if !metadata.is_file() {
-        return Err(Error::Failure(format!(
+        return Err(Error::Config(format!(
             "template {} is not a regular file",
             path.display()
         )));
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .map_err(|error| StorageError::io(path, error))?;
+        .map_err(|error| Error::Config(format!("template {}: {error}", path.display())))?;
     Ok(bytes)
 }
 
@@ -515,7 +522,7 @@ fn add_membership(
         if names::collides_with_native(contest.as_str(), &entry.file_name())
             && entry.file_name() != std::ffi::OsStr::new(contest.as_str())
         {
-            return Err(Error::Failure(format!(
+            return Err(Error::Workspace(format!(
                 "contest name collision with {}",
                 entry.path().display()
             )));
@@ -543,11 +550,11 @@ fn add_membership(
         record = storage::read_user_record(&path, 1, contest_members);
     }
     record_result(record)
-        .map_err(|reason| Error::Failure(format!("{} is {reason}", path.display())))?;
+        .map_err(|reason| Error::Workspace(format!("{} is {reason}", path.display())))?;
     let published = storage::edit_toml_replay(guard, &path, check_contest, |document| {
         append_member(document, id, label)
     })
-    .map_err(|error| Error::Failure(format!("{}: {error}", path.display())))?;
+    .map_err(|error| Error::Workspace(format!("{}: {error}", path.display())))?;
     publication_warnings(report, &path, &published);
     crash::point("add.member_added");
     report.lines.push(format!(

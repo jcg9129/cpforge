@@ -144,6 +144,7 @@ pub struct Engine<'probe> {
     capture_enabled: bool,
     cancel: CancelState,
     events: Events,
+    progress: Option<crate::progress::ProgressQueue>,
     #[cfg(any(test, feature = "storage-test-hooks"))]
     observer: Option<Observation>,
 }
@@ -291,9 +292,16 @@ impl<'probe> Engine<'probe> {
             capture_enabled: needs_build || kind == JobKind::Run,
             cancel,
             events: Events::new(),
+            progress: None,
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer: None,
         })
+    }
+
+    /// Attach the invocation's stderr queue before running. It is closed at E.
+    pub fn progress(mut self, progress: crate::progress::ProgressQueue) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     pub fn plan(&self) -> &[PlannedExecution] {
@@ -345,6 +353,7 @@ impl<'probe> Engine<'probe> {
             capture_enabled,
             cancel,
             events,
+            progress,
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer,
         } = self;
@@ -556,6 +565,13 @@ impl<'probe> Engine<'probe> {
                 done: executions.len() as u32 + 1,
                 total: planned_count,
             });
+            if let Some(progress) = &progress {
+                progress.offer(&format!(
+                    "{}/{} executions finished",
+                    executions.len() + 1,
+                    planned_count
+                ));
+            }
             executions.push(execution);
         }
         if let Some(warning) = warnings::cleanup(&executions) {
@@ -652,6 +668,15 @@ impl<'probe> Engine<'probe> {
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::Closure);
         let dropped = events.close();
+        if let Some(progress) = progress {
+            let lines = progress.close();
+            if lines != 0 {
+                details.warnings.push(WireWarning {
+                    kind: WarningKind::ProgressDropped { lines },
+                    message: format!("{lines} progress lines dropped"),
+                });
+            }
+        }
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::BeforeSnapshot);
         let counts = report::coverage_counts(&primary, &[], &test_verdicts);
@@ -682,8 +707,9 @@ impl<'probe> Engine<'probe> {
             if cancellation.is_some_and(|c| c.phase != CancelPhase::Primary) {
                 warnings.push(Warning::LateCancellation);
             }
-            details.warnings_dropped = warnings.len().saturating_sub(24) as u32;
-            warnings.truncate(24);
+            let warning_slots = 24_usize.saturating_sub(details.warnings.len());
+            details.warnings_dropped = warnings.len().saturating_sub(warning_slots) as u32;
+            warnings.truncate(warning_slots);
             details.pre_delivery_exit = pre_delivery_exit(kind, result.verdict, cancellation);
             let report = FinalizedReport {
                 data: Arc::new(ReportData {
@@ -726,27 +752,37 @@ impl<'probe> Engine<'probe> {
                     },
                 }),
                 _owner: ready.owner,
+                post_freeze_internal: false,
                 persistence: ReportPersistence::Failed {
                     error: PersistError::WorkerUnavailable,
                     message: "report not yet published".into(),
                 },
             };
             state.frozen = true;
+            crate::process::freeze_report();
             report
         };
         #[cfg(any(test, feature = "storage-test-hooks"))]
         if let Some(observer) = &observer {
-            let _ = catch_unwind(AssertUnwindSafe(|| (observer.0)(Point::AfterSnapshot)));
+            if catch_unwind(AssertUnwindSafe(|| (observer.0)(Point::AfterSnapshot))).is_err() {
+                report.post_freeze_internal = true;
+            }
         }
-        report.persistence =
-            match caught(persistence.publish_report(report.data.clone(), report_reservation)).await
-            {
-                Ok(result) => result,
-                Err(_) => ReportPersistence::Failed {
-                    error: PersistError::WorkerUnavailable,
-                    message: "report persistence worker unavailable".into(),
-                },
-            };
+        if !report.post_freeze_internal {
+            report.persistence =
+                match caught(persistence.publish_report(report.data.clone(), report_reservation))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        report.post_freeze_internal = true;
+                        ReportPersistence::Failed {
+                            error: PersistError::WorkerUnavailable,
+                            message: "report persistence worker panicked".into(),
+                        }
+                    }
+                };
+        }
         let published = matches!(report.persistence, ReportPersistence::Published { .. });
         let report = Arc::new(report);
         events.finish(

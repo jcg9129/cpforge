@@ -376,8 +376,12 @@ pub struct FinalizedReport {
     pub(super) data: Arc<ReportData>,
     pub(super) _owner: JobOwner,
     pub(super) persistence: super::ReportPersistence,
+    pub(super) post_freeze_internal: bool,
 }
 impl FinalizedReport {
+    pub fn post_freeze_internal(&self) -> bool {
+        self.post_freeze_internal
+    }
     pub fn persistence(&self) -> &super::ReportPersistence {
         &self.persistence
     }

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,7 @@ pub(super) struct VerdictState {
 pub struct CancelState {
     pub(super) state: Arc<Mutex<VerdictState>>,
     token: CancelToken,
+    signals: Arc<AtomicBool>,
     pub(super) start: Instant,
 }
 
@@ -72,6 +74,7 @@ impl CancelState {
                 next_run: 0,
             })),
             token: CancelToken::new(),
+            signals: Arc::new(AtomicBool::new(false)),
             start,
         }
     }
@@ -114,8 +117,24 @@ impl CancelState {
         self.token.clone()
     }
 
+    pub(crate) fn bind_signals(&self, bound: bool) {
+        self.signals.store(bound, Ordering::Release);
+    }
+
     pub(super) fn lock(&self) -> MutexGuard<'_, VerdictState> {
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if self.signals.load(Ordering::Acquire) && !state.frozen && state.intent.is_none() {
+            if let Some(source) = crate::cancel_signals::pending() {
+                state.first_notification = Some(Instant::now());
+                state.intent = Some(Cancellation {
+                    requested_at: self.start.elapsed(),
+                    source,
+                    phase: state.phase,
+                });
+                self.token.cancel();
+            }
+        }
+        state
     }
 }
 

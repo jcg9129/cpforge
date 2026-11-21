@@ -21,27 +21,7 @@ pub struct DocumentError {
     pub message: String,
     pub path: Option<PathBuf>,
 }
-#[derive(Clone, Copy, Debug)]
-pub enum FailureClass {
-    Config,
-    Workspace,
-    Cancelled,
-    Internal,
-    Usage,
-    Partial,
-}
-impl FailureClass {
-    pub(super) fn token(self) -> &'static str {
-        match self {
-            Self::Config => "config",
-            Self::Workspace => "workspace",
-            Self::Cancelled => "cancelled",
-            Self::Internal => "internal",
-            Self::Usage => "usage",
-            Self::Partial => "partial",
-        }
-    }
-}
+pub use crate::error::FailureClass;
 #[derive(Clone, Debug)]
 pub struct ErrorDocument {
     pub platform: &'static str,

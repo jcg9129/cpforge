@@ -1591,3 +1591,355 @@ fn stalled_report_publication_bounds_s_and_keeps_w_warnings_frozen() {
     assert!(terminal.report_id.is_none());
     assert!(!dir.join("report.json").exists());
 }
+
+#[test]
+fn ndjson_delivery_frames_fake_engine_and_preserves_the_terminal_barrier() {
+    use crate::transport::Delivery;
+    for output in [false, true] {
+        let f = Fixture::new();
+        let engine = test_engine(&f, "python", 2).output_events(output);
+        let receiver = engine.events().subscribe().unwrap();
+        let mut delivery = Delivery::new(Vec::new(), false);
+        let report = runtime(async {
+            let mut executor = Fake::default();
+            let mut persistence = MemoryPersistence::default();
+            let mut hooks = NoHooks;
+            let (report, delivered) = tokio::join!(
+                engine.run(&mut executor, &mut persistence, &mut hooks),
+                delivery.events(receiver, JobKind::Test, output)
+            );
+            delivered.unwrap();
+            report
+        });
+        let bytes = delivery.into_inner();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let lines: Vec<serde_json::Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["document"], "event_stream");
+        assert_eq!(lines[0]["output"], output);
+        let events = &lines[1..lines.len() - 1];
+        let sequence: Vec<u64> = events
+            .iter()
+            .map(|event| event["seq"].as_str().unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(sequence[0], 0);
+        assert!(sequence.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(events.last().unwrap()["event"], "job_finished");
+        assert_eq!(lines.last().unwrap()["event"], "report");
+        assert_eq!(
+            lines.last().unwrap()["report"]["result"]["verdict"],
+            "passed"
+        );
+        assert_eq!(
+            events.iter().any(|event| event["event"] == "output_chunk"),
+            output
+        );
+        assert_eq!(report.data().events.dropped, 0);
+        assert_eq!(sequence.last().copied(), Some(events.len() as u64 - 1));
+    }
+}
+
+#[test]
+fn disconnected_delivery_does_not_stop_execution_or_persistence() {
+    use crate::exit::ExitCode;
+    use crate::transport::{Delivery, MachineMode, delivered_status};
+    #[derive(Debug)]
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected EPIPE",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let path = ready.dir.join("report.json");
+    let mut persistence = crate::jobs::persist::JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let receiver = engine.events().subscribe().unwrap();
+    let mut delivery = Delivery::new(Broken, false);
+    let mut fake = Fake::default();
+    let (report, delivered) = runtime(async {
+        let mut hooks = NoHooks;
+        tokio::join!(
+            engine.run(&mut fake, &mut persistence, &mut hooks),
+            delivery.events(receiver, JobKind::Test, false)
+        )
+    });
+    assert_eq!(fake.runs.len(), 1);
+    assert!(path.is_file());
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert_eq!(report.data().events.dropped, 0);
+    assert_eq!(
+        delivered_status(&report, MachineMode::Events { output: false }, &delivered),
+        ExitCode::Delivery
+    );
+}
+
+#[test]
+fn progress_drop_warning_is_frozen_at_e() {
+    let f = Fixture::new();
+    let queue = crate::progress::ProgressQueue::default();
+    for _ in 0..129 {
+        queue.offer(&"x".repeat(511));
+    }
+    let engine = test_engine(&f, "python", 1).progress(queue.clone());
+    let report = runtime(run(engine, &mut Fake::default()));
+    // One initial overflow and the engine's progress line while still full.
+    assert_eq!(queue.close(), 2);
+    queue.offer("after E");
+    assert_eq!(queue.close(), 2);
+    assert!(
+        report
+            .data()
+            .details
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning.kind, WarningKind::ProgressDropped { lines: 2 }))
+    );
+}
+
+// Run this helper in a subprocess only: changing process signal dispositions
+// would interfere with unrelated tests in the test harness.
+#[cfg(unix)]
+#[test]
+fn signal_job_helper() {
+    use crate::cancel_signals::CancelSignals;
+    use crate::transport::{Delivery, MachineMode, delivered_status};
+    let Some(mode) = std::env::var_os("CPF_SIGNAL_JOB_HELPER") else {
+        return;
+    };
+    crate::process::initialize().unwrap();
+    let f = Fixture::new();
+    let engine = test_engine(&f, "python", 1);
+    let signals = CancelSignals::install(engine.cancellation()).unwrap();
+    let (entered, wait) = oneshot::channel();
+    let mut fake = Fake {
+        behavior: [Behavior::WaitCancel].into(),
+        entered: Some(entered),
+        ..Fake::default()
+    };
+    let report = runtime(async {
+        let (report, ()) = tokio::join!(run(engine, &mut fake), async {
+            wait.await.unwrap();
+            use std::io::Write;
+            writeln!(std::io::stderr(), "SIGNAL_READY").unwrap();
+        });
+        report
+    });
+    let mut delivery = Delivery::stdout();
+    let delivered = if mode == "broken" {
+        Err(crate::error::Error::Delivery(
+            "injected delivery failure".into(),
+        ))
+    } else {
+        delivery.report(&report)
+    };
+    let status = delivered_status(&report, MachineMode::Json, &delivered);
+    // Complete fixture cleanup before a successful delivery re-raises the signal.
+    drop(report);
+    drop(f);
+    if mode == "force" {
+        // Allow the contract's debounce interval to pass, then expose a
+        // deterministic barrier for the forcing notification.
+        std::thread::sleep(Duration::from_millis(110));
+        eprintln!("FORCE_READY");
+        loop {
+            std::thread::park();
+        }
+    }
+    std::process::exit(signals.finish(status) as i32);
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_origin_reraises_after_report_and_delivery_failure_suppresses_it() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+    for (signal, mode) in [
+        (libc::SIGINT, "report"),
+        (libc::SIGTERM, "report"),
+        (libc::SIGINT, "broken"),
+        (libc::SIGINT, "force"),
+    ] {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "jobs::engine::tests::signal_job_helper",
+                "--nocapture",
+            ])
+            .env("CPF_SIGNAL_JOB_HELPER", mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let line = line.unwrap();
+                if line == "SIGNAL_READY" || line == "FORCE_READY" {
+                    let _ = ready.send(());
+                }
+            }
+        });
+        if wait.recv_timeout(Duration::from_secs(30)).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("signal helper did not reach its fake run");
+        }
+        let mut stdout = child.stdout.take().unwrap();
+        let output_reader = std::thread::spawn(move || {
+            let mut output = String::new();
+            stdout.read_to_string(&mut output).unwrap();
+            output
+        });
+        // SAFETY: this is the still-owned child PID, waiting at its fake run.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+        if mode == "force" {
+            if wait.recv_timeout(Duration::from_secs(30)).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("signal helper did not reach its delivery barrier");
+            }
+            assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("signal helper did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let output = output_reader.join().unwrap();
+        reader.join().unwrap();
+        if mode == "broken" {
+            assert_eq!(status.code(), Some(11));
+        } else {
+            assert_eq!(
+                status.signal(),
+                Some(if mode == "force" {
+                    libc::SIGTERM
+                } else {
+                    signal
+                })
+            );
+            let report: serde_json::Value = output
+                .lines()
+                .find_map(|line| {
+                    line.find('{')
+                        .and_then(|start| serde_json::from_str(&line[start..]).ok())
+                })
+                .expect("complete report line before death");
+            assert_eq!(report["document"], "job_report");
+            assert_eq!(report["result"]["verdict"], "cancelled");
+            assert_eq!(
+                report["result"]["cancellation"]["source"],
+                if signal == libc::SIGINT {
+                    "console"
+                } else {
+                    "terminate"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn blocked_stdout_worker_does_not_delay_execution_or_report_publication() {
+    use crate::transport::Delivery;
+    #[derive(Debug)]
+    struct Blocked {
+        entered: Option<std::sync::mpsc::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl std::io::Write for Blocked {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(entered) = self.entered.take() {
+                entered.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let path = ready.dir.join("report.json");
+    let mut persistence = crate::jobs::persist::JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let receiver = engine.events().subscribe().unwrap();
+    let (entered, wait) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let worker = Delivery::new(
+        Blocked {
+            entered: Some(entered),
+            release: blocked,
+        },
+        false,
+    )
+    .start_events(receiver, JobKind::Test, false)
+    .unwrap();
+    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    let report = runtime(engine.run(&mut Fake::default(), &mut persistence, &mut NoHooks));
+    assert!(path.is_file());
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    release.send(()).unwrap();
+    worker.finish().unwrap();
+}
+
+#[test]
+fn caught_post_freeze_panic_preserves_report_and_abandons_delivery() {
+    use crate::exit::ExitCode;
+    use crate::transport::{Delivery, MachineMode, delivered_status};
+    let f = Fixture::new();
+    let engine = test_engine(&f, "python", 1).observe(|point| {
+        assert_ne!(point, Point::AfterSnapshot, "injected post-freeze panic");
+    });
+    let receiver = engine.events().subscribe().unwrap();
+    let report = runtime(run(engine, &mut Fake::default()));
+    assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+    assert_eq!(report.data().details.pre_delivery_exit.code, 0);
+    assert!(report.post_freeze_internal());
+    let mut delivery = Delivery::new(Vec::new(), false);
+    let result = delivery.report(&report);
+    assert_eq!(
+        delivered_status(&report, MachineMode::Json, &result),
+        ExitCode::Internal
+    );
+    assert!(delivery.into_inner().is_empty());
+    let mut stream = Delivery::new(Vec::new(), false);
+    let result = runtime(stream.events(receiver, JobKind::Test, false));
+    assert_eq!(result.unwrap_err().exit_code(), ExitCode::Internal);
+    let bytes = String::from_utf8(stream.into_inner()).unwrap();
+    assert!(!bytes.contains("\"event\":\"report\""));
+    assert!(!bytes.contains("\"event\":\"job_finished\""));
+}

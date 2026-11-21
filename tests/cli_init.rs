@@ -194,7 +194,7 @@ fn unusable_initial_sequences_refuse_without_changing_the_record() {
         let path = dir.path(".cpforge/job-seq");
         fs::write(&path, bytes).unwrap();
         let output = init(&dir.0);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.starts_with("cpf: error: "), "{stderr}");
         assert!(stderr.contains(classification), "{stderr}");
@@ -210,7 +210,7 @@ fn non_regular_initial_sequence_is_unreadable() {
     fs::create_dir_all(dir.path(".cpforge/job-seq")).unwrap();
     fs::write(dir.path(".cpforge/job-seq/keep"), b"untouched").unwrap();
     let output = init(&dir.0);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("unreadable"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("job-seq"));
     assert!(!dir.path("cpforge.toml").exists());
@@ -236,7 +236,7 @@ fn unreadable_initial_sequence_is_preserved() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     let output = init(&dir.0);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("unreadable"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("job-seq"));
     assert!(!dir.path("cpforge.toml").exists());
@@ -248,7 +248,7 @@ fn missing_root_is_not_created_and_extra_arguments_are_usage_errors() {
     let dir = Directory::new();
     let missing = dir.path("missing");
     let output = command(&dir.0).arg("init").arg(&missing).output().unwrap();
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(!missing.exists());
     let output = command(&dir.0)
         .args(["init", ".", "extra"])
@@ -289,7 +289,7 @@ fn metadata_links_are_refused_and_root_links_work() {
     fs::write(outside.path("keep"), b"untouched").unwrap();
     link_directory(&outside.0, &dir.path(".cpforge"));
     let output = init(&dir.0);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing a link or junction"));
     assert!(!dir.path("cpforge.toml").exists());
     assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 1);
@@ -312,7 +312,7 @@ fn structural_directory_links_are_refused() {
         fs::create_dir(dir.path(".cpforge")).unwrap();
         link_directory(&outside.0, &dir.path(relative));
         let output = init(&dir.0);
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
         assert!(!dir.path("cpforge.toml").exists());
         assert!(!dir.path(".cpforge/job-seq").exists());
         assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
@@ -601,7 +601,7 @@ fn malformed_initial_sequence_error_is_readable() {
     fs::create_dir(dir.path(".cpforge")).unwrap();
     fs::write(dir.path(".cpforge/job-seq"), b"schema = 1\nnext = '01'\n").unwrap();
     let output = init(&dir.0);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("malformed: epoch must be"), "{stderr}");
     assert!(stderr.contains("rerun `cpf init`"), "{stderr}");
@@ -617,7 +617,7 @@ fn directory_named_cpforge_toml_is_not_an_existing_workspace() {
     let dir = Directory::new();
     fs::create_dir(dir.path("cpforge.toml")).unwrap();
     let output = init(&dir.0);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("not a regular workspace marker"));
     assert!(!dir.path(".cpforge/job-seq").exists());
 }

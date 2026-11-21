@@ -149,54 +149,28 @@ pub fn pre_delivery_exit(
     verdict: crate::report::JobVerdict,
     cancellation: Option<super::Cancellation>,
 ) -> PreDeliveryExit {
-    use crate::report::JobVerdict as V;
-    if verdict == V::InternalError {
-        return PreDeliveryExit {
-            code: 70,
-            reraise: None,
-        };
-    }
-    if let Some(intent) = cancellation {
-        if cfg!(unix) {
-            let signal = match intent.source {
-                super::CancelSource::Console => Some((130, "sigint")),
-                super::CancelSource::Terminate => Some((143, "sigterm")),
-                super::CancelSource::Api => None,
-            };
-            if let Some((code, signal)) = signal {
-                return PreDeliveryExit {
-                    code,
-                    reraise: Some(signal),
-                };
-            }
-        }
-        return PreDeliveryExit {
-            code: 6,
-            reraise: None,
-        };
-    }
-    if verdict == V::Cancelled {
-        return PreDeliveryExit {
-            code: 6,
-            reraise: None,
-        };
-    }
-    let code = if kind == crate::report::JobKind::Hook {
-        0
+    use crate::exit::{ExitCode, ExitInputs, exit_status};
+    let status = exit_status(&ExitInputs {
+        verdict: Some(verdict),
+        cancellation: cancellation.is_some(),
+        switch_hook: kind == crate::report::JobKind::Hook,
+        ..ExitInputs::default()
+    });
+    let reraise = if status == ExitCode::Cancelled && cfg!(unix) {
+        cancellation.and_then(|intent| match intent.source {
+            super::CancelSource::Console => Some("sigint"),
+            super::CancelSource::Terminate => Some("sigterm"),
+            super::CancelSource::Api => None,
+        })
     } else {
-        match verdict {
-            V::InternalError => 70,
-            V::Cancelled => 6,
-            V::Infrastructure => 10,
-            V::BuildFailed => 3,
-            V::CheckerFailed => 5,
-            V::WallDeadline | V::OutputBudget | V::Signal | V::NonzeroExit | V::WrongAnswer => 1,
-            V::Unchecked | V::NoTests => 4,
-            _ => 0,
-        }
+        None
     };
     PreDeliveryExit {
-        code,
-        reraise: None,
+        code: match reraise {
+            Some("sigint") => 130,
+            Some("sigterm") => 143,
+            _ => status as i64,
+        },
+        reraise,
     }
 }

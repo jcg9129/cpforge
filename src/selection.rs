@@ -230,7 +230,7 @@ impl From<StorageError> for SelectionError {
 
 impl From<SelectionError> for Error {
     fn from(error: SelectionError) -> Self {
-        Self::Failure(error.to_string())
+        Self::Workspace(error.to_string())
     }
 }
 
@@ -424,7 +424,7 @@ pub fn resolve(
 
 fn invocation_paths() -> Result<(PathBuf, PathBuf), Error> {
     let cwd = std::env::current_dir()
-        .map_err(|error| Error::Failure(format!("cannot read current directory: {error}")))?;
+        .map_err(|error| Error::Workspace(format!("cannot read current directory: {error}")))?;
     let root = find_root(&cwd)?;
     Ok((root, cwd))
 }
@@ -450,7 +450,7 @@ pub(crate) fn current(problem_flag: Option<&str>, path: bool) -> Result<(), Erro
     output
         .write_all(&line)
         .and_then(|()| output.flush())
-        .map_err(|error| Error::Failure(format!("cannot write selection: {error}")))
+        .map_err(|error| Error::Workspace(format!("cannot write selection: {error}")))
 }
 
 pub(crate) fn switch(reference: &str) -> Result<(), Error> {
@@ -507,7 +507,7 @@ pub(crate) fn switch(reference: &str) -> Result<(), Error> {
         Err(error) => eprintln!("cpf: note: this directory could not be resolved: {error}"),
     }
     writeln!(io::stdout().lock(), "{}", selected.identity)
-        .map_err(|error| Error::Failure(format!("cannot write selection: {error}")))
+        .map_err(|error| Error::Workspace(format!("cannot write selection: {error}")))
 }
 
 /// C12c seam: execute on_switch after success, with captured selection and no lock.
