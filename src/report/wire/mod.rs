@@ -103,7 +103,7 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
             "capture",
             v.capture
                 .as_ref()
-                .map(|v| capture(v))
+                .map(capture)
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
@@ -123,7 +123,7 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         ),
         (
             "executions",
-            checked_array(&v.executions, 10_000, |v| run::execution(v))?,
+            checked_array(&v.executions, 10_000, run::execution)?,
         ),
         ("tests", checked_array(&v.tests, 10_000, test)?),
         (

@@ -310,12 +310,15 @@ impl JobPersistence {
                     None
                 },
             };
-            match self.sender.as_ref().map(|sender| sender.try_send(write)) {
-                Some(Ok(())) => None,
-                Some(Err(mpsc::TrySendError::Full(_))) => {
-                    Some(Outcome::failed(PersistError::QueueFull, digest))
-                }
-                _ => Some(Outcome::failed(PersistError::WorkerUnavailable, digest)),
+            match &self.sender {
+                Some(sender) => match sender.try_send(write) {
+                    Ok(()) => None,
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        Some(Outcome::failed(PersistError::QueueFull, digest))
+                    }
+                    Err(_) => Some(Outcome::failed(PersistError::WorkerUnavailable, digest)),
+                },
+                None => Some(Outcome::failed(PersistError::WorkerUnavailable, digest)),
             }
         } else {
             Some(Outcome::failed(PersistError::Io { os_error: None }, digest))
