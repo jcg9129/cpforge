@@ -319,10 +319,16 @@ pub(in crate::supervisor) fn kill_group(pgid: i32) -> io::Result<()> {
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
+    // Darwin returns EPERM, not success, when the group's only remaining
+    // member is the unreaped zombie leader (the normal state after the root
+    // exits). The group consists of cpf's own children with cpf's
+    // credentials, so EPERM here means no live member could be signalled;
+    // the cleanup scan, not this call, decides whether members remain. A
+    // setuid program inside the group would also yield EPERM and is likewise
+    // left to the scan, never assumed dead.
+    match error.raw_os_error() {
+        Some(libc::ESRCH) | Some(libc::EPERM) => Ok(()),
+        _ => Err(error),
     }
 }
 
