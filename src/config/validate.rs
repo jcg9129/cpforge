@@ -23,6 +23,7 @@ enum Context {
     Limits,
     Artifacts,
     Template,
+    Io,
     Retention,
     Workspace,
     Hooks,
@@ -164,9 +165,15 @@ impl<'a> Validator<'a> {
             }
             self.field(key, field, ctx, active, overlaid);
         }
+        let missing_io_names =
+            matches!(ctx, Context::Io) && !t.contains_key("input") && !t.contains_key("output");
+        let missing_template_path = matches!(ctx, Context::Template) && !t.contains_key("path");
+        if missing_io_names {
+            self.error(node, "io requires at least one of input or output");
+        }
         // Completeness of stages, shell, cwd and artifacts belongs to phase 2.
         // Template is not composed as a stage and its sole path is required.
-        if matches!(ctx, Context::Template) && !t.contains_key("path") {
+        if missing_template_path {
             self.error(node, "template requires path");
         }
     }
@@ -189,6 +196,7 @@ impl<'a> Validator<'a> {
                         self.strings(n, StringRule::Source, lexical, active)
                     }
                     "entry" if problem => self.nonempty(n),
+                    "io" if problem => self.table(n, Context::Io, active, overlaid),
                     "compare" => self.compare(n),
                     "build" | "run" => self.table(
                         n,
@@ -320,6 +328,16 @@ impl<'a> Validator<'a> {
             }
             Context::Template => match key {
                 "path" => self.path(n, lexical, active),
+                _ => self.unknown(n),
+            },
+            Context::Io => match key {
+                "input" | "output" => {
+                    if let Some(name) = self.string(n) {
+                        if let Err(error) = crate::names::PortableComponent::new(name) {
+                            self.error(n, format!("expected a portable file-I/O name: {error}"));
+                        }
+                    }
+                }
                 _ => self.unknown(n),
             },
             Context::Retention => match key {

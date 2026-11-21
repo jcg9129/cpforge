@@ -68,7 +68,8 @@ Related: design §4, `execution.md` and `report.md` (report contract).
 - **Shared `cwd`** (configuration contract §4.1, any configured `cwd` other than the run's own)
   is a distinct capability: `cpf` never measures, clears or deletes
   anything in it; the record marks `shared_cwd`; file-based I/O problems with
-  a shared `cwd` are rejected in the CLI foundation.
+  a shared `cwd` are rejected in the CLI foundation. In this version every
+  file-I/O problem is rejected, regardless of `cwd` (configuration contract §6.2).
 
 ### 2.1 Portable names and identity
 
@@ -1210,8 +1211,8 @@ create a new number and leave the earlier files unregistered.
 - Retention: per-job budget refusal (execution contract); `CwdOverflow`;
   `BuildOutputTooLarge` removes the build directory; a mount point inside a
   job directory is skipped by measuring and deletion.
-- Shared `cwd`: never measured or cleared; file-I/O problem with shared `cwd`
-  rejected.
+- Shared `cwd`: never measured or cleared; every file-I/O problem, including
+  one with shared `cwd`, is rejected (configuration contract §6.2).
 - Freeze: edits between tests and between repeat iterations do not change
   later runs; an edit and an injected interruption **during** freezing (the
   run does not start; the manifest is never partial); freeze failure starts

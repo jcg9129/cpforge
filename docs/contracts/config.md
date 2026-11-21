@@ -59,6 +59,7 @@ and the problem record, not to configuration.
 | `config.sources` | array of paths | 3 | §6.2 |
 | `config.support_files` | array of paths | 3 | §6.2 file roles |
 | `config.solution_files` | array of paths | 3 | §6.2 file roles, §6.5 |
+| `config.io` | table `{ input?, output? }` | 3 | reserved file-I/O declaration; §6.2 |
 | `config.entry` | non-empty string | 3 | §6.4; overrides the language's `entry` |
 | `config.compare` | comparator value | 3 | |
 | `config.build`, `config.run` | stage table | 3 | precedence row 5 |
@@ -564,6 +565,24 @@ and limits.
   (storage contract §7) and every `{sources}` / `{source}` expansion names
   the copy; outside the amendment they are read in place. Test data is
   always frozen.
+- **Reserved file-I/O declaration:** problem `[config]` alone (layer 3) accepts
+  `io = { input = "<name>", output = "<name>" }`. Both fields are optional,
+  but at least one is required; unknown fields are errors. Each name is one
+  relative portable component under storage contract §§2–2.1, validated by
+  the same portable-component rules on every platform. These are literal
+  names, without placeholder expansion or config-relative path resolution.
+  Phase 1 validates the table shape, string types and names, with ordinary
+  diagnostics and invalid markers naming the file, key and source location
+  (§§3.1–3.2). A valid, present `io` is rejected in phase 2 with the dedicated
+  diagnostic **"file-I/O problems are not supported in this version"** at
+  `config.io`. This applies to every command that loads that problem's
+  configuration, whether or not a language is resolved, and with any `cwd`,
+  shared or otherwise. It is a configuration error (exit 7), before job
+  admission; no job directory or sequence allocation occurs. Read-only
+  `cpf config show`, `cpf config check` and `cpf doctor` report it like any
+  other phase-2 error (exit 7). Configuration errors precede an unsupported
+  execution-platform refusal (report contract §5.2); a valid configuration
+  still refuses job execution on Windows with exit 10 before admission.
 - `multi-file` is a problem kind (§9), unrelated to several source files.
 
 ### 6.3 Artifacts
@@ -949,6 +968,14 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   `env = { X = false }`; `limits = {}`; overlay keys vs a command named
   `linux`; nesting refused; a later generic value over an earlier platform
   value.
+- Reserved file-I/O: valid problem `io` with input only, output only or both
+  → phase-2 diagnostic at `config.io`, exit 7 for build/run/test and read-only
+  inspection; shared `cwd` → the same rejection; no job directory and unchanged
+  job-seq. Separators, `..`, `:`, device names, trailing dots/spaces, wrong types,
+  unknown nested keys or an empty table → phase-1 diagnostics with provenance,
+  without a derived unsupported-I/O error. User/workspace `io` → unknown key.
+  Windows: configuration errors → 7 before the platform refusal; otherwise
+  job commands → 10 before admission (report contract §5).
 - Validation: a stage completed across layers; a wrong type in an overridden
   layer still reported; an inactive Windows limit on Linux accepted.
 - **Cases with exact results:**

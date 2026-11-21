@@ -1605,3 +1605,147 @@ fn command_placeholder_declarations_are_checked_in_phase_two() {
     );
     clean(&check(&result, &Selection::default()));
 }
+
+#[test]
+fn reserved_file_io_validates_in_phase_one_and_refuses_in_phase_two() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for fields in [
+            "input = 'task.in'",
+            "output = 'task.out'",
+            "input = '输入.txt', output = 'two words.out'",
+            "input = '.hidden', output = 'a..b'",
+            "input = '{literal}.in'",
+        ] {
+            for settings in [
+                "",
+                "language = 'cpp'\n[config.run]\ncwd = { selector = 'problem' }\n",
+            ] {
+                let document =
+                    format!("[problem]\nid = 'local:p'\n[config]\nio = {{ {fields} }}\n{settings}");
+                let raw = layer(&document, LayerKind::Problem, platform);
+                assert!(raw.diagnostics.is_empty(), "{:?}", raw.diagnostics);
+                let config = compose(&[raw], platform);
+                let report = check(&config, &Selection::default());
+                assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
+                let diagnostic = &report.diagnostics()[0];
+                assert_eq!(
+                    diagnostic.message,
+                    "file-I/O problems are not supported in this version"
+                );
+                assert_eq!(
+                    diagnostic.origin,
+                    config.at(&["config", "io"]).unwrap().origin
+                );
+                assert_eq!(
+                    diagnostic.origin.file,
+                    std::path::PathBuf::from("problem.toml")
+                );
+                assert_eq!(diagnostic.origin.key_path, "config.io");
+                assert_eq!(diagnostic.origin.line, Some(4));
+                assert!(diagnostic.origin.col.is_some());
+                assert!(report.executable().is_none());
+                assert!(resolve(&config, &Selection::default()).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_file_io_has_only_phase_one_errors_with_provenance() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for field in ["input", "output"] {
+            for name in [
+                "",
+                ".",
+                "..",
+                "a/b",
+                r"a\b",
+                "/root",
+                r"\root",
+                "C:task.in",
+                "a:b",
+                "NUL",
+                "con.txt",
+                "COM¹.txt",
+                "name.",
+                "name ",
+                ".cpf-input",
+            ] {
+                let document =
+                    format!("[problem]\nid = 'local:p'\n[config]\nio = {{ {field} = '{name}' }}\n");
+                let raw = layer(&document, LayerKind::Problem, platform);
+                assert_eq!(
+                    raw.diagnostics.len(),
+                    1,
+                    "{document}: {:?}",
+                    raw.diagnostics
+                );
+                let diagnostic = &raw.diagnostics[0];
+                assert!(diagnostic.message.contains("portable file-I/O name"));
+                assert_eq!(diagnostic.origin.key_path, format!("config.io.{field}"));
+                assert_eq!(
+                    diagnostic.origin.file,
+                    std::path::PathBuf::from("problem.toml")
+                );
+                assert_eq!(diagnostic.origin.line, Some(4));
+                assert!(diagnostic.origin.col.is_some());
+                let config = compose(std::slice::from_ref(&raw), platform);
+                assert_eq!(
+                    check(&config, &Selection::default()).diagnostics(),
+                    raw.diagnostics
+                );
+            }
+        }
+        for (value, key, message) in [
+            (
+                "{}",
+                "config.io",
+                "io requires at least one of input or output",
+            ),
+            ("false", "config.io", "expected a table"),
+            ("[]", "config.io", "expected a table"),
+            ("'task.in'", "config.io", "expected a table"),
+            ("{input = 1}", "config.io.input", "expected a string"),
+            ("{output = []}", "config.io.output", "expected a string"),
+            (
+                "{input = 'ok.in', extra = 'bad'}",
+                "config.io.extra",
+                "unknown configuration key",
+            ),
+        ] {
+            let raw = layer(
+                &format!("[problem]\nid = 'local:p'\n[config]\nio = {value}\n"),
+                LayerKind::Problem,
+                platform,
+            );
+            assert_eq!(raw.diagnostics.len(), 1, "{:?}", raw.diagnostics);
+            assert_eq!(raw.diagnostics[0].origin.key_path, key);
+            assert_eq!(raw.diagnostics[0].message, message);
+            let config = compose(std::slice::from_ref(&raw), platform);
+            assert_eq!(
+                check(&config, &Selection::default()).diagnostics(),
+                raw.diagnostics
+            );
+        }
+    }
+}
+
+#[test]
+fn reserved_file_io_is_unknown_outside_the_problem_layer() {
+    for kind in [
+        LayerKind::DefaultUser,
+        LayerKind::OverrideUser,
+        LayerKind::Workspace,
+    ] {
+        let raw = layer("io = { input = 'task.in' }", kind, Platform::host());
+        assert_eq!(raw.diagnostics.len(), 1);
+        assert_eq!(raw.diagnostics[0].origin.key_path, "io");
+        assert_eq!(raw.diagnostics[0].message, "unknown configuration key");
+        let config = compose(std::slice::from_ref(&raw), Platform::host());
+        assert!(config.at(&["io"]).is_none());
+        assert_eq!(
+            check(&config, &Selection::default()).diagnostics(),
+            raw.diagnostics
+        );
+    }
+}

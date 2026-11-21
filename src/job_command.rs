@@ -409,17 +409,25 @@ pub fn run_with_config(
     let mut progress = None;
     let mut events = None;
     let outcome = (|| {
-        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        let supported = cfg!(any(target_os = "linux", target_os = "macos"));
+        let cwd = std::env::current_dir()
+            .map_err(|e| Error::Workspace(format!("cannot read current directory: {e}")))?;
+        // Outside a workspace no problem configuration can be loaded, so the
+        // platform refusal comes first. Inside one, planning reports
+        // configuration errors first and then refuses (`plan_invocation`).
+        if !supported && crate::workspace::find_optional_root(&cwd)?.is_none() {
             return Err(Error::Infrastructure(
                 "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
             ));
         }
-        signals = Some(
-            CancelSignals::install(cancel.clone())
-                .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
-        );
-        let cwd = std::env::current_dir()
-            .map_err(|e| Error::Workspace(format!("cannot read current directory: {e}")))?;
+        // An unsupported platform always refuses during planning; it installs
+        // no signal listener.
+        if supported {
+            signals = Some(
+                CancelSignals::install(cancel.clone())
+                    .map_err(|e| Error::Infrastructure(format!("signal listener: {e}")))?,
+            );
+        }
         let root = crate::workspace::find_root(&cwd)?;
         refusal.workspace = Some(root.clone());
         let plan = plan_invocation(
@@ -835,6 +843,15 @@ fn plan_invocation(
         Some(initial) if selected.is_none() => initial,
         _ => load_config(&request),
     };
+    // Surface all loader errors even when another target rule (for example
+    // an unsupported problem kind) would also refuse this invocation.
+    if config.has_errors() {
+        let error = crate::config::ConfigErrors {
+            diagnostics: config.diagnostics().to_vec(),
+        };
+        refusal.diagnostics = diagnostics(&error.diagnostics);
+        return Err(Error::Config(error.to_string()));
+    }
     if let Some((name, _)) = command.named() {
         named = Some(config.command(name).map_err(|e| {
             refusal.diagnostics = diagnostics(&e.diagnostics);
@@ -867,6 +884,14 @@ fn plan_invocation(
             refusal.diagnostics = diagnostics(&e.diagnostics);
             Error::Config(e.to_string())
         })?;
+    // Report §5.2 gives configuration failures precedence over infrastructure.
+    // Validate phases 1–2 before refusing an unsupported execution platform,
+    // but never probe tools, read tests or admit a job there.
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Err(Error::Infrastructure(
+            "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
+        ));
+    }
     let (tests, command_tests) = if let Some(named) = &named {
         let entries = if named.for_each_test.value {
             let selected = selected.as_ref().expect("test context");

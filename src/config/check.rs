@@ -599,6 +599,17 @@ pub fn check(merged: &MergedConfig, selection: &Selection) -> CheckReport {
         diagnostics: merged.diagnostics.clone(),
     };
     let mut universe = ComposedUniverse::default();
+    // Reject only a structurally valid declaration. Invalid descendants,
+    // including unknown keys, already have phase-1 diagnostics.
+    if let Some(io) = merged.at(&["config", "io"]) {
+        if io.markers.is_empty() {
+            validator.error(
+                io.origin.clone(),
+                "file-I/O problems are not supported in this version",
+                None,
+            );
+        }
+    }
     if let Some(languages) = merged.languages() {
         for name in languages.keys() {
             let language = merged.language(name).expect("language map member");
