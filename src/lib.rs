@@ -10,6 +10,7 @@ pub mod exec;
 pub mod exit;
 pub mod jobs;
 pub mod names;
+pub mod report;
 pub mod selection;
 pub mod storage;
 pub mod supervisor;
