@@ -314,7 +314,11 @@ pub fn probe(job_dir: impl AsRef<Path>) -> ProbeOutcome {
     };
     match sys::try_lock(&file) {
         Ok(true) => ProbeOutcome::Acquired(ProbeLock {
-            _lease: JobLease { file, budget: None },
+            _lease: JobLease {
+                directory: job_dir.as_ref().to_path_buf(),
+                file,
+                budget: None,
+            },
         }),
         Ok(false) => ProbeOutcome::Held,
         Err(error) => ProbeOutcome::Failed(error),

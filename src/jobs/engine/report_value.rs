@@ -1,6 +1,7 @@
 //! Finalized schema evidence owned by the engine, independent of delivery.
-use super::{self as e, CancelPhase};
+use super::CancelPhase;
 use crate::config::Comparator;
+use crate::jobs::engine as e;
 use crate::report::HookOutcome;
 use std::path::PathBuf;
 
