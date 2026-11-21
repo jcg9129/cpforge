@@ -324,12 +324,14 @@ pub fn write_state(
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, SelectionError> {
-    fs::canonicalize(path).map_err(|error| StorageError::io(path, error).into())
+    fs::canonicalize(path)
+        .map(|path| storage::paths::plain(&path))
+        .map_err(|error| StorageError::io(path, error).into())
 }
 
 fn path_component_eq(left: &OsStr, right: &OsStr) -> bool {
     // Storage §7 uses ASCII case folding on Windows and exact bytes on Unix.
-    // Both complete paths have been canonicalised, including Windows verbatim prefixes.
+    // Both complete paths have been canonicalised.
     if cfg!(windows) {
         left.as_encoded_bytes()
             .eq_ignore_ascii_case(right.as_encoded_bytes())
@@ -339,6 +341,12 @@ fn path_component_eq(left: &OsStr, right: &OsStr) -> bool {
 }
 
 fn cwd_name(root: &Path, physical_cwd: &Path) -> Option<OsString> {
+    // A name Win32 would reinterpret keeps one side verbatim; compare both
+    // without the drive or UNC verbatim prefix.
+    let (root, physical_cwd) = (
+        storage::paths::comparable(root),
+        storage::paths::comparable(physical_cwd),
+    );
     let mut components = physical_cwd.components();
     for expected in root.components() {
         let actual = components.next()?;
@@ -432,7 +440,7 @@ pub(crate) fn current(problem_flag: Option<&str>, path: bool) -> Result<(), Erro
         }
         #[cfg(not(unix))]
         {
-            plain_windows_path(&selected.dir.display().to_string()).into_bytes()
+            selected.dir.display().to_string().into_bytes()
         }
     } else {
         selected.identity.to_string().into_bytes()
@@ -443,22 +451,6 @@ pub(crate) fn current(problem_flag: Option<&str>, path: bool) -> Result<(), Erro
         .write_all(&line)
         .and_then(|()| output.flush())
         .map_err(|error| Error::Failure(format!("cannot write selection: {error}")))
-}
-
-/// Shells and editors cannot use a verbatim path (`cmd.exe` cannot `cd` to it),
-/// so `current --path` prints the drive or UNC form that canonicalisation hides.
-#[cfg_attr(unix, allow(dead_code))]
-fn plain_windows_path(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{rest}");
-    }
-    if let Some(rest) = path.strip_prefix(r"\\?\") {
-        let bytes = rest.as_bytes();
-        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-            return rest.to_owned();
-        }
-    }
-    path.to_owned()
 }
 
 pub(crate) fn switch(reference: &str) -> Result<(), Error> {
@@ -588,7 +580,7 @@ mod tests {
             "[problem]\nid = 'local:Case'\n",
         )
         .unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        let root = canonical(&root).unwrap();
         // Physical cwd normally already has the directory entry's spelling and
         // cannot be a file or a link. Exercise those helper refusals directly.
         for (name, reason) in [
@@ -619,22 +611,55 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_canonical_ancestry_compares_components_with_ascii_case_folding() {
-        assert_eq!(
-            plain_windows_path(r"\\?\C:\ws\problems\a"),
-            r"C:\ws\problems\a"
-        );
-        assert_eq!(
-            plain_windows_path(r"\\?\UNC\srv\share\ws"),
-            r"\\srv\share\ws"
-        );
-        assert_eq!(plain_windows_path(r"\\?\Volume{x}\ws"), r"\\?\Volume{x}\ws");
-        assert_eq!(plain_windows_path(r"C:\ws"), r"C:\ws");
-        let root = Path::new(r"\\?\C:\Work\ws");
-        let cwd = Path::new(r"\\?\c:\work\WS\PROBLEMS\A\nested");
+        let root = Path::new(r"C:\Work\ws");
+        let cwd = Path::new(r"c:\work\WS\PROBLEMS\A\nested");
         assert_eq!(cwd_name(root, cwd), Some(OsString::from("A")));
         assert_eq!(
-            cwd_name(root, Path::new(r"\\?\C:\Work\ws-extra\problems\A")),
+            cwd_name(root, Path::new(r"C:\Work\ws-extra\problems\A")),
             None
         );
+        let root = Path::new(r"\\server\share\Work\ws");
+        let cwd = Path::new(r"\\SERVER\SHARE\work\WS\PROBLEMS\A\nested");
+        assert_eq!(cwd_name(root, cwd), Some(OsString::from("A")));
+        // A nested name Win32 would reinterpret keeps the cwd verbatim.
+        let cwd = storage::paths::plain(Path::new(r"\\?\UNC\server\share\Work\ws\problems\A\x."));
+        assert_eq!(cwd_name(root, &cwd), Some(OsString::from("A")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovered_workspace_and_selected_cwd_use_plain_canonical_paths() {
+        let mut bits = [0_u8; 16];
+        getrandom::fill(&mut bits).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "cpforge-plain-root-{:032x}",
+            u128::from_le_bytes(bits)
+        ));
+        fs::create_dir_all(root.join("problems/A/nested")).unwrap();
+        fs::write(root.join("cpforge.toml"), "schema = 1\n").unwrap();
+        fs::write(
+            root.join("problems/A/problem.toml"),
+            "[problem]\nid = 'local:A'\n",
+        )
+        .unwrap();
+        let verbatim = fs::canonicalize(&root).unwrap();
+        let discovered = find_root(&verbatim.join(r"problems\A\nested")).unwrap();
+        assert!(
+            !discovered
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(br"\\?\")
+        );
+        assert_eq!(discovered, storage::paths::plain(&verbatim));
+        let selected = resolve(&discovered, &verbatim.join(r"problems\A\nested"), None).unwrap();
+        assert_eq!(selected.root, discovered);
+        assert_eq!(selected.dir, discovered.join("problems/A"));
+        assert_eq!(selected.source, Source::Cwd);
+        let lock = WorkspaceLock::new(&verbatim).unwrap();
+        let guard = lock.acquire("plain root").unwrap();
+        assert_eq!(guard.root(), discovered.as_path());
+        drop(guard);
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
     }
 }

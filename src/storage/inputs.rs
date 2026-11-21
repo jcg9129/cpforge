@@ -280,7 +280,7 @@ mod tests {
                 .join("target/input-reader-fixtures")
                 .join(format!("{:032x}", u128::from_le_bytes(random)));
             fs::create_dir_all(root.join(".cpforge")).unwrap();
-            let root = fs::canonicalize(root).unwrap();
+            let root = crate::storage::paths::plain(&fs::canonicalize(root).unwrap());
             fs::write(
                 root.join(".cpforge/job-seq"),
                 "schema = 1\nepoch = '0123456789abcdef0123456789abcdef'\nnext = '0'\n",

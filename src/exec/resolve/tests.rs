@@ -89,6 +89,9 @@ fn missing_and_empty_path_permit_only_explicit_paths_on_both_platforms() {
     for (platform, path) in [
         (Platform::Linux, "/bin/tool"),
         (Platform::Windows, r"C:\bin\tool.exe"),
+        (Platform::Windows, r"\\server\share\tool.exe"),
+        (Platform::Windows, r"\\?\C:\bin\tool.exe"),
+        (Platform::Windows, r"\\?\UNC\server\share\tool.exe"),
     ] {
         for environment in [vec![], env(&[("PATH", "")])] {
             let probe = FakeProbe::with(&[(path, YES)]);

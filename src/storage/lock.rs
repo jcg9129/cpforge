@@ -45,8 +45,9 @@ pub struct WorkspaceLock {
 impl WorkspaceLock {
     /// Canonicalize the root once; a link used to reach the root is allowed.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let root =
-            fs::canonicalize(root.as_ref()).map_err(|e| StorageError::io(root.as_ref(), e))?;
+        let root = fs::canonicalize(root.as_ref())
+            .map(|path| super::paths::plain(&path))
+            .map_err(|e| StorageError::io(root.as_ref(), e))?;
         if !fs::metadata(&root)
             .map_err(|e| StorageError::io(&root, e))?
             .is_dir()

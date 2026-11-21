@@ -25,7 +25,9 @@ impl Fixture {
             .join("target/frozen-input-fixtures")
             .join(format!("{:032x}", u128::from_le_bytes(random)));
         fs::create_dir_all(root.join("problem/tests")).unwrap();
-        let fixture = Self(fs::canonicalize(root).unwrap());
+        let fixture = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(root).unwrap(),
+        ));
         fixture.write("cpforge.toml", b"schema = 1\n");
         fixture.write("user.toml", b"schema = 1\n");
         fixture.write(

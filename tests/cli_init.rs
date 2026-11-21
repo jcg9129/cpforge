@@ -32,7 +32,9 @@ impl Directory {
                 fs::create_dir(&candidate).ok().map(|()| candidate)
             })
             .expect("a writable temporary directory outside a git tree");
-        Self(fs::canonicalize(path).unwrap())
+        Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ))
     }
 
     fn path(&self, relative: impl AsRef<Path>) -> PathBuf {

@@ -37,7 +37,11 @@ Related: design §4, `execution.md` and `report.md` (report contract).
 - The workspace root is the nearest ancestor of the current directory
   containing a regular file `cpforge.toml` (`--workspace` overrides; a
   directory of that name is not a marker); it may be reached
-  through a link and is canonicalised once.
+  through a link and is canonicalised once. On Windows the canonical root is
+  used in its plain drive or UNC form when it has one (not the verbatim `\\?\`
+  form), so paths derived from it can be joined with `/` and passed to programs;
+  a root whose plain spelling would name another file (a component ending in a
+  dot or space, a reserved device name or a character Win32 rejects) stays verbatim.
 - Tool-written paths come from the root and sanitised identifiers (portable-name validation). Each
   component below the root is checked with `symlink_metadata` at use; a
   symlink, junction or other reparse point is `LinkInPath`. Under §1 this

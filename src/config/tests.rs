@@ -729,6 +729,8 @@ fn typed_paths_and_source_rules_on_each_platform() {
         (r"bin\x", r"C:\u\bin\x"),
         (r"C:\tools\x", r"C:\tools\x"),
         (r"\\host\share\x", r"\\host\share\x"),
+        (r"\\?\C:\tools\x", r"\\?\C:\tools\x"),
+        (r"\\?\UNC\host\share\x", r"\\?\UNC\host\share\x"),
     ] {
         let layer = raw(&format!("[run]\nargv = ['{path}']"), Platform::Windows);
         valid(&layer);

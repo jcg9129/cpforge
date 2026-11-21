@@ -18,7 +18,9 @@ impl Workspace {
             u128::from_le_bytes(bits)
         ));
         fs::create_dir(&path).unwrap();
-        let workspace = Self(fs::canonicalize(path).unwrap());
+        let workspace = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ));
         fs::write(workspace.path("cpforge.toml"), "schema = 1\n").unwrap();
         for name in ["A", "B"] {
             fs::create_dir_all(workspace.path(format!("problems/{name}/tests"))).unwrap();

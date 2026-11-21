@@ -33,7 +33,7 @@ impl Fixture {
             .join(format!("{:032x}", u128::from_le_bytes(random)));
         fs::create_dir_all(root.join(".cpforge/runs")).unwrap();
         Self {
-            root: fs::canonicalize(root).unwrap(),
+            root: cpforge::storage::paths::plain(&fs::canonicalize(root).unwrap()),
             _serial: serial,
         }
     }

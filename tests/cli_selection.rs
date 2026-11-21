@@ -33,7 +33,9 @@ impl Workspace {
                 fs::create_dir(&path).ok().map(|()| path)
             })
             .expect("a writable temporary directory outside a git tree");
-        let workspace = Self(fs::canonicalize(path).unwrap());
+        let workspace = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ));
         fs::create_dir_all(workspace.path("user/cpforge")).unwrap();
         let output = workspace.command().arg("init").output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -634,12 +636,9 @@ fn path_bytes(path: &Path) -> Vec<u8> {
     }
     #[cfg(not(unix))]
     {
-        // `current --path` prints the drive form, not the verbatim `\\?\` one.
-        let text = path.display().to_string();
-        text.strip_prefix(r"\\?\")
-            .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
-            .unwrap_or(&text)
-            .to_owned()
+        cpforge::storage::paths::plain(path)
+            .display()
+            .to_string()
             .into_bytes()
     }
 }
@@ -655,6 +654,38 @@ fn current_path_is_the_canonical_problem_directory_plus_newline() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(output.stderr.is_empty());
     assert_eq!(output.stdout, expected);
+}
+
+#[cfg(windows)]
+#[test]
+fn current_path_and_selection_from_a_canonicalized_temp_root_are_plain() {
+    let workspace = Workspace::new();
+    workspace.problem("A");
+    let canonical = fs::canonicalize(&workspace.0).unwrap();
+    let cwd = canonical.join(r"problems\A\nested");
+    let selected = selection::resolve(&canonical, &cwd, None).unwrap();
+    assert!(
+        !selected
+            .root
+            .as_os_str()
+            .as_encoded_bytes()
+            .starts_with(br"\\?\")
+    );
+    assert!(
+        !selected
+            .dir
+            .as_os_str()
+            .as_encoded_bytes()
+            .starts_with(br"\\?\")
+    );
+    assert_eq!(selected.source, Source::Cwd);
+    let output = workspace.run(&cwd, &["current", "--path"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let mut expected = selected.dir.display().to_string().into_bytes();
+    expected.push(b'\n');
+    assert_eq!(output.stdout, expected);
+    assert!(!output.stdout.starts_with(br"\\?\"));
 }
 
 #[cfg(unix)]

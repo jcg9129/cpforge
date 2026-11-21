@@ -20,7 +20,9 @@ impl Fixture {
             .join("target")
             .join(format!("ready-job-{}", BuildId::generate().unwrap()));
         fs::create_dir_all(&path).unwrap();
-        let f = Self(fs::canonicalize(path).unwrap());
+        let f = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ));
         f.write("user.toml", "schema = 1\n");
         f.write(
             "cpforge.toml",

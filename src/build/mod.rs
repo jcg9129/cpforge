@@ -80,7 +80,9 @@ impl BuildArea {
                 path: path.into(),
             }));
         }
-        let root = fs::canonicalize(path).map_err(|e| StorageError::io(path, e))?;
+        let root = fs::canonicalize(path)
+            .map(|path| storage::paths::plain(&path))
+            .map_err(|e| StorageError::io(path, e))?;
         Ok(Self { root })
     }
 

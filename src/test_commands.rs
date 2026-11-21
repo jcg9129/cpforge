@@ -101,6 +101,7 @@ pub(crate) fn run(problem: Option<&str>, command: Option<TestCommand>) -> Result
     };
     // Register paths are lexical from the physical current directory (§5.7).
     let cwd = std::fs::canonicalize(&cwd)
+        .map(|path| crate::storage::paths::plain(&path))
         .map_err(|error| Error::Failure(format!("cannot resolve current directory: {error}")))?;
     let lock = WorkspaceLock::new(&selected.root)?;
     let guard = lock.acquire("test catalog")?;

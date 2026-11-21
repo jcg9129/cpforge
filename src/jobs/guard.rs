@@ -174,8 +174,8 @@ impl LexicalPath {
 
 fn lexical(mut bytes: &[u8], platform: Platform) -> LexicalPath {
     let mut root = Vec::new();
-    // Canonical Windows job paths use verbatim prefixes. Treat ordinary and
-    // verbatim drive/UNC spellings alike without resolving filesystem aliases.
+    // Treat plain and verbatim Windows drive/UNC spellings alike without
+    // resolving filesystem aliases.
     if platform == Platform::Windows {
         if bytes
             .get(..8)

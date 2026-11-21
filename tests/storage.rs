@@ -24,7 +24,9 @@ impl Directory {
             u128::from_le_bytes(bits)
         ));
         fs::create_dir(&path).unwrap();
-        Self(fs::canonicalize(path).unwrap())
+        Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ))
     }
     fn lock(&self) -> WorkspaceLock {
         WorkspaceLock::new(&self.0).unwrap()

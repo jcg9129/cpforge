@@ -575,7 +575,9 @@ mod tests {
                 u128::from_le_bytes(bits)
             ));
             fs::create_dir(&path).unwrap();
-            Self(fs::canonicalize(path).unwrap())
+            Self(crate::storage::paths::plain(
+                &fs::canonicalize(path).unwrap(),
+            ))
         }
     }
 

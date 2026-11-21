@@ -983,23 +983,10 @@ fn lexical_absolute(cwd: &Path, path: &Path) -> Result<PathBuf, String> {
             component => result.push(component.as_os_str()),
         }
     }
-    #[cfg(windows)]
-    {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        // Canonical workspace directories carry a verbatim prefix; CLI absolute
-        // paths may use the ordinary drive/UNC form. Compare lexical components
-        // in the same form, preserving even non-Unicode ancestor names.
-        let wide: Vec<u16> = result.as_os_str().encode_wide().collect();
-        if wide.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
-            let mut plain = vec![92, 92];
-            plain.extend_from_slice(&wide[8..]);
-            result = PathBuf::from(OsString::from_wide(&plain));
-        } else if wide.starts_with(&[92, 92, 63, 92]) {
-            result = PathBuf::from(OsString::from_wide(&wide[4..]));
-        }
-    }
-    Ok(result)
+    // CLI absolute paths may use either the plain or the verbatim drive/UNC
+    // form; compare lexical components in the same form, preserving even
+    // non-Unicode ancestor names.
+    Ok(crate::storage::paths::comparable(&result))
 }
 
 /// Whether `directory` has an entry spelled exactly `name` (any type).

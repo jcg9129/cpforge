@@ -237,3 +237,34 @@ pub(super) fn ignore_valid(text: &str) -> bool {
             .split('/')
             .all(|c| !matches!(c, "" | "." | "..") && (!c.contains("**") || c == "**"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_plain_and_verbatim_paths_are_absolute() {
+        for path in [
+            r"C:\workspace\problems\a",
+            "C:/workspace/problems/a",
+            r"C:\workspace/problems/a",
+            r"\\server\share\workspace",
+            r"\\server\share\workspace/problems/a",
+            r"\\?\C:\workspace\problems\a",
+            r"\\?\UNC\server\share\workspace",
+        ] {
+            assert!(
+                native_absolute(OsStr::new(path), Platform::Windows),
+                "{path}"
+            );
+            assert!(!windows_relative(path), "{path}");
+        }
+        for path in [r"C:workspace", r"\workspace", "/workspace"] {
+            assert!(
+                !native_absolute(OsStr::new(path), Platform::Windows),
+                "{path}"
+            );
+            assert!(windows_relative(path), "{path}");
+        }
+    }
+}

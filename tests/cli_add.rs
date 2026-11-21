@@ -30,7 +30,9 @@ impl Workspace {
                 fs::create_dir(&candidate).ok().map(|()| candidate)
             })
             .expect("a writable temporary directory outside a git tree");
-        let workspace = Self(fs::canonicalize(path).unwrap());
+        let workspace = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(path).unwrap(),
+        ));
         assert!(
             !workspace
                 .0

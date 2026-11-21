@@ -17,6 +17,7 @@ pub mod inputs;
 pub mod job;
 pub mod job_seq;
 mod lock;
+pub mod paths;
 pub mod prune;
 mod publish;
 mod record;

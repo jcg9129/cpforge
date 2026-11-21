@@ -18,7 +18,9 @@ impl Workspace {
             u128::from_le_bytes(bits)
         ));
         fs::create_dir(&root).unwrap();
-        let fixture = Self(fs::canonicalize(root).unwrap());
+        let fixture = Self(cpforge::storage::paths::plain(
+            &fs::canonicalize(root).unwrap(),
+        ));
         fs::create_dir_all(fixture.path("problems/A")).unwrap();
         fs::create_dir(fixture.0.join("captures")).unwrap();
         fs::create_dir(fixture.0.join("user")).unwrap();

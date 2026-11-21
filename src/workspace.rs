@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 use crate::storage::{
     Cleanup, Durability, ErrorKind, Published, Record, StorageError, WorkspaceGuard, WorkspaceLock,
-    crash, job_seq::read_job_sequence, publish_file_noclobber,
+    crash, job_seq::read_job_sequence, paths, publish_file_noclobber,
 };
 
 #[derive(Debug, Default)]
@@ -194,7 +194,7 @@ pub(crate) fn find_root(current: &Path) -> Result<PathBuf, Error> {
     for ancestor in current.ancestors() {
         let marker = ancestor.join("cpforge.toml");
         match fs::metadata(&marker) {
-            Ok(metadata) if metadata.is_file() => return Ok(ancestor.to_path_buf()),
+            Ok(metadata) if metadata.is_file() => return Ok(paths::plain(ancestor)),
             Ok(_) => {}
             Err(error)
                 if matches!(
@@ -227,7 +227,9 @@ mod tests {
                 u128::from_le_bytes(random)
             ));
             fs::create_dir(&path).unwrap();
-            Self(fs::canonicalize(path).unwrap())
+            Self(crate::storage::paths::plain(
+                &fs::canonicalize(path).unwrap(),
+            ))
         }
     }
 

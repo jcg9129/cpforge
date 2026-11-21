@@ -263,6 +263,8 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     use std::os::windows::ffi::OsStrExt;
     // canonicalize the existing parent through std to obtain a verbatim path,
     // including for a destination that does not exist yet.
+    // Keep this Win32-only buffer verbatim for long-path support; it never
+    // becomes a stored path, placeholder or child argument.
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;

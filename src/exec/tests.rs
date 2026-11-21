@@ -337,7 +337,13 @@ fn windows_expanded_paths_reject_drive_relative_and_root_relative_forms() {
         .unwrap_err();
         assert_eq!(kinds(&errors), [PrepareErrorKind::NotAbsolute], "{value}");
     }
-    for value in ["C:\\bin\\tool", "C:/bin/tool", "\\\\server\\share\\tool"] {
+    for value in [
+        r"C:\bin\tool",
+        "C:/bin/tool",
+        r"\\server\share\tool",
+        r"\\?\C:\bin\tool",
+        r"\\?\UNC\server\share\tool",
+    ] {
         let ctx = command_context(
             &plan,
             InvocationDirs {
@@ -1047,6 +1053,8 @@ fn cwd_expansion_obeys_windows_absolute_path_rules() {
         ("C:\\work", true),
         ("C:/work", true),
         ("\\\\server\\share\\work", true),
+        (r"\\?\C:\work", true),
+        (r"\\?\UNC\server\share\work", true),
     ] {
         let ctx = command_context(
             &plan,
