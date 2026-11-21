@@ -91,6 +91,103 @@ impl JobCommand for BuildCommand {
     }
 }
 
+/// Raw mode occupies the entire invocation; it never admits a comparison.
+#[derive(Debug)]
+pub struct RunCommand {
+    pub deadline: Option<String>,
+}
+impl JobCommand for RunCommand {
+    fn kind(&self) -> JobKind {
+        JobKind::Run
+    }
+    fn operation(&self) -> Operation {
+        Operation::Run
+    }
+    fn deadline_ms(&self) -> Result<Option<u64>, Error> {
+        self.deadline
+            .as_deref()
+            .map(crate::config::parse_deadline)
+            .transpose()
+            .map_err(|e| Error::Config(format!("--deadline: {e}")))
+    }
+    fn select_tests(
+        &self,
+        _selected: &Selected,
+        _config: &LoadedConfig,
+        _target: &TargetPlan,
+    ) -> Result<Vec<Identifier>, Error> {
+        Ok(Vec::new())
+    }
+    fn request(&self, _target: &TargetPlan) -> JobRequest {
+        use crate::jobs::engine::{CommandKind, Iteration, Recipe, Role};
+        JobRequest::Iterations {
+            kind: CommandKind::Run,
+            iterations: vec![Iteration {
+                role: Role::Raw,
+                recipe: Recipe::TargetRun,
+                stdin: None,
+                depends_on_build: true,
+            }],
+            needs_build: true,
+            keep_going: true,
+        }
+    }
+    fn summary(&self, report: &FinalizedReport) -> Vec<String> {
+        let data = report.data();
+        let raw = data
+            .executions
+            .iter()
+            .find(|e| matches!(e.plan.role, crate::jobs::engine::Role::Raw));
+        let class = raw.and_then(|e| e.result.class.as_ref());
+        if matches!(class, Some(RunClass::ExitedZero)) {
+            return Vec::new();
+        }
+        // Only the raw execution's termination is "the child's" (D2); a
+        // build or a run that never started is named by the job verdict.
+        let execution = raw.filter(|e| e.result.class.is_some());
+        let subject = if data.result.verdict == JobVerdict::InternalError {
+            LabelSubject::Job(data.result.verdict)
+        } else if let Some(build) = data
+            .build
+            .as_ref()
+            .filter(|_| data.result.verdict == JobVerdict::BuildFailed)
+        {
+            LabelSubject::Build(&build.result)
+        } else {
+            execution.map_or(LabelSubject::Job(data.result.verdict), |e| {
+                LabelSubject::Run(&e.result)
+            })
+        };
+        let display = label(
+            subject,
+            &DisplayContext {
+                wall_deadline: execution
+                    .and_then(|e| e.summary.as_ref())
+                    .map(|s| s.deadline),
+                ..DisplayContext::default()
+            },
+        );
+        let mut line = crate::report::render_label(&display);
+        if let Some(ExecutionRecord::Started(root)) = execution.and_then(|e| e.evidence.as_deref())
+        {
+            line.push_str(&match root.status {
+                crate::supervisor::Termination::Exited { code } => {
+                    format!(" | child exited with code {code}")
+                }
+                crate::supervisor::Termination::Signalled {
+                    signal,
+                    core_dumped,
+                } => format!(
+                    " | child killed by signal {signal}{}",
+                    if core_dumped { " (core dumped)" } else { "" }
+                ),
+                crate::supervisor::Termination::Unknown => " | child status unknown".into(),
+            });
+        }
+        vec![line]
+    }
+}
+
 #[derive(Debug)]
 pub struct TestRunCommand {
     cases: Vec<String>,
@@ -251,7 +348,7 @@ pub fn run(
     let outcome = (|| {
         if !cfg!(any(target_os = "linux", target_os = "macos")) {
             return Err(Error::Infrastructure(
-                "unsupported platform: build/test execution requires Linux or macOS".into(),
+                "unsupported platform: build/test/run execution requires Linux or macOS".into(),
             ));
         }
         let cwd = std::env::current_dir()
@@ -268,7 +365,7 @@ pub fn run(
         });
         if presentation.problem_kind != "batch" {
             return Err(Error::Config(format!(
-                "problem kind {:?}: build/test unsupported in this version",
+                "problem kind {:?}: build/test/run unsupported in this version",
                 presentation.problem_kind
             )));
         }
@@ -296,7 +393,8 @@ pub fn run(
             .retention()
             .map_err(|e| Error::Config(e.to_string()))?;
         let tests = command.select_tests(&selected, &config, &target)?;
-        if exceeds_run_cap(tests.len(), target.build.is_some()) {
+        let primary_runs = tests.len().checked_add(usize::from(kind == JobKind::Run));
+        if primary_runs.is_none_or(|count| exceeds_run_cap(count, target.build.is_some())) {
             return Err(Error::Config(
                 "planned runs exceed the 10 000 execution cap".into(),
             ));
@@ -358,7 +456,7 @@ pub fn run(
             build_bytes: retention.build_bytes.value,
             probe: &NativeProbe,
         };
-        let ready = if kind == JobKind::Build {
+        let ready = if matches!(kind, JobKind::Build | JobKind::Run) {
             prepare_build_job(registered, &target, inputs)
         } else {
             let frozen = registered
@@ -407,11 +505,13 @@ pub fn run(
                 lines.push(format!("cpf: error: {error}"));
             }
             lines.extend(command.summary(&report));
-            if progress
-                .expect("stderr writer")
-                .finish_lines(&lines)
-                .is_err()
-            {
+            let writer = progress.expect("stderr writer");
+            let finished = if kind == JobKind::Run {
+                writer.finish_raw_lines(&lines)
+            } else {
+                writer.finish_lines(&lines)
+            };
+            if finished.is_err() {
                 status = ExitCode::Internal;
             }
             // The report retains the lease through delivery and the summary.

@@ -332,7 +332,13 @@ pub(in crate::supervisor) fn prepare(
 ) -> Result<Prepared, NotStarted> {
     let setup_start = Instant::now();
     let limits = sys::prepare_limits(&spec.limits)?;
-    let captures = Captures::prepare(&mut spec.stdout, &mut spec.stderr, opts, admission)?;
+    let captures = Captures::prepare(
+        &mut spec.stdin,
+        &mut spec.stdout,
+        &mut spec.stderr,
+        opts,
+        admission,
+    )?;
     Ok(Prepared {
         spec,
         captures,
@@ -609,6 +615,11 @@ async fn finish_capture(root: &mut Root, transferred: bool) -> RootOutcome {
         if captures.resources_released() {
             root.captures.take();
             return root.outcome.take().expect("final outcome");
+        }
+        if captures.raw_mode() {
+            // Raw mode can exit with a stdin read or console write still owned
+            // by cleanup; retain that physical-cleanup fact in the logical record.
+            push_note(root.outcome.as_mut().unwrap(), Note::Transferred);
         }
     }
     root.outcome.as_ref().expect("final outcome").clone()

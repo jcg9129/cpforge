@@ -72,20 +72,34 @@ pub(in crate::supervisor) fn into_stdio(writer: Writer) -> Stdio {
     writer.into()
 }
 
-/// Session stdin: the child end stays blocking, only the parent writer is async.
-#[cfg(target_os = "linux")]
+/// Piped stdin: the child end stays blocking, only the parent writer is async.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) type InputEnd = OwnedFd;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) fn input_pipe() -> io::Result<(InputEnd, tokio::net::unix::pipe::Sender)>
 {
     let mut fds = [-1; 2];
+    #[cfg(target_os = "macos")]
+    let _creation = super::macos::creation_lock();
+    #[cfg(target_os = "linux")]
     // SAFETY: storage holds two descriptors; successful outputs are uniquely owned.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+    let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(target_os = "macos")]
+    // SAFETY: successful outputs are new descriptors, protected by creation_lock.
+    let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if result == -1 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: pipe2 just returned these distinct owned descriptors.
+    // SAFETY: pipe creation just returned these distinct owned descriptors.
     let (input, output) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(target_os = "macos")]
+    for fd in [&input, &output] {
+        // SAFETY: live descriptors owned here; no child can be created concurrently.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     // SAFETY: output is live; only the parent end becomes nonblocking.
     if unsafe { libc::fcntl(output.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
         return Err(io::Error::last_os_error());
@@ -118,4 +132,28 @@ pub(in crate::supervisor) fn resize_pipe(
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Raw console output bypasses Rust's stream locks/buffering: a blocked console
+/// forwarder must not hold the lock needed by the final diagnostic writer.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::supervisor) fn console_write(
+    stream: crate::supervisor::Stream,
+    bytes: &[u8],
+) -> io::Result<usize> {
+    let fd = match stream {
+        crate::supervisor::Stream::Stdout => 1,
+        crate::supervisor::Stream::Stderr => 2,
+    };
+    if fd == 1 && crate::process::stdout_closed() {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    // SAFETY: borrows an initialized standard descriptor and a valid byte slice.
+    // SIGPIPE is ignored at startup; EPIPE is returned to the forwarding worker.
+    let result = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result as usize)
+    }
 }

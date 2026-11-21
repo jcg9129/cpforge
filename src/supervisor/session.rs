@@ -316,7 +316,14 @@ mod linux {
             || [&spec.solution, &spec.interactor].iter().any(|r| {
                 !matches!(r.stdin, StdinSpec::Connected)
                     || !matches!(r.stdout, OutputSpec::Connected)
-                    || matches!(r.stderr, OutputSpec::Connected)
+                    || matches!(
+                        r.stderr,
+                        OutputSpec::Connected
+                            | OutputSpec::Capture(StreamPolicy {
+                                sink: Sink::Forward(_),
+                                ..
+                            })
+                    )
             })
         {
             return failed(&spec, NotStarted::Unsupported);

@@ -22,6 +22,7 @@ pub(in crate::supervisor) fn spawn(
     let stdin = match spec.stdin {
         StdinSpec::Null => Stdio::null(),
         StdinSpec::Pipe(end) => end.into(),
+        StdinSpec::Forward => unreachable!("stdin forwarding prepared before creation"),
         StdinSpec::Connected => return Err(NotStarted::Unsupported),
         StdinSpec::File(path) => File::open(path)
             .map(Stdio::from)

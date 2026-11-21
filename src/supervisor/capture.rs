@@ -11,6 +11,8 @@ pub enum Stream {
 #[derive(Clone, Debug)]
 pub enum Sink {
     File(PathBuf),
+    /// Raw mode only: bounded console forwarding with back-pressure.
+    Forward(Stream),
     Discard,
     /// Bounded in-memory retention, with no sink worker.
     Memory,

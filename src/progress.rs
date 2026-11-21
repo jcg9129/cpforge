@@ -156,7 +156,21 @@ impl ProgressWriter {
 
     /// Final warnings and summary, each bounded and escaped like progress.
     /// These lines follow phase D and do not enter the closed progress queue.
-    pub fn finish_lines(mut self, lines: &[String]) -> Result<(), crate::error::Error> {
+    pub fn finish_lines(self, lines: &[String]) -> Result<(), crate::error::Error> {
+        self.finish_lines_with_deadline(lines, None)
+    }
+
+    /// Raw mode may abandon a stalled console at process teardown. Bound the
+    /// final diagnostic too, so it cannot undo the supervisor's flush bound.
+    pub fn finish_raw_lines(self, lines: &[String]) -> Result<(), crate::error::Error> {
+        self.finish_lines_with_deadline(lines, Some(std::time::Duration::from_secs(2)))
+    }
+
+    fn finish_lines_with_deadline(
+        mut self,
+        lines: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), crate::error::Error> {
         self.queue.close();
         {
             let mut state = self.queue.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -165,6 +179,15 @@ impl ProgressWriter {
         }
         self.queue.0.wake.notify_one();
         if let Some(worker) = self.worker.take() {
+            if let Some(timeout) = timeout {
+                let deadline = std::time::Instant::now() + timeout;
+                while !worker.is_finished() {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             worker
                 .join()
                 .map_err(|_| crate::error::Error::Internal("stderr worker panicked".into()))?;

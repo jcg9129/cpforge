@@ -327,7 +327,7 @@ pub fn prepare_job<'probe>(
     })
 }
 
-/// `cpf build` captures only the target, with an empty selected-test set.
+/// Build and raw run capture only the target, with an empty selected-test set.
 pub fn prepare_build_job<'probe>(
     registered: RegisteredJob,
     target: &TargetPlan,

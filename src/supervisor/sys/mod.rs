@@ -20,7 +20,9 @@ pub(super) use linux::{
 };
 
 #[cfg(target_os = "linux")]
-pub(super) use unix::{InputEnd, direct_pipe, input_pipe};
+pub(super) use unix::direct_pipe;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use unix::{InputEnd, console_write, input_pipe};
 
 mod capture_file;
 pub(super) use capture_file::CaptureFile;

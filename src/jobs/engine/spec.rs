@@ -6,7 +6,15 @@ use std::time::Duration;
 impl ExecutionSpec {
     pub fn wire_spec(&self) -> wire::Spec {
         let capture = |name: &str, cap: &crate::config::StreamCap| p::StreamPolicy {
-            sink: p::Sink::File(self.directory.join("out").join(name)),
+            sink: if matches!(self.role, super::Role::Raw) {
+                p::Sink::Forward(if name == "stdout" {
+                    p::Stream::Stdout
+                } else {
+                    p::Stream::Stderr
+                })
+            } else {
+                p::Sink::File(self.directory.join("out").join(name))
+            },
             budget: cap.bytes.value,
             on_exceed: super::exceed(cap.policy),
             events: self.output_events,
@@ -25,10 +33,13 @@ impl ExecutionSpec {
             args: self.command.args.clone(),
             cwd: self.resolved.cwd.clone(),
             env: self.resolved.environment.clone(),
-            stdin: self
-                .stdin
-                .clone()
-                .map_or(wire::SpecStdin::Null, wire::SpecStdin::File),
+            stdin: if matches!(self.role, super::Role::Raw) {
+                wire::SpecStdin::Forward
+            } else {
+                self.stdin
+                    .clone()
+                    .map_or(wire::SpecStdin::Null, wire::SpecStdin::File)
+            },
             stdout: capture("stdout", &self.resolved.stdout),
             stderr: capture("stderr", &self.resolved.stderr),
             wall_deadline: Duration::from_millis(self.resolved.deadline.milliseconds.value),
@@ -93,6 +104,16 @@ impl ExecutionSpec {
                 p::Sink::File(path) => {
                     bytes(&mut hash, b"file");
                     native(&mut hash, path.as_os_str());
+                }
+                p::Sink::Forward(stream) => {
+                    bytes(&mut hash, b"forward");
+                    bytes(
+                        &mut hash,
+                        match stream {
+                            p::Stream::Stdout => b"stdout",
+                            p::Stream::Stderr => b"stderr",
+                        },
+                    );
                 }
                 p::Sink::Discard => bytes(&mut hash, b"discard"),
                 p::Sink::Memory => bytes(&mut hash, b"memory"),

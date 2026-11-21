@@ -1,7 +1,7 @@
 use super::*;
 use crate::supervisor::{
     self, Admission, Credits, EventSender, NotStarted, OutputSpec, ParentReader, ReadResult,
-    RootOutcome, SpawnOptions, StopTrigger, Violation, sys,
+    RootOutcome, SpawnOptions, StdinSpec, StopTrigger, Violation, sys,
 };
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 const QUEUE_BYTES: usize = 1024 * 1024;
 const READ_BYTES: usize = 64 * 1024;
 pub(in crate::supervisor) const DRAIN: Duration = Duration::from_millis(500);
+const CONSOLE_FLUSH: Duration = Duration::from_secs(2);
 const FINALISE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
@@ -95,11 +96,13 @@ pub(in crate::supervisor) struct Captures {
     transfer_cutoff: Option<Instant>,
     admission: Option<Admission>,
     activate: watch::Sender<bool>,
+    input: Input,
 }
 
 impl Captures {
     /// Reserve every worker credit before creating any worker or child.
     pub(in crate::supervisor) fn prepare(
+        stdin: &mut StdinSpec,
         stdout: &mut OutputSpec,
         stderr: &mut OutputSpec,
         opts: &SpawnOptions,
@@ -111,13 +114,14 @@ impl Captures {
                 matches!(
                     spec,
                     OutputSpec::Capture(StreamPolicy {
-                        sink: Sink::File(_),
+                        sink: Sink::File(_) | Sink::Forward(_),
                         ..
                     })
                 )
             })
             .count();
-        let mut credits = admission.worker_credits(count)?;
+        let mut credits =
+            admission.worker_credits(count + usize::from(matches!(stdin, StdinSpec::Forward)))?;
         let (budget_tx, budget) = watch::channel(None);
         let (activate, _) = watch::channel(false);
         let mut captures = Self {
@@ -128,7 +132,21 @@ impl Captures {
             transfer_cutoff: None,
             admission: Some(admission),
             activate,
+            input: Input::default(),
         };
+        if matches!(stdin, StdinSpec::Forward) {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                captures.input = Some(crate::supervisor::forward::InputForward::prepare(
+                    stdin,
+                    credits.pop().expect("reserved stdin credit"),
+                )?);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                return Err(NotStarted::Unsupported);
+            }
+        }
         for (stream, output, test) in [
             (Stream::Stdout, stdout, &opts.stdout_sink),
             (Stream::Stderr, stderr, &opts.stderr_sink),
@@ -151,7 +169,7 @@ impl Captures {
                     losses: Vec::with_capacity(8),
                     sink: match &policy.sink {
                         Sink::File(path) => Some(path.clone()),
-                        Sink::Discard | Sink::Memory => None,
+                        Sink::Discard | Sink::Memory | Sink::Forward(_) => None,
                     },
                 },
                 reader_stopped: false,
@@ -182,6 +200,16 @@ impl Captures {
                         .spawn(move || {
                             worker(writer, receiver, state, space, credit, test, retained_bytes)
                         })
+                        .map_err(|_| NotStarted::Worker)?,
+                )
+            } else if let Sink::Forward(console) = policy.sink {
+                let state = state.clone();
+                let space = space.clone();
+                let credit = credits.pop().expect("reserved forwarder credit");
+                Some(
+                    std::thread::Builder::new()
+                        .name("cpf-console".into())
+                        .spawn(move || forward(console, receiver, state, space, credit))
                         .map_err(|_| NotStarted::Worker)?,
                 )
             } else {
@@ -215,6 +243,10 @@ impl Captures {
     }
 
     pub(in crate::supervisor) fn start_readers(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(input) = &mut self.input {
+            input.start();
+        }
         for capture in &mut self.streams {
             let pending = capture.pending.take().expect("start once");
             capture.reader = Some(tokio::spawn(read(
@@ -232,7 +264,21 @@ impl Captures {
     }
 
     pub(in crate::supervisor) fn is_empty(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.input.is_some() {
+            return false;
+        }
         self.streams.is_empty()
+    }
+
+    pub(in crate::supervisor) fn raw_mode(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.input.is_some() {
+            return true;
+        }
+        self.streams
+            .iter()
+            .any(|capture| matches!(capture.policy.sink, Sink::Forward(_)))
     }
 
     pub(in crate::supervisor) fn set_events(&self, events: Option<EventSender>) {
@@ -254,6 +300,10 @@ impl Captures {
 
     pub(in crate::supervisor) fn start_drain(&mut self, transfer_cutoff: Option<Instant>) {
         self.activate.send_replace(true);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(input) = &mut self.input {
+            input.stop();
+        }
         if let Some(cutoff) = transfer_cutoff {
             self.transfer_cutoff = Some(cutoff);
         }
@@ -272,6 +322,12 @@ impl Captures {
         let cutoff = self.transfer_cutoff.unwrap_or(start + FINALISE);
         let mut all = true;
         for capture in &mut self.streams {
+            let forward = matches!(capture.policy.sink, Sink::Forward(_));
+            let cutoff = if forward {
+                cutoff.min(start + CONSOLE_FLUSH)
+            } else {
+                cutoff
+            };
             // The cleanup poller must never wait for a reader/worker lock.
             let mut state = match capture.state.try_lock() {
                 Ok(state) => state,
@@ -292,7 +348,11 @@ impl Captures {
             }
             if !state.frozen && state.reader_stopped && (state.worker_done || now >= cutoff) {
                 if !state.worker_done {
-                    state.loss(CaptureLoss::WriteStalled);
+                    state.loss(if forward {
+                        CaptureLoss::ForwardIncomplete
+                    } else {
+                        CaptureLoss::WriteStalled
+                    });
                 }
                 state.frozen = true;
                 let slot = match capture.stream {
@@ -326,7 +386,8 @@ impl Captures {
     }
 
     pub(in crate::supervisor) fn resources_released(&mut self) -> bool {
-        resources_released(&mut self.streams)
+        let output = resources_released(&mut self.streams);
+        input_released(&mut self.input) && output
     }
 
     pub(in crate::supervisor) async fn finish(
@@ -340,10 +401,19 @@ impl Captures {
         }
         // Let completed workers release their thread credits before normal
         // return. A frozen stalled worker stays owned for service transfer.
+        let raw = self
+            .streams
+            .iter()
+            .any(|capture| matches!(capture.policy.sink, Sink::Forward(_)));
         let deadline = self
             .transfer_cutoff
-            .unwrap_or(self.drain_start.unwrap() + FINALISE);
-        while !self.resources_released() && Instant::now() < deadline {
+            .unwrap_or(self.drain_start.unwrap() + if raw { CONSOLE_FLUSH } else { FINALISE });
+        // The raw stdin helper may still be blocked in read. It transfers with
+        // the slot rather than delaying this invocation's logical completion;
+        // only its aborted pump task is awaited here.
+        while !(resources_released(&mut self.streams) && input_settled(&self.input))
+            && Instant::now() < deadline
+        {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
@@ -351,6 +421,10 @@ impl Captures {
 
 impl Drop for Captures {
     fn drop(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(input) = &mut self.input {
+            input.stop();
+        }
         for capture in &mut self.streams {
             if let Some(reader) = &capture.reader {
                 reader.abort();
@@ -360,9 +434,13 @@ impl Drop for Captures {
             capture.pending.take();
         }
         if let Some(admission) = self.admission.take() {
-            if self.streams.iter().any(|capture| capture.worker.is_some()) {
+            let pending = self.streams.iter().any(|capture| capture.worker.is_some());
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let pending = pending || self.input.is_some();
+            if pending {
                 admission.transfer_failed_captures(FailedCaptures {
                     streams: std::mem::take(&mut self.streams),
+                    input: std::mem::take(&mut self.input),
                 });
             }
         }
@@ -373,12 +451,41 @@ impl Drop for Captures {
 #[derive(Debug)]
 pub(in crate::supervisor) struct FailedCaptures {
     streams: Vec<Capture>,
+    input: Input,
 }
 
 impl FailedCaptures {
     pub(in crate::supervisor) fn resources_released(&mut self) -> bool {
-        resources_released(&mut self.streams)
+        let output = resources_released(&mut self.streams);
+        input_released(&mut self.input) && output
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type Input = Option<crate::supervisor::forward::InputForward>;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+type Input = ();
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn input_released(input: &mut Input) -> bool {
+    input
+        .as_mut()
+        .is_none_or(crate::supervisor::forward::InputForward::resources_released)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn input_released(_: &mut Input) -> bool {
+    true
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn input_settled(input: &Input) -> bool {
+    input
+        .as_ref()
+        .is_none_or(crate::supervisor::forward::InputForward::pump_finished)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn input_settled(_: &Input) -> bool {
+    true
 }
 
 fn resources_released(streams: &mut [Capture]) -> bool {
@@ -591,5 +698,58 @@ fn worker(
     drop(receiver);
     // writer (including error paths) is closed before completion is published.
     drop(writer);
+    state.lock().unwrap_or_else(|e| e.into_inner()).worker_done = true;
+}
+
+/// A forwarder holds its credit through the last physical console write.
+/// Logical freeze stops further writes and discards queued bytes; an in-flight
+/// blocking write remains owned by cleanup until it returns or cpf exits.
+fn forward(
+    console: Stream,
+    mut receiver: mpsc::UnboundedReceiver<Queued>,
+    state: Shared,
+    space: Arc<Semaphore>,
+    _credit: Credits,
+) {
+    let result = (|| -> io::Result<()> {
+        while let Some(chunk) = receiver.blocking_recv() {
+            let mut bytes = &chunk.bytes[..];
+            while !bytes.is_empty() {
+                if state.lock().unwrap_or_else(|e| e.into_inner()).frozen
+                    || crate::cancel_signals::force_exit_started()
+                {
+                    return Ok(());
+                }
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                let result = sys::console_write(console, bytes);
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let result: io::Result<usize> = {
+                    let _ = console;
+                    Err(io::Error::from(io::ErrorKind::Unsupported))
+                };
+                match result {
+                    Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                    Ok(n) => {
+                        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                        if !state.frozen {
+                            state.record.forwarded += n as u64;
+                        }
+                        bytes = &bytes[n..];
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.failed = true;
+        state.loss(CaptureLoss::ForwardIncomplete);
+    }
+    receiver.close();
+    space.close();
+    drop(receiver);
     state.lock().unwrap_or_else(|e| e.into_inner()).worker_done = true;
 }

@@ -52,6 +52,15 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 machine,
             );
         }
+        Some(Command::Run { profile, deadline }) => {
+            // Raw mode does not flatten machine options: clap rejects them (2).
+            return job_command::run(
+                &job_command::RunCommand { deadline },
+                cli.problem.as_deref(),
+                profile,
+                transport::MachineArgs::default(),
+            );
+        }
         Some(Command::Test {
             command,
             cases,

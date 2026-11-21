@@ -70,10 +70,19 @@ impl Executor for SupervisorExecutor {
             };
             let retained_bytes = resources.retained_bytes.clone();
             admission.hold_resources(resources, retained_bytes);
+            let raw = matches!(spec.role, super::Role::Raw);
             let output = events.output;
             let capture = |name: &str, cap: &crate::config::StreamCap| {
                 OutputSpec::Capture(StreamPolicy {
-                    sink: Sink::File(spec.directory.join("out").join(name)),
+                    sink: if raw {
+                        Sink::Forward(if name == "stdout" {
+                            supervisor::Stream::Stdout
+                        } else {
+                            supervisor::Stream::Stderr
+                        })
+                    } else {
+                        Sink::File(spec.directory.join("out").join(name))
+                    },
                     budget: cap.bytes.value,
                     on_exceed: super::exceed(cap.policy),
                     events: output,
@@ -96,7 +105,11 @@ impl Executor for SupervisorExecutor {
                 args: spec.command.args.clone(),
                 cwd: spec.resolved.cwd.clone(),
                 env: spec.resolved.environment.clone(),
-                stdin: spec.stdin.clone().map_or(StdinSpec::Null, StdinSpec::File),
+                stdin: if raw {
+                    StdinSpec::Forward
+                } else {
+                    spec.stdin.clone().map_or(StdinSpec::Null, StdinSpec::File)
+                },
                 stdout: capture("stdout", &spec.resolved.stdout),
                 stderr: capture("stderr", &spec.resolved.stderr),
                 limits,

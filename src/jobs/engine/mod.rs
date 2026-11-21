@@ -611,7 +611,10 @@ impl<'probe> Engine<'probe> {
                 done: executions.len() as u32 + 1,
                 total: planned_count,
             });
-            if let Some(progress) = progress.as_ref().filter(|_| kind != JobKind::Test) {
+            if let Some(progress) = progress
+                .as_ref()
+                .filter(|_| !matches!(kind, JobKind::Test | JobKind::Run))
+            {
                 progress.offer(&format!(
                     "{}/{} executions finished",
                     executions.len() + 1,
@@ -958,9 +961,13 @@ impl Context<'_> {
         let mut metadata = None;
         let mut resources = None;
         if failure.is_none() && stage.is_some() && command.is_some() {
-            let amount = stage
-                .as_ref()
-                .and_then(|s| s.stdout.bytes.value.checked_add(s.stderr.bytes.value));
+            let amount = if matches!(plan.role, Role::Raw) {
+                Some(0) // Console forwarding retains no output files (E §5.4).
+            } else {
+                stage
+                    .as_ref()
+                    .and_then(|s| s.stdout.bytes.value.checked_add(s.stderr.bytes.value))
+            };
             let reservations = if report_refused {
                 None
             } else {

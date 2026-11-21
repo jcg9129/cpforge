@@ -13,6 +13,8 @@ use std::process::Stdio;
 mod capture;
 mod cleanup;
 mod events;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod forward;
 pub use capture::{
     CaptureLoss, Exceed, Sink, SinkGate, SinkTestOptions, Stream, StreamCapture, StreamPolicy,
 };

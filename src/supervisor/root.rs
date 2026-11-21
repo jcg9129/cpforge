@@ -129,8 +129,9 @@ pub struct ProgramSpec {
 pub enum StdinSpec {
     Null,
     File(PathBuf),
+    Forward,
     Connected,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[doc(hidden)]
     Pipe(super::sys::InputEnd),
 }

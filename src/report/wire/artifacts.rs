@@ -35,6 +35,16 @@ fn policy(v: &p::StreamPolicy) -> Result<Value> {
             ("kind", s("file")),
             ("path", ns(&native_bytes(path.as_os_str()))),
         ]),
+        p::Sink::Forward(stream) => obj([
+            ("kind", s("forward")),
+            (
+                "stream",
+                s(match stream {
+                    p::Stream::Stdout => "stdout",
+                    p::Stream::Stderr => "stderr",
+                }),
+            ),
+        ]),
         p::Sink::Discard => kind("discard"),
         p::Sink::Memory => return Err(Error("memory sink has no execution-contract wire variant")),
     };
