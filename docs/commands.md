@@ -182,3 +182,87 @@ kept. It refuses, changing nothing, when the markers are incomplete,
 duplicated or reversed, when `.gitignore` is a link, not a regular file or has
 several hard links, or when the file changes while cpf is updating it. It exits
 0 on success and 8 when it refuses.
+
+# Adopt and ignore files
+
+```
+cpf [--problem <ref>] adopt <path>
+cpf ignore <pattern>
+```
+
+`cpf adopt notes.txt` adds an existing regular file to `[files] user` in the
+selected problem's `problem.toml`. The path is relative to the **problem
+directory**, even when invoked from the workspace root or a subdirectory.
+It must use portable path components, with no `.` or `..`, absolute path,
+link component or spelling collision. Files already registered as sources,
+support files, solution files or tests are refused, as are files already
+tracked as created by cpf. Repeating adoption of an adopted file succeeds
+without rewriting the record. Adoption changes metadata only; file contents
+stay intact. The record edit takes the workspace lock and preserves comments
+and unknown fields, with a final check for concurrent editor changes.
+
+`cpf ignore '*.swp'` validates the pattern and prints:
+
+```toml
+[workspace]
+ignore = ["*.swp"]
+```
+
+Add the pattern to `[workspace] ignore` in `cpforge.toml`, or in your user
+configuration. Merge it into an existing array rather than duplicating the
+workspace table. The workspace array replaces the user configuration's array.
+The command only prints a suggestion; repeated calls produce the same output
+and never rewrite configuration or create a lock file.
+
+Patterns match problem-relative paths with `/` separators. `*` matches
+characters within one component, `?` matches one character, and `**` as an
+entire component matches zero or more components. A pattern without `/`
+matches the final component at any depth; a pattern with `/` starts at the
+problem directory (`scratch/**`, for example). Empty patterns, leading or
+trailing `/`, empty or dot components, partial `**` components, NUL, `!`,
+`[`, `]` and backslashes are invalid. Matching is exact on Linux and ignores
+ASCII case on Windows and macOS. Ignore hides untracked files from status;
+it does not change provenance or permit deletion.
+
+Both commands exit 0 on success and 8 on workspace, validation or storage
+failure. Neither accepts `--json` or `--events`.
+
+# Check workspace records
+
+```
+cpf fsck [--apply]
+```
+
+`cpf fsck` takes the workspace lock and reports dangling contest references,
+problem directories without `problem.toml`, record schema/classification
+problems, overlapping provenance, invalid `[files]` entries, orphan facts,
+facts for unknown targets, unexpected entries in reserved trees and the
+state of the admission sequence (`.cpforge/job-seq`). Invalid file provenance
+is reported and ignored by status as well. Broken or newer-format problem
+metadata does not establish that the problem was deleted.
+
+With `--apply`, cpf can:
+
+- remove references to absent problems from valid contest records, preserving
+  the order, labels, comments and unknown fields of surviving entries;
+- remove valid or malformed fact files belonging to absent problems, leaving
+  newer-format and unreadable facts intact; facts for unknown targets of
+  existing problems are only reported;
+- replace a missing or malformed admission sequence with a fresh epoch and
+  counter zero, after probing every directory in `runs/`, including
+  interrupted reclamations and newer-format jobs. A held or unprobeable lease
+  refuses sequence repair and lists the blocking jobs. Unreadable and
+  newer-format sequences are preserved.
+
+Only record repairs are performed. User files, run directories, cache
+contents and `.cpforge/lock` are preserved; no process id or file age is used
+to decide whether a lock is abandoned. Both modes perform the normal locked
+operation's leftover recovery: abandoned staging contents and reserved
+`.cpf-tmp-` files in metadata recovery locations are removed before inspection.
+Empty orphan fact directories are left in place. Sequence repair is checked
+before other repairs, so a blocking lease prevents that invocation's repairs.
+Individual record repairs are atomic; the whole repair set is not one transaction.
+
+Findings, including findings that cannot be repaired, exit 0. Lock refusal,
+a failed repair or an operational storage failure exits 8. This command has
+human-readable output only; `--json` and `--events` are rejected.

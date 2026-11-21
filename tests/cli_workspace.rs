@@ -148,9 +148,12 @@ impl Workspace {
                 if metadata.is_dir() {
                     out.insert(relative, Vec::new());
                     visit(root, &path, out);
-                } else if relative == Path::new(".cpforge").join("lock") {
-                    // Windows refuses reads of a byte range another handle
-                    // has locked; the lock file's existence is what matters.
+                } else if relative == Path::new(".cpforge").join("lock")
+                    || (relative.starts_with(Path::new(".cpforge").join("runs"))
+                        && relative.file_name() == Some(std::ffi::OsStr::new("lease")))
+                {
+                    // Windows refuses reads of locked byte ranges. Preserve
+                    // the workspace lock and lease entries in the snapshot.
                     out.insert(relative, Vec::new());
                 } else {
                     out.insert(relative, fs::read(path).unwrap());
@@ -574,4 +577,855 @@ fn status_does_not_traverse_untracked_directory_links() {
         1
     );
     assert_eq!(value["problems"][0]["untracked"][0]["utf8"], "linked");
+}
+
+#[test]
+fn adopt_hides_an_untracked_file_without_changing_its_bytes_and_is_idempotent() {
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "notes", "draft.txt"], b"my notes\r\n\0");
+    let untracked = &workspace.status()["problems"][0]["untracked"];
+    assert_eq!(untracked[0]["utf8"], "notes/draft.txt");
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&record).unwrap();
+    fs::write(
+        &record,
+        format!("# keep this comment\n{original}\n[extra]\nvalue = 17 # keep this too\n"),
+    )
+    .unwrap();
+    workspace.ok(&["adopt", "notes/draft.txt"]);
+    assert_eq!(
+        fs::read(workspace.path(&["problems", "A", "notes", "draft.txt"])).unwrap(),
+        b"my notes\r\n\0"
+    );
+    assert!(
+        workspace.status()["problems"][0]["untracked"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let text = fs::read_to_string(&record).unwrap();
+    assert!(text.contains("# keep this comment"));
+    assert!(text.contains("value = 17 # keep this too"));
+    let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        doc["files"]["user"]
+            .as_array()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_str(),
+        Some("notes/draft.txt")
+    );
+    let before = workspace.snapshot();
+    workspace.ok(&["adopt", "notes/draft.txt"]);
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
+fn adopt_uses_problem_relative_paths_and_explicit_selection() {
+    let workspace = Workspace::new();
+    workspace.problem("B");
+    workspace.write(&["problems", "B", "notes.txt"], "B notes");
+    let output = workspace
+        .command()
+        .current_dir(workspace.path(&["problems", "A", "tests"]))
+        .args(["--problem", "B", "adopt", "notes.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let doc = fs::read_to_string(workspace.path(&["problems", "B", "problem.toml"])).unwrap();
+    assert!(doc.contains("notes.txt"));
+    assert!(
+        !fs::read_to_string(workspace.path(&["problems", "A", "problem.toml"]))
+            .unwrap()
+            .contains("notes.txt")
+    );
+}
+
+#[test]
+fn adopt_refuses_outside_reserved_missing_nonregular_registered_and_colliding_paths() {
+    let workspace = Workspace::new();
+    workspace.write(&["outside.txt"], "outside");
+    workspace.write(&[".cpforge", "cache", "entry"], "cache");
+    workspace.write(&["problems", "A", "tests", "ONE.in"], "collision");
+    let before = workspace.snapshot();
+    for path in [
+        "../outside.txt",
+        "../../.cpforge/cache/entry",
+        ".cpforge/runs/job",
+        "absent.txt",
+        "tests",
+        "problem.toml",
+        "tests.toml",
+        "main.py",
+        "tests/one.in",
+        "tests/ONE.in",
+        "/outside.txt",
+        "./main.py",
+        "bad/../main.py",
+        ".cpf-tmp-file",
+        "NUL.txt",
+    ] {
+        let output = workspace.run(&["adopt", path]);
+        assert_eq!(output.status.code(), Some(8), "{path}: {output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_eq!(workspace.snapshot(), before, "{path}");
+    }
+    let absolute = workspace.path(&["outside.txt"]);
+    let output = workspace
+        .command()
+        .arg("adopt")
+        .arg(&absolute)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn adopt_and_provenance_refuse_link_components_and_nonregular_files() {
+    use std::os::unix::fs::symlink;
+    let workspace = Workspace::new();
+    symlink("main.py", workspace.path(&["problems", "A", "link.py"])).unwrap();
+    symlink("tests", workspace.path(&["problems", "A", "linked-tests"])).unwrap();
+    for path in ["link.py", "linked-tests/one.in"] {
+        let output = workspace.run(&["adopt", path]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+    }
+    let fifo = workspace.path(&["problems", "A", "pipe"]);
+    use std::os::unix::ffi::OsStrExt;
+    let native = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: native is a terminated pathname, with no existing entry.
+    assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), 0o600) }, 0);
+    let output = workspace.run(&["adopt", "pipe"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    // A hand edit cannot hide the link from status either.
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&record).unwrap();
+    fs::write(&record, format!("{original}\n[files]\nuser=['link.py']\n")).unwrap();
+    let status = workspace.status();
+    assert!(
+        status["problems"][0]["untracked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["utf8"] == "link.py")
+    );
+    assert!(
+        status["problems"][0]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("invalid [files]"))
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn adopt_refuses_portable_spelling_collisions_at_each_component() {
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "notes.txt"], "lower");
+    workspace.write(&["problems", "A", "NOTES.TXT"], "upper");
+    workspace.write(&["problems", "A", "Dir", "file"], "nested");
+    fs::create_dir(workspace.path(&["problems", "A", "dir"])).unwrap();
+    for path in ["notes.txt", "NOTES.TXT", "Dir/file"] {
+        let output = workspace.run(&["adopt", path]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("collision"));
+    }
+}
+
+#[test]
+fn adopt_refuses_unsafe_record_classifications_and_preserves_records() {
+    for text in [
+        "[",
+        "schema=2\n",
+        "schema=0\n",
+        "schema='1'\n",
+        "[problem]\nid='bad'\n",
+        "[problem]\nid='local:A'\n[files]\nuser=17\n",
+        "files=17\n[problem]\nid='local:A'\n",
+        "files=[]\n[problem]\nid='local:A'\n",
+    ] {
+        let workspace = Workspace::new();
+        workspace.write(&["problems", "A", "notes.txt"], "notes");
+        workspace.write(&["problems", "A", "problem.toml"], text);
+        let before = workspace.snapshot();
+        let output = workspace.run(&["adopt", "notes.txt"]);
+        assert_eq!(output.status.code(), Some(8), "{text}: {output:?}");
+        assert_eq!(workspace.snapshot(), before);
+    }
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "notes.txt"], "notes");
+    workspace.write(&["problems", "A", "tests.toml"], "schema=99\n");
+    let before = workspace.snapshot();
+    let output = workspace.run(&["adopt", "notes.txt"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
+fn ignore_is_an_idempotent_validated_suggestion_and_status_honours_it() {
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "notes.swp"], "swap");
+    workspace.write(&["problems", "A", "nested", "notes.swp"], "nested swap");
+    workspace.write(&["problems", "A", "scratch", "deep", "notes"], "scratch");
+    workspace.write(&["problems", "A", "notes.txt"], "visible");
+    fs::remove_file(workspace.path(&[".cpforge", "lock"])).unwrap();
+    let before = workspace.snapshot();
+    let first = workspace.ok(&["ignore", "*.swp"]);
+    assert_eq!(workspace.ok(&["ignore", "*.swp"]).stdout, first.stdout);
+    assert_eq!(workspace.snapshot(), before);
+    let doc = String::from_utf8(first.stdout)
+        .unwrap()
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert_eq!(
+        doc["workspace"]["ignore"]
+            .as_array()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_str(),
+        Some("*.swp")
+    );
+    for pattern in [
+        "", "/root", "tail/", "a//b", ".", "..", "a/../b", "ab**", "**b", "[a]", "!no", "a\\b",
+    ] {
+        let output = workspace.run(&["ignore", pattern]);
+        assert_eq!(output.status.code(), Some(8), "{pattern}: {output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(workspace.snapshot(), before);
+    }
+    for pattern in ["**", "a/**/b", "a?b", "a'b", "a\"b", "é?"] {
+        let output = workspace.ok(&["ignore", pattern]);
+        let doc = String::from_utf8(output.stdout)
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            doc["workspace"]["ignore"]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_str(),
+            Some(pattern)
+        );
+    }
+    workspace.write(
+        &["cpforge.toml"],
+        "schema=1\ndefault_language='python'\n[workspace]\nignore=['*.swp','scratch/**']\n",
+    );
+    let status = workspace.status();
+    assert_eq!(
+        status["problems"][0]["untracked"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(status["problems"][0]["untracked"][0]["utf8"], "notes.txt");
+    assert_eq!(
+        fs::read(workspace.path(&["problems", "A", "notes.swp"])).unwrap(),
+        b"swap"
+    );
+}
+
+#[test]
+fn fsck_reports_all_categories_and_apply_changes_only_authorized_records() {
+    let workspace = Workspace::new();
+    workspace.fact();
+    let valid_fact =
+        fs::read(workspace.path(&[".cpforge", "facts", "A", "solution.toml"])).unwrap();
+    workspace.write(&[".cpforge", "facts", "A", "other.toml"], &valid_fact);
+    workspace.write(&[".cpforge", "facts", "gone", "solution.toml"], &valid_fact);
+    workspace.write(
+        &[".cpforge", "facts", "gone", "bad.toml"],
+        "schema=1\nn='01'\n",
+    );
+    workspace.write(
+        &[".cpforge", "facts", "gone", "new.toml"],
+        "schema=99\nn=[]\n",
+    );
+    fs::create_dir(workspace.path(&[".cpforge", "facts", "gone", "unreadable.toml"])).unwrap();
+    workspace.write(
+        &[".cpforge", "facts", "A", "unexpected"],
+        "keep fact-tree entry",
+    );
+    workspace.write(&[".cpforge", "unexpected"], "keep reserved entry");
+    workspace.write(&[".cpforge", "runs", "unexpected"], "keep run-tree entry");
+    workspace.write(&["contests", "round", "contest.toml"], "# preserve contest comment\nschema=1\nfuture='keep'\n[[problem]]\nid='local:gone'\nlabel='A'\n[[problem]]\nid='local:A'\nlabel='B'\nfuture={limit=3}\n[[problem]]\nid='local:broken'\nlabel='C'\n");
+    workspace.write(
+        &["problems", "broken", "notes.txt"],
+        "directory without metadata",
+    );
+    workspace.write(&["problems", "future", "problem.toml"], "schema=99\n");
+    workspace.write(
+        &["problems", "malformed", "problem.toml"],
+        "[problem]\nid=17\n",
+    );
+    workspace.write(&["problems", "A", "notes.txt"], "overlap");
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&record).unwrap();
+    fs::write(&record, format!("{original}\n[files]\ncreated=[{{path='notes.txt',command='add'}}]\nuser=['notes.txt','main.py','tests/one.in','../outside','absent']\n")).unwrap();
+    let before = workspace.snapshot();
+    let output = workspace.ok(&["fsck"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for finding in [
+        "dangling contest reference: local:gone",
+        "problem directory without problem.toml",
+        "too_new: schema 99",
+        "malformed:",
+        "provenance overlap:",
+        "invalid [files] user entry",
+        "fact for deleted problem",
+        "fact for unknown target",
+        "unexpected entry",
+        "job-seq",
+        "valid (schema 1)",
+        "unreadable:",
+    ] {
+        assert!(stdout.contains(finding), "missing {finding}: {stdout}");
+    }
+    assert_eq!(workspace.snapshot(), before);
+    workspace.ok(&["fsck", "--apply"]);
+    let after = workspace.snapshot();
+    let contest = Path::new("contests").join("round").join("contest.toml");
+    let removed = [
+        Path::new(".cpforge")
+            .join("facts")
+            .join("gone")
+            .join("solution.toml"),
+        Path::new(".cpforge")
+            .join("facts")
+            .join("gone")
+            .join("bad.toml"),
+    ];
+    for (path, bytes) in &before {
+        if removed.contains(path) {
+            assert!(!after.contains_key(path));
+        } else if path != &contest {
+            assert_eq!(after.get(path), Some(bytes), "{}", path.display());
+        }
+    }
+    assert_eq!(after.len(), before.len() - removed.len());
+    let text = fs::read_to_string(workspace.0.join(&contest)).unwrap();
+    assert!(text.contains("# preserve contest comment"));
+    assert!(text.contains("future='keep'"));
+    assert!(text.contains("future={limit=3}"));
+    let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
+    let members = doc["problem"].as_array_of_tables().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members.get(0).unwrap()["id"].as_str(), Some("local:A"));
+    assert_eq!(members.get(0).unwrap()["label"].as_str(), Some("B"));
+    assert_eq!(members.get(1).unwrap()["id"].as_str(), Some("local:broken"));
+    let before = workspace.snapshot();
+    workspace.ok(&["fsck", "--apply"]);
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
+fn fsck_repairs_only_missing_or_malformed_sequences_with_a_fresh_epoch() {
+    use cpforge::storage::{Record, job_seq::read_job_sequence};
+    for malformed in [
+        None,
+        Some("schema=1\nepoch='bad'\nnext=0\n"),
+        Some("schema=0\n"),
+        Some("schema='one'\n"),
+    ] {
+        let workspace = Workspace::new();
+        let sequence = workspace.path(&[".cpforge", "job-seq"]);
+        let Record::Valid(old) = read_job_sequence(&sequence) else {
+            panic!("initial sequence")
+        };
+        if let Some(text) = malformed {
+            fs::write(&sequence, text).unwrap();
+        } else {
+            fs::remove_file(&sequence).unwrap();
+        }
+        let before = workspace.snapshot();
+        workspace.ok(&["fsck"]);
+        assert_eq!(workspace.snapshot(), before);
+        workspace.ok(&["fsck", "--apply"]);
+        let Record::Valid(new) = read_job_sequence(&sequence) else {
+            panic!("repaired sequence")
+        };
+        assert_ne!(new.epoch, old.epoch);
+        assert_eq!(new.next, 0);
+        let before = workspace.snapshot();
+        workspace.ok(&["fsck", "--apply"]);
+        assert_eq!(workspace.snapshot(), before);
+    }
+    for unreadable in [false, true] {
+        let workspace = Workspace::new();
+        let sequence = workspace.path(&[".cpforge", "job-seq"]);
+        fs::remove_file(&sequence).unwrap();
+        if unreadable {
+            fs::create_dir(&sequence).unwrap();
+        } else {
+            fs::write(&sequence, "schema=99\n").unwrap();
+        }
+        let before = workspace.snapshot();
+        workspace.ok(&["fsck", "--apply"]);
+        assert_eq!(workspace.snapshot(), before);
+    }
+}
+
+#[test]
+fn fsck_sequence_repair_probes_every_directory_and_refuses_held_or_unopenable_leases() {
+    for name in [
+        "20261120230104123-0000000000000001",
+        ".reclaim-interrupted",
+        "unexpected-directory",
+    ] {
+        for held in [false, true] {
+            let workspace = Workspace::new();
+            let sequence = workspace.path(&[".cpforge", "job-seq"]);
+            fs::remove_file(&sequence).unwrap();
+            let dir = workspace.path(&[".cpforge", "runs", name]);
+            fs::create_dir(&dir).unwrap();
+            // Newer job metadata cannot exempt a directory from the probe.
+            fs::write(dir.join("job.toml"), "schema=99\n").unwrap();
+            let owner = if held {
+                Some(JobLease::create_and_lock(dir.clone()).unwrap())
+            } else {
+                fs::create_dir(dir.join("lease")).unwrap();
+                None
+            };
+            let before = workspace.snapshot();
+            let output = workspace.run(&["fsck", "--apply"]);
+            assert_eq!(output.status.code(), Some(8), "{name}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("jobs may be live"), "{stderr}");
+            assert!(stderr.contains(name), "{stderr}");
+            assert_eq!(workspace.snapshot(), before);
+            drop(owner);
+            if !held {
+                fs::remove_dir(dir.join("lease")).unwrap();
+            }
+            workspace.ok(&["fsck", "--apply"]);
+            assert!(sequence.is_file());
+        }
+    }
+}
+
+#[test]
+fn fsck_takes_the_workspace_lock_and_never_replaces_it() {
+    let workspace = Workspace::new();
+    let lock = cpforge::storage::WorkspaceLock::new(&workspace.0).unwrap();
+    let guard = lock.acquire("held for fsck test").unwrap();
+    let before = workspace.snapshot();
+    for args in [vec!["fsck"], vec!["fsck", "--apply"]] {
+        let output = workspace.run(&args);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("busy"),
+            "{output:?}"
+        );
+        assert_eq!(workspace.snapshot(), before);
+    }
+    drop(guard);
+    workspace.ok(&["fsck"]);
+}
+
+#[test]
+fn workspace_record_commands_have_no_machine_document_options() {
+    let workspace = Workspace::new();
+    let before = workspace.snapshot();
+    for args in [
+        vec!["adopt", "main.py", "--json"],
+        vec!["ignore", "*.swp", "--json"],
+        vec!["fsck", "--json"],
+        vec!["fsck", "--events"],
+    ] {
+        let output = workspace.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert_eq!(workspace.snapshot(), before);
+    }
+}
+
+#[test]
+fn fsck_reports_job_record_schemas_and_unexpected_entries_without_removing_jobs() {
+    let workspace = Workspace::new();
+    let name = "20261120230104123-0000000000000001";
+    workspace.write(&[".cpforge", "runs", name, "job.toml"], "schema=99\n");
+    workspace.write(
+        &[".cpforge", "runs", name, "report.json"],
+        r#"{"schema":2}"#,
+    );
+    workspace.write(
+        &[".cpforge", "runs", name, "r00000", "spec.json"],
+        r#"{"schema":0}"#,
+    );
+    workspace.write(
+        &[".cpforge", "runs", name, "r00000", "record.json"],
+        r#"{"schema":"one"}"#,
+    );
+    workspace.write(&[".cpforge", "runs", name, "r00000", "extra"], "keep");
+    workspace.write(&[".cpforge", "runs", name, "extra"], "keep job entry");
+    workspace.write(
+        &[".cpforge", "runs", name, "inputs", "extra"],
+        "keep inputs entry",
+    );
+    workspace.write(
+        &[".cpforge", "runs", name, "builds", "extra"],
+        "keep builds entry",
+    );
+    let before = workspace.snapshot();
+    let output = workspace.ok(&["fsck", "--apply"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for text in [
+        "too_new: schema 99",
+        "too_new: schema 2",
+        "spec.json: malformed schema",
+        "record.json: malformed schema",
+        "unexpected entry in run directory",
+        "unexpected entry in job directory",
+        "unexpected entry in inputs directory",
+        "unexpected entry in builds directory",
+    ] {
+        assert!(stdout.contains(text), "missing {text}: {stdout}");
+    }
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
+fn fsck_preserves_contests_with_unsupported_or_malformed_records() {
+    let workspace = Workspace::new();
+    for (name, text) in [
+        ("future", "schema=99\n[[problem]]\nid='local:gone'\n"),
+        (
+            "duplicate",
+            "schema=1\n[[problem]]\nid='local:gone'\n[[problem]]\nid='local:gone'\n",
+        ),
+        (
+            "bad-label",
+            "schema=1\n[[problem]]\nid='local:gone'\nlabel=1\n",
+        ),
+        ("bad-id", "schema=1\n[[problem]]\nid='not-an-identity'\n"),
+    ] {
+        workspace.write(&["contests", name, "contest.toml"], text);
+    }
+    let before = workspace.snapshot();
+    workspace.ok(&["fsck", "--apply"]);
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn fsck_never_follows_or_removes_links_in_reserved_trees() {
+    use std::os::unix::fs::symlink;
+    let workspace = Workspace::new();
+    workspace.write(&["keep.toml"], "schema=1\nbad='fact'\n");
+    let facts = workspace.path(&[".cpforge", "facts", "gone"]);
+    fs::create_dir_all(&facts).unwrap();
+    symlink(workspace.path(&["keep.toml"]), facts.join("solution.toml")).unwrap();
+    symlink(
+        workspace.path(&["problems", "A"]),
+        workspace.path(&[".cpforge", "runs", "linked-job"]),
+    )
+    .unwrap();
+    workspace.ok(&["fsck", "--apply"]);
+    assert!(
+        fs::symlink_metadata(facts.join("solution.toml"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        fs::symlink_metadata(workspace.path(&[".cpforge", "runs", "linked-job"]))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(workspace.path(&["keep.toml"])).unwrap(),
+        b"schema=1\nbad='fact'\n"
+    );
+    fs::remove_file(workspace.path(&[".cpforge", "job-seq"])).unwrap();
+    let output = workspace.run(&["fsck", "--apply"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("link cannot be probed"));
+}
+
+#[test]
+fn fsck_both_modes_perform_the_shared_leftover_recovery() {
+    for apply in [false, true] {
+        let workspace = Workspace::new();
+        let temporary = ".cpf-tmp-00000000000000000000000000000000";
+        workspace.write(&[".cpforge", temporary], "metadata leftover");
+        workspace.write(&[".cpforge", "facts", "A", temporary], "fact leftover");
+        workspace.write(
+            &[".cpforge", "staging", "old", "content"],
+            "staging leftover",
+        );
+        if apply {
+            workspace.ok(&["fsck", "--apply"]);
+        } else {
+            workspace.ok(&["fsck"]);
+        }
+        assert!(!workspace.path(&[".cpforge", temporary]).exists());
+        assert!(
+            !workspace
+                .path(&[".cpforge", "facts", "A", temporary])
+                .exists()
+        );
+        assert!(!workspace.path(&[".cpforge", "staging", "old"]).exists());
+        assert!(workspace.path(&["problems", "A", "main.py"]).is_file());
+    }
+}
+
+#[test]
+fn adopt_refuses_created_files_and_hardlinked_metadata_without_rewriting_either() {
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "notes.txt"], "notes");
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&record).unwrap();
+    fs::write(
+        &record,
+        format!("{original}\n[files]\ncreated=[{{path='notes.txt',command='add'}}]\n"),
+    )
+    .unwrap();
+    let before = workspace.snapshot();
+    let output = workspace.run(&["adopt", "notes.txt"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(workspace.snapshot(), before);
+    fs::write(&record, original).unwrap();
+    let link = workspace.path(&["problem-record-link"]);
+    fs::hard_link(&record, &link).unwrap();
+    let before = workspace.snapshot();
+    let output = workspace.run(&["adopt", "notes.txt"]);
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
+fn concurrent_adoptions_keep_both_entries() {
+    use std::process::Stdio;
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "A", "first.txt"], "first");
+    workspace.write(&["problems", "A", "second.txt"], "second");
+    let first = workspace
+        .command()
+        .args(["adopt", "first.txt"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second = workspace
+        .command()
+        .args(["adopt", "second.txt"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    for child in [first, second] {
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+    }
+    let text = fs::read_to_string(workspace.path(&["problems", "A", "problem.toml"])).unwrap();
+    let document = text.parse::<toml_edit::DocumentMut>().unwrap();
+    let adopted = document["files"]["user"].as_array().unwrap();
+    assert_eq!(adopted.len(), 2);
+    for name in ["first.txt", "second.txt"] {
+        assert!(adopted.iter().any(|v| v.as_str() == Some(name)));
+    }
+    assert!(
+        workspace.status()["problems"][0]["untracked"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "storage-test-hooks")]
+mod record_command_crashes {
+    use super::*;
+
+    fn abort_at(workspace: &Workspace, args: &[&str], point: &str) -> Output {
+        let mut command = workspace.command();
+        command.args(args).env("CPF_STORAGE_CRASH_AT", point);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: the child calls only setrlimit before exec.
+            unsafe {
+                command.pre_exec(|| {
+                    let limit = libc::rlimit {
+                        rlim_cur: 0,
+                        rlim_max: 0,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CORE, &limit) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+        }
+        #[cfg(windows)]
+        {
+            static ERROR_MODE: std::sync::Once = std::sync::Once::new();
+            ERROR_MODE.call_once(|| {
+                // SAFETY: child processes inherit the crash-dialog suppression.
+                unsafe {
+                    windows_sys::Win32::System::Diagnostics::Debug::SetErrorMode(
+                        windows_sys::Win32::System::Diagnostics::Debug::SEM_NOGPFAULTERRORBOX,
+                    );
+                }
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{point}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(&format!("CPF-CRASH-AT {point}")),
+            "{point}: {output:?}"
+        );
+        output
+    }
+
+    #[test]
+    fn adopt_has_only_complete_old_or_new_records_at_every_commit_boundary() {
+        for (point, committed) in [
+            ("atomic_replace.temp_synced", false),
+            ("edit_toml.validated", false),
+            ("atomic_replace.renamed", true),
+            ("atomic_replace.directory_synced", true),
+            ("edit_toml.published", true),
+        ] {
+            let workspace = Workspace::new();
+            workspace.write(&["problems", "A", "notes.txt"], "my notes");
+            let path = workspace.path(&["problems", "A", "problem.toml"]);
+            let old = fs::read(&path).unwrap();
+            abort_at(&workspace, &["adopt", "notes.txt"], point);
+            let bytes = fs::read(&path).unwrap();
+            if committed {
+                let doc = String::from_utf8(bytes)
+                    .unwrap()
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap();
+                assert_eq!(doc["files"]["user"].as_array().unwrap().len(), 1);
+            } else {
+                assert_eq!(bytes, old);
+            }
+            assert_eq!(
+                fs::read(workspace.path(&["problems", "A", "notes.txt"])).unwrap(),
+                b"my notes"
+            );
+            workspace.ok(&["adopt", "notes.txt"]);
+            let before = workspace.snapshot();
+            workspace.ok(&["adopt", "notes.txt"]);
+            assert_eq!(workspace.snapshot(), before);
+        }
+    }
+
+    #[test]
+    fn fsck_contest_repairs_have_old_or_new_membership_and_rerun_to_completion() {
+        for (point, committed) in [
+            ("edit_toml.validated", false),
+            ("atomic_replace.renamed", true),
+            ("edit_toml.published", true),
+        ] {
+            let workspace = Workspace::new();
+            workspace.write(
+                &["contests", "round", "contest.toml"],
+                "schema=1\n[[problem]]\nid='local:A'\n[[problem]]\nid='local:gone'\n",
+            );
+            let path = workspace.path(&["contests", "round", "contest.toml"]);
+            let old = fs::read(&path).unwrap();
+            abort_at(&workspace, &["fsck", "--apply"], point);
+            let bytes = fs::read(&path).unwrap();
+            if committed {
+                let doc = String::from_utf8(bytes)
+                    .unwrap()
+                    .parse::<toml_edit::DocumentMut>()
+                    .unwrap();
+                assert_eq!(doc["problem"].as_array_of_tables().unwrap().len(), 1);
+            } else {
+                assert_eq!(bytes, old);
+            }
+            workspace.ok(&["fsck", "--apply"]);
+            assert_eq!(
+                fs::read(workspace.path(&["problems", "A", "main.py"])).unwrap(),
+                b"print(input())\n"
+            );
+        }
+    }
+
+    #[test]
+    fn fsck_sequence_recovery_is_atomic_and_does_not_reuse_a_surviving_sequence() {
+        use cpforge::storage::{Record, job_seq::read_job_sequence};
+        for (point, committed) in [
+            ("atomic_replace.temp_synced", false),
+            ("atomic_replace.renamed", true),
+            ("atomic_replace.directory_synced", true),
+            ("fsck.sequence_replaced", true),
+        ] {
+            let workspace = Workspace::new();
+            let path = workspace.path(&[".cpforge", "job-seq"]);
+            fs::remove_file(&path).unwrap();
+            abort_at(&workspace, &["fsck", "--apply"], point);
+            assert_eq!(path.exists(), committed);
+            let saved = if committed {
+                Some(fs::read(&path).unwrap())
+            } else {
+                None
+            };
+            workspace.ok(&["fsck", "--apply"]);
+            let Record::Valid(sequence) = read_job_sequence(&path) else {
+                panic!("valid recovered sequence")
+            };
+            assert_eq!(sequence.next, 0);
+            if let Some(bytes) = saved {
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+            }
+        }
+        let workspace = Workspace::new();
+        workspace.write(
+            &[".cpforge", "facts", "gone", "solution.toml"],
+            "schema=1\n",
+        );
+        abort_at(&workspace, &["fsck", "--apply"], "fsck.fact_removed");
+        assert!(
+            !workspace
+                .path(&[".cpforge", "facts", "gone", "solution.toml"])
+                .exists()
+        );
+        workspace.ok(&["fsck", "--apply"]);
+    }
+}
+
+#[test]
+fn template_solution_recorded_as_created_is_not_a_provenance_overlap() {
+    let workspace = Workspace::new();
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&record).unwrap();
+    // `cpf add` records its template solution this way; the solution is named
+    // only by resolved defaults, not by another record.
+    fs::write(
+        &record,
+        format!("{original}\n[files]\ncreated=[{{path='main.py',command='add'}}]\n"),
+    )
+    .unwrap();
+    let status = workspace.status();
+    let diagnostics = status["problems"][0]["diagnostics"].as_array().unwrap();
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("overlap")),
+        "{diagnostics:?}"
+    );
+    let output = workspace.ok(&["fsck"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("overlap"), "{stdout}");
+    // An explicit declaration plus a created entry is a real overlap.
+    fs::write(
+        &record,
+        format!(
+            "{original}\n[config]\nsources=['main.py']\n[files]\ncreated=[{{path='main.py',command='add'}}]\n"
+        ),
+    )
+    .unwrap();
+    let output = workspace.ok(&["fsck"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("provenance overlap"), "{stdout}");
 }

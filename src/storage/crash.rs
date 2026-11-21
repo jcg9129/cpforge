@@ -16,6 +16,7 @@
 //! `init.job_seq_published` (after publishing a new initial job-seq),
 //! `init.config_published` (after publishing cpforge.toml);
 //! `fact.before_replace`, `fact.after_replace` (fact commit boundaries);
+//! `fsck.fact_removed`, `fsck.sequence_replaced` (record repair commits);
 //! `job.record_published` (after no-clobber publication of job.toml);
 //! `admission.job_seq_replaced` (job-seq advanced, no job directory yet),
 //! `admission.directory_created`, `admission.job_record_published`,

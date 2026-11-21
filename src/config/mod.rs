@@ -358,6 +358,8 @@ pub enum Combine {
     Both,
 }
 
+pub(crate) use syntax::ignore_valid;
+
 #[cfg(test)]
 mod tests;
 

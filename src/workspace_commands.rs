@@ -273,6 +273,126 @@ fn reclaim_leftovers(runs: &Path) -> Vec<String> {
     names
 }
 
+/// Validate a suggestion, without acquiring a lock or rewriting configuration.
+pub(crate) fn ignore(pattern: &str) -> Result<ExitCode, Error> {
+    root()?;
+    if !crate::config::ignore_valid(pattern) {
+        return Err(Error::Workspace("invalid workspace ignore pattern".into()));
+    }
+    let mut array = toml_edit::Array::new();
+    array.push(pattern);
+    print(&format!("[workspace]\nignore = {array}\n"))?;
+    Ok(ExitCode::Success)
+}
+
+pub(crate) fn adopt(
+    path: &Path,
+    problem: Option<&str>,
+    config_path: Option<PathBuf>,
+) -> Result<ExitCode, Error> {
+    use crate::workspace_files as files;
+    use toml_edit::{Item, Table, value};
+
+    let root = root()?;
+    let cwd = std::env::current_dir().map_err(|e| Error::Workspace(e.to_string()))?;
+    let lock = WorkspaceLock::new(&root)?;
+    let guard = lock.acquire("adopt")?;
+    recovery_warnings(&guard);
+    let selected = crate::selection::resolve(&root, &cwd, problem)?;
+    let text = path
+        .to_str()
+        .ok_or_else(|| Error::Workspace("adopt path must be Unicode".into()))?;
+    // The CLI accepts native separators on Windows; records always use `/`.
+    let text = if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    };
+    let relative = files::validate_file(&selected.dir, &text).map_err(Error::Workspace)?;
+    let request = files::request(&root, &cwd, &selected.dir, config_path);
+    let check = |document: &toml_edit::DocumentMut| -> Result<(), String> {
+        files::check_problem(document)?;
+        if let Some(files) = document.get("files") {
+            if !files.is_table_like() {
+                return Err("[files] must be a table".into());
+            }
+            if files.get("user").is_some_and(|user| !user.is_array()) {
+                return Err("[files] user must be an array".into());
+            }
+        }
+        let id = document["problem"]["id"]
+            .as_str()
+            .ok_or("missing problem id")?;
+        if id != selected.identity.to_string() {
+            return Err("problem identity changed".into());
+        }
+        files::validate_file(&selected.dir, &text)?;
+        // Resolve against the current problem layer after the edit baseline
+        // was read, so a preceding editor save cannot introduce registration
+        // that this edit overlooks. A later save is caught by edit_toml.
+        let loaded = crate::config::load_config(&request);
+        let target = loaded.target().ok();
+        let registered = files::registered(&selected.dir, document, target.as_ref())?;
+        let key = files::path_key(&relative);
+        if registered.iter().any(|p| files::path_key(p) == key) {
+            return Err(format!(
+                "{} is already registered (or collides with a registered path)",
+                relative.display()
+            ));
+        }
+        let mut diagnostics = Vec::new();
+        let owned = files::provenance(&selected.dir, document, &registered, &mut diagnostics);
+        let already_adopted = document
+            .get("files")
+            .and_then(|f| f.get("user"))
+            .and_then(Item::as_array)
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(text.as_str())));
+        if owned.iter().any(|p| files::path_key(p) == key) && !already_adopted {
+            return Err("path is already tracked or has a spelling collision".into());
+        }
+        Ok(())
+    };
+    let record = selected.dir.join("problem.toml");
+    let published = storage::edit_toml(&guard, &record, check, |document| {
+        if document.get("files").is_none() {
+            document["files"] = Item::Table(Table::new());
+        }
+        if document["files"].get("user").is_none() {
+            document["files"]["user"] = value(toml_edit::Array::new());
+        }
+        let array = document["files"]["user"]
+            .as_array_mut()
+            .ok_or("[files] user must be an array")?;
+        if !array.iter().any(|v| v.as_str() == Some(text.as_str())) {
+            array.push(text.as_str());
+        }
+        Ok::<_, String>(())
+    })
+    .map_err(|e| Error::Workspace(e.to_string()))?;
+    publication_warnings(&record, &published);
+    print(&format!("adopted {text}\n"))?;
+    Ok(ExitCode::Success)
+}
+
+pub(crate) fn recovery_warnings(guard: &WorkspaceGuard<'_>) {
+    if let Some(warning) = guard.recovery_warning() {
+        for (path, error) in warning.paths.iter().zip(&warning.errors) {
+            eprintln!(
+                "cpf: warning: leftover recovery incomplete at {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+pub(crate) fn publication_warnings(path: &Path, published: &storage::Published) {
+    let mut report = crate::workspace::Report::default();
+    crate::workspace::publication_warnings(&mut report, path, published);
+    for warning in report.warnings {
+        eprintln!("cpf: warning: {warning}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

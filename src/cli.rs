@@ -96,6 +96,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Adopt an existing file, relative to the selected problem directory.
+    Adopt { path: PathBuf },
+    /// Validate and print a workspace ignore setting (does not edit configuration).
+    Ignore { pattern: String },
+    /// Inspect workspace records and optionally repair supported inconsistencies.
+    Fsck {
+        /// Repair dangling membership, orphan facts and an unavailable sequence.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Plan removal of inactive job directories and the cache.
     Clean {
         /// Remove them (active jobs are always kept).

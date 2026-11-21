@@ -14,6 +14,7 @@ mod config_commands;
 pub mod error;
 pub mod exec;
 pub mod exit;
+mod fsck;
 mod hooks;
 pub mod job_command;
 pub mod jobs;
@@ -30,6 +31,7 @@ pub mod tests_store;
 pub mod transport;
 mod workspace;
 mod workspace_commands;
+mod workspace_files;
 
 use clap::{CommandFactory, error::ErrorKind};
 
@@ -134,6 +136,15 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 cli.problem.as_deref(),
                 cli.config,
             );
+        }
+        Some(Command::Adopt { path }) => {
+            return workspace_commands::adopt(&path, cli.problem.as_deref(), cli.config);
+        }
+        Some(Command::Ignore { pattern }) => {
+            return workspace_commands::ignore(&pattern);
+        }
+        Some(Command::Fsck { apply }) => {
+            return fsck::run(apply, cli.config);
         }
         Some(Command::Clean { apply }) => {
             return workspace_commands::clean(apply);

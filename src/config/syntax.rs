@@ -230,7 +230,7 @@ pub(super) fn source_key(text: &str, platform: Platform) -> String {
     }
 }
 
-pub(super) fn ignore_valid(text: &str) -> bool {
+pub(crate) fn ignore_valid(text: &str) -> bool {
     !text.is_empty()
         && !text.contains(['[', ']', '!', '\\', '\0'])
         && text

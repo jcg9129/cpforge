@@ -8,9 +8,9 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item};
+use toml_edit::Item;
 
-use crate::config::{self, ConfigRequest, Environment, TargetPlan};
+use crate::config::{self, TargetPlan};
 use crate::error::Error;
 use crate::exit::ExitCode;
 use crate::report::wire::{self, ProblemStatus};
@@ -193,20 +193,7 @@ fn problem_status(
         comparison: "unknown",
         fact: None,
     };
-    let request = ConfigRequest {
-        environment: Environment {
-            home: std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                .map(PathBuf::from),
-            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
-            appdata: std::env::var_os("APPDATA"),
-        },
-        platform: config::Platform::host(),
-        current_dir: cwd.into(),
-        config_path,
-        workspace_root: Some(root.into()),
-        problem_file: Some(problem.dir.join("problem.toml")),
-        ..ConfigRequest::default()
-    };
+    let request = crate::workspace_files::request(root, cwd, &problem.dir, config_path);
     let loaded = config::load_config(&request);
     let target = match loaded.target() {
         Ok(target) => Some(target),
@@ -223,31 +210,8 @@ fn problem_status(
             .push("ignore patterns unavailable: configuration has errors".into());
         Vec::new()
     });
-    let mut registered =
-        BTreeSet::from([PathBuf::from("problem.toml"), PathBuf::from("tests.toml")]);
-    if let Some(target) = &target {
-        for file in target.captured_files().chain(&target.solution_files) {
-            registered.insert(file.value.components().iter().collect());
-        }
-    } else {
-        // Explicit declarations still identify registered paths if target
-        // resolution fails (for example, an unresolved language).
-        for name in ["sources", "support_files", "solution_files"] {
-            if let Some(array) = document
-                .get("config")
-                .and_then(|c| c.get(name))
-                .and_then(Item::as_array)
-            {
-                for value in array {
-                    if let Some(path) = value.as_str() {
-                        registered.insert(relative(path)?);
-                    }
-                }
-            }
-        }
-    }
-    let mut owned = registered.clone();
-    provenance(&document, &mut owned, &mut result.diagnostics);
+    let mut registered = crate::workspace_files::declarations(&document, target.as_ref())
+        .map_err(Error::Workspace)?;
     let store = TestStore::new(problem.dir.clone());
     let catalog = store.catalog();
     if let Ok(catalog) = &catalog {
@@ -260,7 +224,12 @@ fn problem_status(
     } else if let Err(error) = &catalog {
         result.diagnostics.push(error.clone());
     }
-    owned.extend(registered.iter().cloned());
+    let owned = crate::workspace_files::provenance(
+        &problem.dir,
+        &document,
+        &registered,
+        &mut result.diagnostics,
+    );
     for path in &registered {
         // Metadata files are structural records, not missing user-file entries.
         if path == Path::new("problem.toml") || path == Path::new("tests.toml") {
@@ -362,36 +331,6 @@ fn relative(text: &str) -> Result<PathBuf, Error> {
         )));
     }
     Ok(text.split('/').collect())
-}
-
-fn provenance(
-    document: &DocumentMut,
-    owned: &mut BTreeSet<PathBuf>,
-    diagnostics: &mut Vec<String>,
-) {
-    let Some(files) = document.get("files") else {
-        return;
-    };
-    for key in ["user", "created"] {
-        if let Some(array) = files.get(key).and_then(Item::as_array) {
-            for value in array {
-                let path = if key == "created" {
-                    value
-                        .as_inline_table()
-                        .and_then(|table| table.get("path"))
-                        .and_then(toml_edit::Value::as_str)
-                } else {
-                    value.as_str()
-                };
-                match path.map(relative) {
-                    Some(Ok(path)) => {
-                        owned.insert(path);
-                    }
-                    _ => diagnostics.push(format!("invalid [files] {key} path")),
-                }
-            }
-        }
-    }
 }
 
 fn inventory(
@@ -568,6 +507,65 @@ mod tests {
                 expected,
                 "{pattern}: {path:?}"
             );
+        }
+    }
+
+    #[test]
+    fn ignore_case_rules_follow_the_host() {
+        let insensitive = cfg!(any(windows, target_os = "macos"));
+        for (pattern, name, expected) in [
+            ("*.SWP", "a.swp", insensitive),
+            ("a.swp", "A.SWP", insensitive),
+            ("a.swp", "a.swp", true),
+            // Only ASCII letters fold; no Unicode case folding or normalisation.
+            ("é", "É", false),
+            ("e\u{301}", "\u{e9}", false),
+        ] {
+            assert_eq!(
+                ignore_matches(pattern, Path::new(name)),
+                expected,
+                "{pattern}: {name}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_matches_non_utf8_unix_components_per_byte() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(b"a\xff.swp");
+        let path = Path::new("dir").join(name);
+        for (pattern, expected) in [
+            ("*.swp", true),
+            ("a?.swp", true),
+            ("a??.swp", false),
+            ("a\u{ff}.swp", false),
+            ("a", false),
+            ("dir/*", true),
+        ] {
+            assert_eq!(ignore_matches(pattern, &path), expected, "{pattern}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ignore_matches_windows_lone_surrogates_as_one_code_point() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = "a".encode_utf16().collect();
+        units.push(0xD800);
+        units.extend(".swp".encode_utf16());
+        let path = Path::new("dir").join(OsString::from_wide(&units));
+        for (pattern, expected) in [
+            ("*.swp", true),
+            ("a?.swp", true),
+            ("a??.swp", false),
+            ("A?.SWP", true),
+            ("a", false),
+            ("dir/*", true),
+        ] {
+            assert_eq!(ignore_matches(pattern, &path), expected, "{pattern}");
         }
     }
 }
