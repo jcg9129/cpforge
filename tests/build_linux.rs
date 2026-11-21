@@ -84,7 +84,10 @@ impl Directory {
     }
 
     fn path(&self, relative: &str) -> PathBuf {
-        self.0.join(relative)
+        // Join per component so `/` in fixtures becomes the native separator.
+        Path::new(relative)
+            .components()
+            .fold(self.0.clone(), |path, part| path.join(part))
     }
 
     fn fresh_cwd(&self, name: &str) -> PathBuf {

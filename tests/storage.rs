@@ -32,7 +32,11 @@ impl Directory {
         WorkspaceLock::new(&self.0).unwrap()
     }
     fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
-        self.0.join(relative)
+        // Join per component so `/` in fixtures becomes the native separator.
+        relative
+            .as_ref()
+            .components()
+            .fold(self.0.clone(), |path, part| path.join(part))
     }
 }
 
