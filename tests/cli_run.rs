@@ -528,10 +528,10 @@ mod execution {
         status(&output, 0);
         assert_eq!(output.stdout, bytes);
         assert!(output.stderr.is_empty());
-        w.write("cpforge.toml", "schema = 1\n[languages.python.profiles.marker.run]\nenv = { CPF_TEST_PROFILE = 'chosen' }\n");
+        w.write("cpforge.toml", "schema = 1\n[languages.python.profiles.marker.run]\nenv = { RUN_TEST_PROFILE = 'chosen' }\n");
         w.write(
             "problems/A/main.py",
-            "import os, sys\nsys.stdout.write(os.environ['CPF_TEST_PROFILE'])\n",
+            "import os, sys\nsys.stdout.write(os.environ['RUN_TEST_PROFILE'])\n",
         );
         let output = wait(
             w.command(&["--problem", "local:A", "run", "--profile", "marker"])
