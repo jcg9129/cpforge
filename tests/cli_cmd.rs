@@ -265,10 +265,12 @@ mod execution {
             let output = w.run(&args);
             status(&output, 0);
             let report = document(&output);
-            let expected = std::iter::once("configured")
-                .chain(extra)
-                .map(|s| format!("<{s}>\n"))
-                .collect::<String>();
+            let mut expected = String::new();
+            for s in std::iter::once("configured").chain(extra) {
+                expected.push('<');
+                expected.push_str(s);
+                expected.push_str(">\n");
+            }
             assert_eq!(w.stdout(&report, 0), expected.as_bytes());
         }
     }
