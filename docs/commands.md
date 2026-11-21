@@ -90,3 +90,95 @@ answer comparison.
 | 11 | `--json` or `--events` output could not be written |
 
 Cancellation exits by the signal on Unix (status 6 otherwise).
+
+# Workspace status
+
+```
+cpf [--problem <ref>] status [--json]
+cpf status <problem> | <contest> | contest:<contest> | --all [--json]
+```
+
+`cpf status` shows, for each selected problem:
+
+- its tags and `status` from `problem.toml`, kept apart from everything below;
+- registered files that are missing (sources and support files of the
+  solution, files named by `tests.toml`);
+- untracked files: files no record names (not registered, not listed in
+  `[files] created` or `[files] user`) and not hidden by `[workspace] ignore`;
+- how the current files compare with the last completed `cpf test` run of the
+  `solution` target, with that run's verdict and finish time.
+
+The comparison recomputes the source and test fingerprints from the current
+files and configuration and compares them with the stored run fact:
+`unchanged`, `source changed`, `tests changed`, `source and tests changed`, or
+`unknown` (no fact, an unreadable, malformed or newer-format fact, or inputs
+that cannot be fingerprinted; a note says which). `unchanged` means the
+recorded inputs and build settings are equal, not that the program behaves the
+same; when the run's build was a shell stage, whose script cpf does not
+inspect, it is shown as `unchanged (capture unchecked: shell stage)`. A
+`cpf test --profile` run is compared with the default profile's settings, so
+it shows as `source changed`.
+
+Without an argument the problem is selected as for every other command
+(`--problem`, the current directory, then `cpf switch`). A name selects that
+problem; if no problem has that name, the contest of that name, whose members
+are shown in `contest.toml` order. `contest:<name>` always means the contest.
+`--all` shows every problem in `problems/`, by name.
+
+Status only reads: it takes no lock, creates no file and never deletes
+anything. `--json` prints one `status` document (report contract §6.1).
+
+| Status | Meaning |
+|---|---|
+| 0 | status shown (findings such as missing files do not change it) |
+| 8 | outside a workspace, an unknown problem or contest, unreadable records |
+| 11 | `--json` output could not be written |
+
+# Cleaning
+
+```
+cpf clean [--apply]
+```
+
+`cpf clean` lists what it would remove: every job directory under
+`.cpforge/runs/` that no running cpf holds, leftovers of interrupted
+removals, and `.cpforge/cache/`. `cpf clean --apply` removes them. Jobs that are
+still running are kept, as are job directories written by a newer cpf and ones
+whose records cannot be read (each is reported).
+
+Nothing outside `.cpforge/runs/` and `.cpforge/cache/` is removed: run facts,
+the job counter, `state.toml`, the lock, and all problem and contest files are
+kept. Like every command that takes the workspace lock, both forms first clean
+up temporary files left by an interrupted cpf.
+
+| Status | Meaning |
+|---|---|
+| 0 | done (or nothing to remove) |
+| 8 | outside a workspace, or the workspace lock or `.cpforge/runs/` is unusable |
+| 9 | `--apply`: something selected could not be removed (it is retried next time) |
+
+# Git ignore patterns
+
+```
+cpf gitignore [--write]
+```
+
+`cpf gitignore` prints the patterns for content cpf owns:
+
+```gitignore
+.cpforge/runs/
+.cpforge/cache/
+.cpforge/staging/
+# optional: .cpforge/facts/
+```
+
+Run facts are optional: commit them to share "last completed run" results.
+
+`cpf gitignore --write` keeps these lines in one block of `<root>/.gitignore`,
+between the lines `# >>> cpforge` and `# <<< cpforge`. It creates the file if
+there is none, appends the block if the file has no markers, and otherwise
+replaces only the lines between the markers; every other byte of the file is
+kept. It refuses, changing nothing, when the markers are incomplete,
+duplicated or reversed, when `.gitignore` is a link, not a regular file or has
+several hard links, or when the file changes while cpf is updating it. It exits
+0 on success and 8 when it refuses.

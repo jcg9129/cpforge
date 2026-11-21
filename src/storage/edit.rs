@@ -354,3 +354,57 @@ fn line_key(line: &str) -> &str {
     let line = line.strip_suffix('\n').unwrap_or(line);
     line.strip_suffix('\r').unwrap_or(line)
 }
+
+/// Byte-preserving text edit (storage §5.5): the same baseline read, checks
+/// and final validation as [`edit_toml`], without TOML parsing. `ops` maps the
+/// whole baseline to the new bytes and must be replayable; the caller owns the
+/// edited region. Every validation (also each Windows retry) re-reads the
+/// baseline and compares bytes, length, hash, identity, type and link count.
+pub fn edit_text<E>(
+    guard: &WorkspaceGuard<'_>,
+    path: impl AsRef<Path>,
+    ops: impl Fn(&[u8]) -> Result<Vec<u8>, E>,
+) -> Result<Published, EditError<E>> {
+    let path = guard.check_path(path).map_err(EditError::Storage)?;
+    let baseline = read_baseline(guard, &path)?;
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(hook) = guard.test_hooks.edit_after_read {
+        hook(&path);
+    }
+    let output = ops(&baseline.bytes).map_err(EditError::Operations)?;
+    if output.len() > super::RECORD_SIZE_LIMIT {
+        return Err(EditError::TooLarge { path });
+    }
+    let unchanged = || read_baseline::<E>(guard, &path).is_ok_and(|current| current == baseline);
+    if output == baseline.bytes {
+        if !unchanged() {
+            return Err(EditError::Conflict {
+                conflict: Conflict { path },
+                cleanup: Cleanup::Done,
+                previous_cleanup: Cleanup::Done,
+            });
+        }
+        return Ok(Published {
+            committed: false,
+            durability: super::Durability::Ok,
+            cleanup: Cleanup::Done,
+        });
+    }
+    let result = atomic_replace(guard, &path, &output, || {
+        if !unchanged() {
+            return Err(Conflict { path: path.clone() });
+        }
+        Ok(())
+    });
+    result.map_err(|error| {
+        if matches!(&error.kind, ErrorKind::Conflict(_)) || !unchanged() {
+            EditError::Conflict {
+                conflict: Conflict { path: path.clone() },
+                cleanup: error.cleanup,
+                previous_cleanup: Cleanup::Done,
+            }
+        } else {
+            EditError::Storage(error)
+        }
+    })
+}

@@ -1038,11 +1038,42 @@ code through; the child's status is in the report and the stderr summary
 ### 6.1 Availability
 
 - Accepted by `cpf build`, `cpf test`, `cpf cmd`, and by non-job commands
-  whose contract defines a document (schema 1: `cpf config show`; later
-  `cpf test ls`, `cpf status`). A per-command flag; elsewhere clap rejects
-  it (2).
+  whose contract defines a document (schema 1: `cpf config show`, *(draft)*
+  `cpf status` below; later `cpf test ls`). A per-command flag; elsewhere
+  clap rejects it (2).
 - Raw `cpf run` rejects `--json` and `--events` (E §8.1): 2.
 - `--json` with `--events`: 2 (decision D4).
+
+*(draft)* **`status` document** (workspace design §3.2, §3.3), schema 1,
+§3 encoding: `{"schema":1,"document":"status","platform":…,"problems":
+[Problem]}`, one entry per selected problem in selection order. It is not
+persisted, and its lists are workspace-sized, not capped (as for
+`config_show`). A selection or workspace failure writes the §4.12 `error`
+document (`command: "status"`) instead.
+
+| Member | Type | Meaning |
+|---|---|---|
+| `problem` | `pident` | the problem's identity |
+| `tags` | `[string]` | `problem.toml` `[problem] tags`, as written (explicit user status, never derived) |
+| `user_status` | `string?` | `problem.toml` `[problem] status` |
+| `missing_registered` | `[ns]` | registered paths (S §8.1 catalog entries, the target's `sources`, `support_files`, `solution_files`) that are absent, sorted by path |
+| `untracked` | `[ns]` | untracked files (workspace design §2.2), sorted by path |
+| `targets` | `[Target; ≤1]` | the `solution` target |
+| `diagnostics` | `[text]` | reasons for an `unknown` comparison and other findings, informative |
+
+Paths are problem-relative, native components joined by `/` on every
+platform. `Target`:
+
+| Member | Type | Meaning |
+|---|---|---|
+| `target` | `ident` | `solution` |
+| `fact_state` | token | S §9 record classification of the fact: `missing`, `unreadable`, `malformed`, `too_new`, `valid` |
+| `comparison` | token | `unchanged`, `source_changed`, `tests_changed`, `source_and_tests_changed`, or `unknown` (fact not `valid`, target or current inputs not fingerprintable) |
+| `last_verdict` | token? | the fact's verdict summary iff `fact_state` is `valid` |
+| `finished_at` | `time?` | the fact's `finished_at` iff `valid` |
+| `capture_check` | `Check?` (§4.2) | the fact's capture check iff `valid` |
+
+Fixture: `src/report/wire/fixtures/status.json`.
 
 ### 6.2 Output
 

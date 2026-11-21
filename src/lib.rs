@@ -22,12 +22,14 @@ pub mod process;
 pub mod progress;
 pub mod report;
 pub mod selection;
+mod status;
 pub mod storage;
 pub mod supervisor;
 mod test_commands;
 pub mod tests_store;
 pub mod transport;
 mod workspace;
+mod workspace_commands;
 
 use clap::{CommandFactory, error::ErrorKind};
 
@@ -112,6 +114,32 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 machine,
                 cli.config,
             );
+        }
+        Some(Command::Status {
+            reference,
+            all,
+            json,
+        }) => {
+            if cli.problem.is_some() && (reference.is_some() || all) {
+                return Err(clap::Error::raw(
+                    ErrorKind::ArgumentConflict,
+                    "--problem cannot be combined with a status reference or --all",
+                )
+                .into());
+            }
+            return status::run(
+                reference.as_deref(),
+                all,
+                json,
+                cli.problem.as_deref(),
+                cli.config,
+            );
+        }
+        Some(Command::Clean { apply }) => {
+            return workspace_commands::clean(apply);
+        }
+        Some(Command::Gitignore { write }) => {
+            return workspace_commands::gitignore(write);
         }
         Some(Command::Current { path }) => {
             return selection::current(cli.problem.as_deref(), path)

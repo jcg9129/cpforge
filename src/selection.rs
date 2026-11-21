@@ -528,6 +528,118 @@ pub(crate) fn switch(
     Ok(crate::job_command::switch_hooks(&selected, config))
 }
 
+/// Lock-free selection for `cpf status [problem|contest|--all]`. A reference
+/// resolves through the single-problem [`lookup`] first; only an unqualified
+/// name naming no problem falls back to a contest, and `contest:<name>`
+/// selects a contest explicitly. Contest members keep `contest.toml` order;
+/// `--all` lists the directories of `problems/` by name (plain files such as
+/// editor or Finder metadata are not problems and are skipped).
+pub(crate) fn select_many(
+    root: &Path,
+    cwd: &Path,
+    reference: Option<&str>,
+    all: bool,
+    problem_flag: Option<&str>,
+) -> Result<Vec<Problem>, Error> {
+    if all {
+        let directory = storage::checked_path(root, Path::new("problems"), false)?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Workspace(e.to_string())),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::Workspace(e.to_string()))?;
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|name| Error::Workspace(format!("invalid problem directory {name:?}")))?;
+            names.push(name);
+        }
+        names.sort();
+        return names
+            .iter()
+            .map(|name| lookup(root, name).map_err(Error::from))
+            .collect();
+    }
+    let Some(reference) = reference else {
+        let selected = resolve(root, cwd, problem_flag)?;
+        return Ok(vec![Problem {
+            dir: selected.dir,
+            identity: selected.identity,
+        }]);
+    };
+    let (contest, explicit) = if let Some(contest) = reference.strip_prefix("contest:") {
+        (contest, true)
+    } else {
+        match lookup(root, reference) {
+            Ok(problem) => return Ok(vec![problem]),
+            Err(SelectionError::NotFound { .. }) if !reference.contains(':') => (reference, false),
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let name = Identifier::new(contest)
+        .map_err(|e| Error::Workspace(format!("invalid contest name {contest:?}: {e}")))?;
+    let not_found = || {
+        Error::Workspace(if explicit {
+            format!("no contest named {name}")
+        } else {
+            format!("no problem or contest named {name}")
+        })
+    };
+    let directory = storage::checked_path(root, Path::new("contests"), false)?;
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_found()),
+        Err(e) => return Err(Error::Workspace(format!("{}: {e}", directory.display()))),
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::Workspace(e.to_string()))?;
+        if names::collides_with_native(name.as_str(), &entry.file_name()) {
+            matches.push(entry.file_name());
+        }
+    }
+    if matches.is_empty() {
+        return Err(not_found());
+    }
+    if matches.as_slice() != [OsString::from(name.as_str())] {
+        return Err(Error::Workspace(format!(
+            "contest {name} is ambiguous or differently spelled: {matches:?}"
+        )));
+    }
+    let path = storage::checked_path(
+        root,
+        &directory.join(name.as_str()).join("contest.toml"),
+        false,
+    )?;
+    let record = storage::read_user_record(&path, 1, |document| {
+        crate::add::contest_members(document)?;
+        let mut ids = Vec::new();
+        if let Some(records) = document.get("problem").and_then(Item::as_array_of_tables) {
+            for record in records {
+                ids.push(
+                    record
+                        .get("id")
+                        .and_then(Item::as_str)
+                        .expect("validated member")
+                        .to_owned(),
+                );
+            }
+        }
+        Ok::<_, String>(ids)
+    });
+    let ids =
+        record_result(record).map_err(|e| Error::Workspace(format!("{}: {e}", path.display())))?;
+    ids.iter()
+        .map(|id| lookup(root, id).map_err(Error::from))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

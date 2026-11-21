@@ -421,7 +421,7 @@ fn validate_label(label: &str) -> Result<(), String> {
     }
 }
 
-fn contest_members(document: &DocumentMut) -> Result<(), String> {
+pub(crate) fn contest_members(document: &DocumentMut) -> Result<(), String> {
     let Some(item) = document.get("problem") else {
         return Ok(());
     };

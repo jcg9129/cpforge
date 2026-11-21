@@ -15,6 +15,7 @@ use crate::config::ProblemPath;
 use crate::tests_store::{FreezeError, FrozenManifest, TestId, TestStore};
 
 mod sources;
+pub(crate) use sources::current_source_files;
 pub use sources::{
     CaptureError, CapturedSource, CapturedSourceCopy, CapturedSources, SourceRole, capture_sources,
 };

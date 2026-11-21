@@ -83,6 +83,31 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<TestCommand>,
     },
+    /// Compare current files with the last completed run (read-only).
+    Status {
+        /// A problem (<name> or local:<name>) or a contest (contest:<name>,
+        /// or a bare name that names no problem).
+        #[arg(conflicts_with = "all")]
+        reference: Option<String>,
+        /// Every problem of the workspace.
+        #[arg(long)]
+        all: bool,
+        /// Write the status document to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan removal of inactive job directories and the cache.
+    Clean {
+        /// Remove them (active jobs are always kept).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Print ignore patterns for tool-owned content.
+    Gitignore {
+        /// Maintain the cpforge block in <root>/.gitignore.
+        #[arg(long)]
+        write: bool,
+    },
     /// Print the problem selected for this invocation.
     Current {
         /// Print the absolute problem directory instead of its identity.

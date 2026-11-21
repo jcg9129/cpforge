@@ -92,6 +92,9 @@ pub struct PruneSelection {
     /// Successfully renamed ids in oldest-first order. Reclaim also retries
     /// leftovers not present in this list.
     pub renamed: Vec<JobId>,
+    /// Jobs selected by policy: in a plan, every candidate; otherwise those
+    /// that passed the re-probe (renamed or listed in `failed_renames`).
+    pub candidates: Vec<JobId>,
     pub report: PruneReport,
 }
 
@@ -111,9 +114,20 @@ struct Inactive {
 /// Reads are bounded to 1 MiB. Missing/malformed metadata is disposable; unknown
 /// schemas and unreadable metadata are preserved. No handles survive a rename.
 pub fn select_and_rename(guard: &WorkspaceGuard<'_>, policy: PrunePolicy) -> PruneSelection {
+    select(guard, policy, true)
+}
+
+/// Step 1 only, under the caller's workspace lock (the `cpf clean` plan):
+/// the same selection, re-probe excepted, with nothing renamed.
+pub fn plan(guard: &WorkspaceGuard<'_>, policy: PrunePolicy) -> PruneSelection {
+    select(guard, policy, false)
+}
+
+fn select(guard: &WorkspaceGuard<'_>, policy: PrunePolicy, apply: bool) -> PruneSelection {
     let mut selection = PruneSelection {
-        runs_dir: guard.root().join(".cpforge/runs"),
+        runs_dir: guard.root().join(".cpforge").join("runs"),
         renamed: Vec::new(),
+        candidates: Vec::new(),
         report: PruneReport::default(),
     };
     let runs = &selection.runs_dir;
@@ -273,6 +287,11 @@ pub fn select_and_rename(guard: &WorkspaceGuard<'_>, policy: PrunePolicy) -> Pru
         if !job.eligible || !(beyond_keep || beyond_bytes) {
             continue;
         }
+        if !apply {
+            selection.candidates.push(job.id.clone());
+            report.projected_bytes = report.projected_bytes.saturating_sub(job.bytes);
+            continue;
+        }
         let source = runs.join(job.id.as_str());
         let target = runs.join(job.id.reclaim_name());
         // Re-probe at the decision's commit boundary. A lock-free independent
@@ -289,6 +308,7 @@ pub fn select_and_rename(guard: &WorkspaceGuard<'_>, policy: PrunePolicy) -> Pru
             ProbeOutcome::Acquired(lock) => drop(lock),
             ProbeOutcome::Absent => {}
         }
+        selection.candidates.push(job.id.clone());
         let result = rename(guard, &source, &target);
         match result {
             Ok(()) => {
@@ -306,7 +326,11 @@ pub fn select_and_rename(guard: &WorkspaceGuard<'_>, policy: PrunePolicy) -> Pru
     selection
 }
 
-fn rename(guard: &WorkspaceGuard<'_>, source: &Path, target: &Path) -> Result<(), StorageError> {
+pub(crate) fn rename(
+    guard: &WorkspaceGuard<'_>,
+    source: &Path,
+    target: &Path,
+) -> Result<(), StorageError> {
     guard.check_path(source)?;
     // Check the destination entry without following it, including dangling links.
     match fs::symlink_metadata(target) {

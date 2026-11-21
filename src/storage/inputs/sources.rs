@@ -128,6 +128,39 @@ fn capture_checked(
     inputs: &JobInputs<'_>,
 ) -> Result<CapturedSources, CaptureError> {
     inputs.ensure_active()?;
+    let opened = open_sources(target_files, problem_dir)?;
+    let mut files = Vec::with_capacity(opened.len());
+    for (index, (source, relative, mut file)) in opened.into_iter().enumerate() {
+        let copy = inputs
+            .copy(&Path::new("src").join(relative), &mut file)
+            .map_err(|error| match error {
+                InputsError::Storage(StorageError {
+                    kind: ErrorKind::Io { path, source },
+                    ..
+                }) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    CaptureError::SourceCollision { path }
+                }
+                error => CaptureError::Inputs(error),
+            })?;
+        if index == 0 {
+            crate::storage::crash::barrier("inputs.source_copied");
+        }
+        files.push(CapturedSourceCopy {
+            role: source.role,
+            problem_path: source.problem_path,
+            copy_path: copy.path,
+            len: copy.len,
+        });
+    }
+    Ok(CapturedSources { files })
+}
+
+// Capture and status share declaration validation, including aliases and reserved
+// paths. Keeping every opened handle alive through preflight detects aliases.
+fn open_sources(
+    target_files: &[CapturedSource],
+    problem_dir: &Path,
+) -> Result<Vec<(CapturedSource, PathBuf, File)>, CaptureError> {
     let mut seen = HashMap::new();
     let mut opened = Vec::with_capacity(target_files.len());
     for source in target_files {
@@ -165,32 +198,26 @@ fn capture_checked(
                 second: path,
             });
         }
-        opened.push((source, relative, file));
+        opened.push((source.clone(), relative, file));
     }
-    let mut files = Vec::with_capacity(opened.len());
-    for (index, (source, relative, mut file)) in opened.into_iter().enumerate() {
-        let copy = inputs
-            .copy(&Path::new("src").join(relative), &mut file)
-            .map_err(|error| match error {
-                InputsError::Storage(StorageError {
-                    kind: ErrorKind::Io { path, source },
-                    ..
-                }) if source.kind() == io::ErrorKind::AlreadyExists => {
-                    CaptureError::SourceCollision { path }
-                }
-                error => CaptureError::Inputs(error),
-            })?;
-        if index == 0 {
-            crate::storage::crash::barrier("inputs.source_copied");
-        }
-        files.push(CapturedSourceCopy {
-            role: source.role,
-            problem_path: source.problem_path.clone(),
-            copy_path: copy.path,
-            len: copy.len,
-        });
-    }
-    Ok(CapturedSources { files })
+    Ok(opened)
+}
+
+/// Inspect working sources without copying or registering a job.
+pub(crate) fn current_source_files(
+    target: &TargetPlan,
+    problem_dir: &Path,
+) -> Result<Vec<crate::storage::facts::fingerprint::SourceFile>, CaptureError> {
+    let opened = open_sources(&CapturedSource::from_target(target), problem_dir)?;
+    Ok(opened
+        .into_iter()
+        .map(
+            |(_, relative, _)| crate::storage::facts::fingerprint::SourceFile {
+                content_path: problem_dir.join(&relative),
+                problem_path: relative,
+            },
+        )
+        .collect())
 }
 
 #[cfg(unix)]

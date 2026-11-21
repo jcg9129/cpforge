@@ -17,7 +17,9 @@ mod native;
 pub mod read;
 mod run;
 mod schema;
+mod status;
 mod value;
+pub(crate) use status::{ProblemStatus, encode_status};
 
 pub use artifacts::*;
 pub use events::*;
