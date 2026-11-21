@@ -681,7 +681,7 @@ pub(super) fn run_id(v: &str) -> Result<Value> {
     }
     Ok(s(v))
 }
-pub(super) fn engine_warning(
+pub(crate) fn engine_warning(
     v: &e::Warning,
     cancellation: Option<e::Cancellation>,
 ) -> Result<Warning> {

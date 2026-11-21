@@ -27,6 +27,7 @@ pub use native::{
     native_bytes,
 };
 pub use run::{encode_run_summary, ntstatus_name};
+pub(crate) use schema::engine_warning;
 pub use schema::timestamp;
 pub use value::{Error, Result};
 
@@ -207,6 +208,7 @@ fn refusal_value(v: &Refusal) -> Result<Value> {
         FailureClass::Config
             | FailureClass::Workspace
             | FailureClass::Cancelled
+            | FailureClass::Infrastructure
             | FailureClass::Internal
     ) {
         return Err(Error("invalid refusal class"));

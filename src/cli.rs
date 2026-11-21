@@ -27,6 +27,14 @@ pub struct Cli {
 /// Workspace commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Compile the selected problem in a fresh job directory.
+    Build {
+        /// Select a language profile for this build.
+        #[arg(long)]
+        profile: Option<String>,
+        #[command(flatten)]
+        machine: MachineArgs,
+    },
     /// Manage the selected problem's test catalog.
     Test {
         #[command(flatten)]

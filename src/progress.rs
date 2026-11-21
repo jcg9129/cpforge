@@ -150,11 +150,17 @@ impl ProgressWriter {
     }
     /// Call after delivery. It waits for queued lines and this summary, through
     /// the same writer. Stderr errors never affect the command's status.
-    pub fn finish(mut self, summary: &str) -> Result<(), crate::error::Error> {
+    pub fn finish(self, summary: &str) -> Result<(), crate::error::Error> {
+        self.finish_lines(&[summary.to_owned()])
+    }
+
+    /// Final warnings and summary, each bounded and escaped like progress.
+    /// These lines follow phase D and do not enter the closed progress queue.
+    pub fn finish_lines(mut self, lines: &[String]) -> Result<(), crate::error::Error> {
         self.queue.close();
         {
             let mut state = self.queue.0.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.summary = Some(bounded_line(summary));
+            state.summary = Some(lines.iter().map(String::as_str).map(bounded_line).collect());
             state.finish = true;
         }
         self.queue.0.wake.notify_one();

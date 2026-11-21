@@ -13,6 +13,7 @@ pub mod config;
 pub mod error;
 pub mod exec;
 pub mod exit;
+pub mod job_command;
 pub mod jobs;
 pub mod names;
 pub mod process;
@@ -34,7 +35,7 @@ use crate::{
 };
 
 /// Run the parsed CLI.
-pub fn run(cli: Cli) -> Result<(), Error> {
+pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     if cli.problem.is_some() && matches!(&cli.command, Some(Command::Switch { .. })) {
         return Err(clap::Error::raw(
             ErrorKind::ArgumentConflict,
@@ -43,12 +44,28 @@ pub fn run(cli: Cli) -> Result<(), Error> {
         .into());
     }
     match cli.command {
-        Some(Command::Test { command, machine }) => {
-            return test_commands::run(cli.problem.as_deref(), command, machine);
+        Some(Command::Build { profile, machine }) => {
+            return job_command::run(
+                &job_command::BuildCommand,
+                cli.problem.as_deref(),
+                profile,
+                machine,
+            );
         }
-        Some(Command::Current { path }) => return selection::current(cli.problem.as_deref(), path),
-        Some(Command::Switch { reference }) => return selection::switch(&reference),
-        Some(Command::Init { path }) => return workspace::init(&path),
+        Some(Command::Test { command, machine }) => {
+            return test_commands::run(cli.problem.as_deref(), command, machine)
+                .map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Current { path }) => {
+            return selection::current(cli.problem.as_deref(), path)
+                .map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Switch { reference }) => {
+            return selection::switch(&reference).map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Init { path }) => {
+            return workspace::init(&path).map(|()| exit::ExitCode::Success);
+        }
         Some(Command::Add {
             name,
             contest,
@@ -60,7 +77,8 @@ pub fn run(cli: Cli) -> Result<(), Error> {
                 contest.as_deref(),
                 label.as_deref(),
                 language.as_deref(),
-            );
+            )
+            .map(|()| exit::ExitCode::Success);
         }
         None => {}
     }

@@ -878,7 +878,9 @@ A refusal writes, in machine mode, a `job_report` with `outcome:
 `result.pre_delivery_exit` its status, `persistence.report.kind =
 "not_attempted"`, and `refusal`: `{class: token, error: {kind: token,
 message: text, path: nsum(256)?}, diagnostics: [Diagnostic; 64]}` (class
-`config`, `workspace`, `cancelled`, `internal`); `Diagnostic` (C §3.2):
+`config`, `workspace`, `cancelled`, `infrastructure`, `internal`;
+`infrastructure` covers a job that cannot start on this platform or host,
+e.g. no supervisor backend, exit 10); `Diagnostic` (C §3.2):
 `{file: nsum(256)?, key: text?, line: u32?, col: u32?, message: text}`, in
 reporting order.
 

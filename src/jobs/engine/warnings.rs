@@ -4,7 +4,7 @@ use super::{ExecutionRecord, ExecutionReport, Warning};
 use crate::storage::admission::AdmissionReport;
 use crate::storage::{Cleanup, Durability, ErrorKind};
 
-pub(super) fn admission(report: &AdmissionReport) -> Vec<Warning> {
+pub(crate) fn admission(report: &AdmissionReport) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let mut push = |warning| {
         if warnings.len() < 24 {

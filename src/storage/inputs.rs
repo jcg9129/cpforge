@@ -121,6 +121,21 @@ impl std::error::Error for FreezeInputsError {
 }
 
 impl JobInputs<'_> {
+    /// Capture a build-only target without consulting the test catalog.
+    pub fn freeze_sources(
+        &self,
+        target_files: &[CapturedSource],
+        problem_dir: &Path,
+    ) -> Result<FrozenInputs, FreezeInputsError> {
+        let sources =
+            capture_sources(target_files, problem_dir, self).map_err(FreezeInputsError::Sources)?;
+        Ok(FrozenInputs {
+            job_dir: self.job.dir.clone(),
+            manifest: FrozenManifest::empty(),
+            sources,
+        })
+    }
+
     /// Freeze tests first, then capture the target's sources and support files.
     /// Failure retains partial storage for pruning and permanently fails this job.
     pub fn freeze(

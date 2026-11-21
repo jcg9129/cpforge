@@ -404,71 +404,17 @@ pub fn plan_target<'probe>(
 ) -> Result<PlannedTarget<'probe>, PlanErrors> {
     let probe = inputs.probe;
     let build_bytes = inputs.build_bytes;
-    let mut errors = Vec::new();
-    for source in &inputs.sources {
-        if !syntax::native_absolute(source.as_os_str(), inputs.platform)
-            || source.as_os_str().as_encoded_bytes().contains(&0)
-        {
-            errors.push(PlanError::InvalidSourceBinding(source.clone()));
-        }
-    }
-    if inputs.sources.len() != target.sources.len() {
-        errors.push(PlanError::SourceCount {
-            expected: target.sources.len(),
-            supplied: inputs.sources.len(),
-        });
-    }
-    match (target.build.is_some(), outputs.is_some()) {
-        (true, false) => errors.push(PlanError::OutputsRequired),
-        (false, true) => errors.push(PlanError::UnexpectedOutputs),
-        _ => {}
-    }
-    let layout = match outputs
-        .as_ref()
-        .map(|outputs| {
-            ArtifactLayout::new(&outputs.root, target.artifacts.as_ref(), inputs.platform)
-        })
-        .transpose()
-    {
-        Ok(layout) => layout,
-        Err(error) => {
-            errors.push(error);
-            None
-        }
-    };
-    let bindings = TargetBindings {
-        sources: inputs.sources.clone(),
-        artifact: layout.as_ref().and_then(|layout| layout.file.clone()),
-        artifact_dir: outputs.as_ref().map(|outputs| outputs.root.clone()),
-        entry: target.entry.as_ref().map(|entry| entry.value.clone()),
-    };
-    let build = target.build.as_ref().and_then(|stage| {
-        let result = Context::target_build(target, inputs.dirs.clone(), bindings.clone())
-            .and_then(|ctx| exec::prepare(stage, &ctx, &inputs.baseline, inputs.platform, &[]));
-        if let (Ok(prepared), Some(outputs)) = (&result, &outputs) {
-            if prepared.cwd.starts_with(&outputs.root) {
-                errors.push(PlanError::BuildCwdInsideOutputs);
-            }
-        }
-        preflight(result, probe, inputs.platform, &mut errors)
-    });
-    let recipe = RunRecipe {
-        target: target.clone(),
-        dirs: inputs.dirs,
-        baseline: inputs.baseline,
-        platform: inputs.platform,
-        bindings,
-    };
-    let run = preflight(
-        recipe.prepare(recipe.dirs.run_cwd.clone()),
-        probe,
-        recipe.platform,
-        &mut errors,
-    );
-    if !errors.is_empty() {
-        return Err(PlanErrors { errors });
-    }
-    let (run, run_arguments) = run.expect("successful run preflight");
+    let TargetPreflight {
+        build,
+        run,
+        recipe,
+        layout,
+    } = preflight_target(
+        target,
+        inputs,
+        outputs.as_ref().map(|outputs| outputs.root.as_path()),
+    )?;
+    let (run, run_arguments) = run;
     if let Some(outputs) = outputs {
         let (Resolution::Resolved(build), arguments) = build.expect("build preflight") else {
             unreachable!("C2 refuses generated build programs")
@@ -493,6 +439,100 @@ pub fn plan_target<'probe>(
             arguments: run_arguments,
         }))
     }
+}
+
+/// Read-only phase-3 validation. This value has no fresh-output capability and
+/// cannot become a pending build. CLI preflight uses prospective job paths;
+/// managed preparation repeats validation against the real captured inputs.
+#[derive(Debug)]
+pub(crate) struct TargetPreflight {
+    build: Option<(Resolution, ExpandedArguments)>,
+    run: (Resolution, ExpandedArguments),
+    recipe: RunRecipe,
+    layout: Option<ArtifactLayout>,
+}
+impl TargetPreflight {
+    pub(crate) fn source_stage(&self) -> (&ResolvedStage, &ExpandedArguments) {
+        let (resolution, arguments) = self.build.as_ref().unwrap_or(&self.run);
+        let Resolution::Resolved(stage) = resolution else {
+            unreachable!("source-consuming stage is external")
+        };
+        (stage, arguments)
+    }
+}
+
+pub(crate) fn preflight_target(
+    target: &TargetPlan,
+    inputs: PlanInputs<'_>,
+    output_root: Option<&Path>,
+) -> Result<TargetPreflight, PlanErrors> {
+    let mut errors = Vec::new();
+    for source in &inputs.sources {
+        if !syntax::native_absolute(source.as_os_str(), inputs.platform)
+            || source.as_os_str().as_encoded_bytes().contains(&0)
+        {
+            errors.push(PlanError::InvalidSourceBinding(source.clone()));
+        }
+    }
+    if inputs.sources.len() != target.sources.len() {
+        errors.push(PlanError::SourceCount {
+            expected: target.sources.len(),
+            supplied: inputs.sources.len(),
+        });
+    }
+    match (target.build.is_some(), output_root.is_some()) {
+        (true, false) => errors.push(PlanError::OutputsRequired),
+        (false, true) => errors.push(PlanError::UnexpectedOutputs),
+        _ => {}
+    }
+    let layout = match output_root
+        .map(|root| ArtifactLayout::new(root, target.artifacts.as_ref(), inputs.platform))
+        .transpose()
+    {
+        Ok(layout) => layout,
+        Err(error) => {
+            errors.push(error);
+            None
+        }
+    };
+    let bindings = TargetBindings {
+        sources: inputs.sources.clone(),
+        artifact: layout.as_ref().and_then(|layout| layout.file.clone()),
+        artifact_dir: output_root.map(Path::to_owned),
+        entry: target.entry.as_ref().map(|entry| entry.value.clone()),
+    };
+    let build = target.build.as_ref().and_then(|stage| {
+        let result = Context::target_build(target, inputs.dirs.clone(), bindings.clone())
+            .and_then(|ctx| exec::prepare(stage, &ctx, &inputs.baseline, inputs.platform, &[]));
+        if let (Ok(prepared), Some(root)) = (&result, output_root) {
+            if prepared.cwd.starts_with(root) {
+                errors.push(PlanError::BuildCwdInsideOutputs);
+            }
+        }
+        preflight(result, inputs.probe, inputs.platform, &mut errors)
+    });
+    let recipe = RunRecipe {
+        target: target.clone(),
+        dirs: inputs.dirs,
+        baseline: inputs.baseline,
+        platform: inputs.platform,
+        bindings,
+    };
+    let run = preflight(
+        recipe.prepare(recipe.dirs.run_cwd.clone()),
+        inputs.probe,
+        recipe.platform,
+        &mut errors,
+    );
+    if !errors.is_empty() {
+        return Err(PlanErrors { errors });
+    }
+    Ok(TargetPreflight {
+        build,
+        run: run.expect("successful run preflight"),
+        recipe,
+        layout,
+    })
 }
 
 fn preflight(

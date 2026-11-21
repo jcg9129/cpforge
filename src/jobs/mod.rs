@@ -46,7 +46,7 @@ use crate::storage::budget::JobBudget;
 use crate::storage::inputs::{CapturedSource, CapturedSources, FreezeInputsError, FrozenInputs};
 use crate::storage::job::{Epoch, JobId, JobOwner};
 use crate::storage::{StorageError, checked_path};
-use crate::tests_store::{FrozenManifest, TestStore};
+use crate::tests_store::FrozenManifest;
 
 pub use guard::{CaptureCheck, CaptureCheckReason, GuardError};
 
@@ -335,12 +335,7 @@ pub fn prepare_build_job<'probe>(
 ) -> Result<ReadyJob<'probe>, ReadyError> {
     let frozen = registered
         .inputs()
-        .freeze(
-            &TestStore::new(inputs.problem.dir.clone()),
-            &[],
-            &CapturedSource::from_target(target),
-            &inputs.problem.dir,
-        )
+        .freeze_sources(&CapturedSource::from_target(target), &inputs.problem.dir)
         .map_err(ReadyError::Freeze)?;
     prepare_job(registered, frozen, target, inputs)
 }

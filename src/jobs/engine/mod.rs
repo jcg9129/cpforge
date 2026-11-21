@@ -44,7 +44,7 @@ mod persistence;
 mod report_value;
 mod spec;
 mod types;
-mod warnings;
+pub(crate) mod warnings;
 
 pub use cancel::*;
 pub use events::*;
@@ -161,6 +161,20 @@ impl std::fmt::Debug for Observation {
 
 impl<'probe> Engine<'probe> {
     pub fn new(ready: ReadyJob<'probe>, request: JobRequest) -> Result<Self, PlanError> {
+        let cancel = CancelState::at(ready.started);
+        Self::with_cancellation(ready, request, cancel)
+    }
+
+    /// Use the invocation state installed before registration, preserving any
+    /// cancellation received during admission or capture.
+    pub fn with_cancellation(
+        ready: ReadyJob<'probe>,
+        request: JobRequest,
+        mut cancel: CancelState,
+    ) -> Result<Self, PlanError> {
+        // Report timing runs from admission (step 1) to F, as in `new`; the
+        // shared verdict state and token are those installed earlier.
+        cancel.start = ready.started;
         let mut plan = Vec::new();
         let has_build = matches!(&ready.planned_target, PlannedTarget::Build(_));
         let (kind, comparator, keep_going, needs_build) = match &request {
@@ -281,7 +295,6 @@ impl<'probe> Engine<'probe> {
         if plan.len() > MAX_EXECUTIONS {
             return Err(PlanError::TooManyExecutions);
         }
-        let cancel = CancelState::at(ready.started);
         Ok(Self {
             ready,
             plan,

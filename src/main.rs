@@ -48,7 +48,7 @@ fn command() -> ExitCode {
     }
     let result = Cli::try_parse().map_err(Error::from).and_then(cpforge::run);
     match result {
-        Ok(()) => ExitCode::Success,
+        Ok(code) => code,
         Err(error) => {
             let code = error.exit_code();
             match error {

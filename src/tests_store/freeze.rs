@@ -36,6 +36,11 @@ pub struct FrozenManifest {
     entries: Vec<FrozenTest>,
 }
 impl FrozenManifest {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
     pub fn entries(&self) -> &[FrozenTest] {
         &self.entries
     }
