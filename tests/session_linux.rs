@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 use cpf_fixture::harness::fixture_path;
 use cpforge::supervisor::session::*;
 use cpforge::supervisor::*;
@@ -40,6 +40,103 @@ async fn quiescent() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
+// Poll an observable readiness condition with a hard bound; elapsed time is
+// never used as evidence that a fixture reached a particular step.
+async fn until(mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("fixture readiness timed out");
+}
+
+fn fd_count() -> usize {
+    #[cfg(target_os = "linux")]
+    let path = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    let path = "/dev/fd";
+    std::fs::read_dir(path).unwrap().count()
+}
+
+#[cfg(target_os = "linux")]
+fn thread_count() -> usize {
+    std::fs::read_dir("/proc/self/task").unwrap().count()
+}
+
+#[cfg(target_os = "macos")]
+fn thread_count() -> usize {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    // SAFETY: the buffer fits the complete record; errno is thread-local.
+    let (count, errno) = unsafe {
+        *libc::__error() = 0;
+        let count = libc::proc_pidinfo(
+            std::process::id() as i32,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        );
+        (count, *libc::__error())
+    };
+    assert_eq!(
+        count, size,
+        "proc_pidinfo(PROC_PIDTASKINFO) failed: errno {errno}"
+    );
+    // SAFETY: proc_pidinfo returned the entire initialized record.
+    unsafe { info.assume_init().pti_threadnum as usize }
+}
+
+// Return (start identity, zombie). Root identities stay pinned until reaping;
+// descendants may remain as zombies under the system reaper after group kill.
+#[cfg(target_os = "linux")]
+fn process_identity(pid: u32) -> Option<(u64, bool)> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("cannot inspect {pid}: {error}"),
+    };
+    // Reaping can race a procfs read, leaving an empty or truncated record.
+    let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    Some((fields.get(19)?.parse().ok()?, *fields.first()? == "Z"))
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity(pid: u32) -> Option<(u64, bool)> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: the output fits a complete record; arg=1 includes zombies.
+    let (count, errno) = unsafe {
+        *libc::__error() = 0;
+        let count = libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            info.as_mut_ptr().cast(),
+            size,
+        );
+        (count, *libc::__error())
+    };
+    if count <= 0 && errno == libc::ESRCH {
+        return None;
+    }
+    assert_eq!(count, size, "proc_pidinfo({pid}) failed: errno {errno}");
+    // SAFETY: the full initialized record was returned above.
+    let info = unsafe { info.assume_init() };
+    Some((
+        info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        info.pbi_status == libc::SZOMB,
+    ))
+}
+
+fn identity_file(path: &std::path::Path) -> (u32, u64) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let (pid, start) = text.trim().split_once(' ').unwrap();
+    (pid.parse().unwrap(), start.parse().unwrap())
+}
+
 fn program(steps: &[&str]) -> ProgramSpec {
     ProgramSpec {
         program: fixture_path(),
@@ -162,6 +259,123 @@ fn trace(outcome: &SessionOutcome) {
 }
 
 #[test]
+fn both_modes_use_native_observers_or_bounded_polling_and_scoped_accounting() {
+    test(async {
+        for mode in [SessionMode::Relay, SessionMode::Direct] {
+            for polling in [false, true] {
+                let mut spec = spec(&["pingpong:1000"], &["pong:1000"]);
+                spec.mode = mode;
+                for options in &mut spec.spawn_options {
+                    options.force_polling_observer = polling;
+                }
+                let outcome = run_session(spec).await;
+                trace(&outcome);
+                for run in [&outcome.solution, &outcome.interactor] {
+                    let run = root(run);
+                    assert_eq!(run.status, Termination::Exited { code: 0 });
+                    let expected = if polling {
+                        ObserverKind::Polling
+                    } else if cfg!(target_os = "macos") {
+                        ObserverKind::Kqueue
+                    } else {
+                        ObserverKind::Pidfd
+                    };
+                    assert_eq!(run.timing.observer, expected);
+                    // Linux requires pidfd fdinfo to establish procfs numbering.
+                    // Darwin's libproc scan can verify even with polling selected.
+                    let (cleanup, completeness) = if polling && cfg!(target_os = "linux") {
+                        (
+                            Cleanup::Unverified {
+                                reason: UnverifiedReason::NamespaceUnknown,
+                            },
+                            Completeness::Partial,
+                        )
+                    } else {
+                        (Cleanup::Confirmed, Completeness::Final)
+                    };
+                    assert_eq!(run.termination.cleanup, cleanup);
+                    assert!(run.measurements.iter().all(|measurement| {
+                        measurement.value.is_some() && measurement.completeness == completeness
+                    }));
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn both_modes_reap_roots_and_remove_live_descendant_identities_on_finish_cancel_and_drop() {
+    test(async {
+        for mode in [SessionMode::Relay, SessionMode::Direct] {
+            for action in ["finish", "cancel", "drop"] {
+                let directory = TranscriptDirectory::new();
+                std::fs::create_dir_all(&directory.0).unwrap();
+                let release = directory.0.join("release");
+                let paths =
+                    ["s-root", "s-child", "i-root", "i-child"].map(|name| directory.0.join(name));
+                let steps = |index: usize| {
+                    vec![
+                        format!("spawn:1:identity-file:{},hold", paths[index + 1].display()),
+                        format!("identity-file:{}", paths[index].display()),
+                        format!("wait-file:{}", release.display()),
+                        "exit:0".to_owned(),
+                    ]
+                };
+                let s_steps = steps(0);
+                let i_steps = steps(2);
+                let mut spec = spec(
+                    &s_steps.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &i_steps.iter().map(String::as_str).collect::<Vec<_>>(),
+                );
+                spec.mode = mode;
+                let cancel = spec.cancel.clone();
+                let mut session = Box::pin(run_session(spec));
+                tokio::select! {
+                    outcome = &mut session => panic!("session ended before release: {outcome:?}"),
+                    () = until(|| paths.iter().all(|path| path.exists())) => {},
+                }
+                let identities = paths.each_ref().map(|path| identity_file(path));
+                for &(pid, start) in &identities {
+                    assert_eq!(process_identity(pid), Some((start, false)));
+                }
+                if action == "drop" {
+                    // Drop the owning future, not merely its pinned reference.
+                    drop(session);
+                } else {
+                    if action == "cancel" {
+                        cancel.cancel();
+                    } else {
+                        std::fs::write(&release, b"").unwrap();
+                    }
+                    let outcome = session.await;
+                    trace(&outcome);
+                    for role in [Role::S, Role::I] {
+                        if action == "cancel" {
+                            assert_eq!(
+                                stop(&outcome, role).unwrap().1,
+                                StopCause::Teardown(Teardown::Cancel)
+                            );
+                        } else {
+                            assert!(stop(&outcome, role).is_none());
+                        }
+                    }
+                }
+                quiescent().await;
+                for (index, &(pid, start)) in identities.iter().enumerate() {
+                    until(|| {
+                        process_identity(pid).is_none_or(|identity| {
+                            identity.0 != start || (index % 2 == 1 && identity.1)
+                        })
+                    })
+                    .await;
+                }
+                assert_eq!(debug_counters().credits_in_use, 1);
+            }
+        }
+    });
+}
+
+#[test]
 fn fixture_01_wall_limit_and_provenance() {
     test(async {
         let mut spec = spec(&["hold"], &["drain-stdin"]);
@@ -176,11 +390,23 @@ fn fixture_01_wall_limit_and_provenance() {
 #[test]
 fn fixture_02_sink_gone_reaches_writer_as_sigpipe() {
     test(async {
-        let outcome = run_session(spec(
-            &["default-sigpipe", "sleep:80", "write:stdout:4194304"],
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let release = directory.0.join("release");
+        let mut spec = spec(
+            &[
+                "default-sigpipe",
+                &format!("wait-file:{}", release.display()),
+                "write:stdout:4194304",
+            ],
             &["exit:0"],
-        ))
-        .await;
+        );
+        let observed = CancelToken::new();
+        spec.exit_observed[1] = Some(observed.clone());
+        let (outcome, ()) = tokio::join!(run_session(spec), async {
+            observed.cancelled().await;
+            std::fs::write(&release, b"").unwrap();
+        });
         trace(&outcome);
         assert_eq!(
             root(&outcome.solution).status,
@@ -204,7 +430,19 @@ fn fixture_02_sink_gone_reaches_writer_as_sigpipe() {
 #[test]
 fn fixture_03_half_close_while_root_alive() {
     test(async {
-        let outcome = run_session(spec(&["close:stdout", "sleep:120"], &["drain-stdin"])).await;
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let release = directory.0.join("release");
+        let mut spec = spec(
+            &["close:stdout", &format!("wait-file:{}", release.display())],
+            &["drain-stdin"],
+        );
+        let observed = CancelToken::new();
+        spec.exit_observed[1] = Some(observed.clone());
+        let (outcome, ()) = tokio::join!(run_session(spec), async {
+            observed.cancelled().await;
+            std::fs::write(&release, b"").unwrap();
+        });
         trace(&outcome);
         assert!(
             outcome
@@ -287,14 +525,25 @@ fn fixture_05_slow_destination_and_exact_loss_accounting() {
 #[test]
 fn fixture_06_inherited_stdout_survives_until_transport_drain() {
     test(async {
-        let outcome = run_session(spec(
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let release = directory.0.join("release");
+        let mut spec = spec(
             &[
-                "spawn:1:sleep:120,write:stdout:20000,close:stdout,hold",
+                &format!(
+                    "spawn:1:wait-file:{},write:stdout:20000,close:stdout,hold",
+                    release.display()
+                ),
                 "exit:0",
             ],
             &["read-exactly:20000", "exit:0"],
-        ))
-        .await;
+        );
+        let observed = CancelToken::new();
+        spec.exit_observed[0] = Some(observed.clone());
+        let (outcome, ()) = tokio::join!(run_session(spec), async {
+            observed.cancelled().await;
+            std::fs::write(&release, b"").unwrap();
+        });
         trace(&outcome);
         assert_eq!(
             outcome
@@ -416,10 +665,23 @@ fn fixture_14_peer_allowance_in_both_directions() {
 #[test]
 fn fixture_15_cancel_during_blocked_forward() {
     test(async {
-        let spec = spec(&["write:stdout:4194304", "hold"], &["hold"]);
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let ready = directory.0.join("writer-ready");
+        let spec = spec(
+            &[
+                "write:stdout:262144",
+                &format!("identity-file:{}", ready.display()),
+                "write:stdout:3932160",
+                "hold",
+            ],
+            &["hold"],
+        );
         let cancel = spec.cancel.clone();
         let (outcome, ()) = tokio::join!(run_session(spec), async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // The non-reading peer has accepted only a pipe's worth; the
+            // remaining prefix has reached the relay before cancellation.
+            until(|| ready.exists()).await;
             cancel.cancel();
             cancel.cancel();
         });
@@ -456,15 +718,13 @@ fn fixture_18_twenty_sessions_return_fds_threads_and_credits() {
         }
         quiescent().await;
         fn counts() -> (usize, usize) {
-            (
-                std::fs::read_dir("/proc/self/fd").unwrap().count(),
-                std::fs::read_dir("/proc/self/task").unwrap().count(),
-            )
+            (fd_count(), thread_count())
         }
         let baseline = counts();
         for _ in 0..20 {
             trace(&run_session(spec(&["exit:0"], &["exit:0"])).await);
             quiescent().await;
+            until(|| counts() == baseline).await;
             assert_eq!(counts(), baseline);
         }
     });
@@ -786,13 +1046,23 @@ fn immediate_cap_breach_is_recorded_after_natural_exit_including_final_drain() {
                 } else {
                     spec(&reader, &["write:stdout:4097", "exit:0"])
                 };
+                let observed = CancelToken::new();
+                let peer_observed = CancelToken::new();
+                let index = if writer == Role::S { 0 } else { 1 };
+                spec.exit_observed[index] = Some(observed.clone());
+                if final_drain {
+                    spec.exit_observed[1 - index] = Some(peer_observed.clone());
+                }
                 spec.dialogue_cap = [4096; 2];
                 // Hold transport until the small writer has exited. In the
                 // final-drain case both roots exit while descendants own stdin.
                 let gate = CancelToken::new();
                 spec.relay_start_gate = Some(gate.clone());
                 let (outcome, ()) = tokio::join!(run_session(spec), async {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    observed.cancelled().await;
+                    if final_drain {
+                        peer_observed.cancelled().await;
+                    }
                     gate.cancel();
                 });
                 trace(&outcome);
@@ -856,15 +1126,27 @@ fn overflow_drains_to_eof_and_interactor_exits_naturally() {
 #[test]
 fn late_overflow_after_wall_stop_is_diagnostic_only() {
     test(async {
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let release = directory.0.join("release");
         let mut spec = spec(
-            &["spawn:1:sleep:160,write:stdout:4097", "hold"],
+            &[
+                &format!("spawn:1:wait-file:{},write:stdout:4097", release.display()),
+                "hold",
+            ],
             &["drain-stdin"],
         );
         spec.wall_deadline = Duration::from_millis(80);
         spec.dialogue_cap[0] = 4096;
         let (diagnostics, mut received) = tokio::sync::mpsc::channel(32);
         spec.diagnostics = Some(diagnostics);
-        let outcome = run_session(spec).await;
+        let observed = CancelToken::new();
+        spec.exit_observed[0] = Some(observed.clone());
+        let (outcome, ()) = tokio::join!(run_session(spec), async {
+            // The root's wall stop must precede the descendant's overflow.
+            observed.cancelled().await;
+            std::fs::write(&release, b"").unwrap();
+        });
         trace(&outcome);
         assert_eq!(
             stop(&outcome, Role::S).unwrap().1,
@@ -916,13 +1198,19 @@ fn sleeping_roots_do_not_poll_the_coordinator() {
 fn recovery_preserves_session_trigger_or_none_without_inventing_cancellation() {
     test(async {
         for cancelled in [false, true] {
-            let mut spec = spec(&["hold"], &["drain-stdin"]);
+            let directory = TranscriptDirectory::new();
+            std::fs::create_dir_all(&directory.0).unwrap();
+            let ready = directory.0.join("root-ready");
+            let mut spec = spec(
+                &[&format!("identity-file:{}", ready.display()), "hold"],
+                &["drain-stdin"],
+            );
             spec.spawn_options[0].observer_never_ready = true;
             spec.session_deadline = Some(Duration::from_millis(80));
             let cancel = spec.cancel.clone();
             let (outcome, ()) = tokio::join!(run_session(spec), async {
                 if cancelled {
-                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    until(|| ready.exists()).await;
                     cancel.cancel();
                 }
             });
@@ -1143,16 +1431,30 @@ fn fixture_10_permanent_transcript_failure_is_reported_in_outcome() {
 fn fixture_11_cancellation_records_the_exact_partial_forward() {
     test(async {
         let directory = TranscriptDirectory::new();
-        let mut spec = spec(&["write:stdout:262144", "hold"], &["hold"]);
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let ready = directory.0.join("writer-ready");
+        let mut spec = spec(
+            &[
+                "write:stdout:8192",
+                &format!("identity-file:{}", ready.display()),
+                "write:stdout:253952",
+                "hold",
+            ],
+            &["hold"],
+        );
         spec.transcript = Some(directory.0.clone());
-        spec.relay_pipe_bytes = Some(4096);
+        // Darwin cannot resize pipes. Pause at the same exact 4096-byte prefix
+        // on both kernels, then cancel while the remainder is still queued.
+        let partial = CancelToken::new();
+        spec.relay_pause_after = Some((4096, partial.clone()));
         let gate = CancelToken::new();
         spec.relay_start_gate = Some(gate.clone());
         let cancel = spec.cancel.clone();
         let (outcome, ()) = tokio::join!(run_session(spec), async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Ensure the first read exceeds 4096 before releasing the relay.
+            until(|| ready.exists()).await;
             gate.cancel();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            partial.cancelled().await;
             cancel.cancel();
         });
         trace(&outcome);
@@ -1416,12 +1718,24 @@ fn direct_mode_echo_works_and_reports_unavailable_statistics() {
 #[test]
 fn direct_mode_has_child_to_child_eof_and_no_final_transport_drain() {
     test(async {
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let release = directory.0.join("release");
         let mut spec = spec(
-            &["write:stdout:4096", "close:stdout", "sleep:100"],
+            &[
+                "write:stdout:4096",
+                "close:stdout",
+                &format!("wait-file:{}", release.display()),
+            ],
             &["drain-stdin"],
         );
         spec.mode = SessionMode::Direct;
-        let outcome = run_session(spec).await;
+        let observed = CancelToken::new();
+        spec.exit_observed[1] = Some(observed.clone());
+        let (outcome, ()) = tokio::join!(run_session(spec), async {
+            observed.cancelled().await;
+            std::fs::write(&release, b"").unwrap();
+        });
         trace(&outcome);
         assert!(exited(&outcome, Role::I).0 < exited(&outcome, Role::S).0);
         assert!(stop(&outcome, Role::S).is_none());
@@ -1466,6 +1780,7 @@ fn direct_mode_transcript_and_idle_requests_are_rejected_before_start() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "fixture 17: reports latency without a performance threshold"]
 fn fixture_17_tiny_exchange_latency_benchmark() {
@@ -1498,12 +1813,26 @@ fn direct_mode_preserves_wall_peer_session_and_cancel_stops() {
             StopCause::SessionLimit,
             StopCause::Teardown(Teardown::Cancel),
         ] {
+            let directory = TranscriptDirectory::new();
+            std::fs::create_dir_all(&directory.0).unwrap();
+            let s_ready = directory.0.join("s-ready");
+            let i_ready = directory.0.join("i-ready");
             let mut spec = if cause == StopCause::PeerAllowanceExpired {
                 spec(&["exit:0"], &["hold"])
             } else {
                 spec(
-                    &["write:stdout:262144", "hold"],
-                    &["write:stdout:262144", "hold"],
+                    &[
+                        "write:stdout:4096",
+                        &format!("identity-file:{}", s_ready.display()),
+                        "write:stdout:258048",
+                        "hold",
+                    ],
+                    &[
+                        "write:stdout:4096",
+                        &format!("identity-file:{}", i_ready.display()),
+                        "write:stdout:258048",
+                        "hold",
+                    ],
                 )
             };
             spec.mode = SessionMode::Direct;
@@ -1518,7 +1847,7 @@ fn direct_mode_preserves_wall_peer_session_and_cancel_stops() {
             let cancel = spec.cancel.clone();
             let (outcome, ()) = tokio::join!(run_session(spec), async {
                 if cause == StopCause::Teardown(Teardown::Cancel) {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    until(|| s_ready.exists() && i_ready.exists()).await;
                     cancel.cancel();
                 }
             });
@@ -1610,7 +1939,7 @@ fn twenty_transcript_writers_delayed_past_deadline_return_credits_and_threads() 
     test_with_timeout(Duration::from_secs(120), async {
         quiescent().await;
         let credits = debug_counters().credits_in_use;
-        let threads = std::fs::read_dir("/proc/self/task").unwrap().count();
+        let threads = thread_count();
         for _ in 0..20 {
             let directory = TranscriptDirectory::new();
             let mut spec = spec(&["exit:0"], &["exit:0"]);
@@ -1625,10 +1954,8 @@ fn twenty_transcript_writers_delayed_past_deadline_return_credits_and_threads() 
             assert!(outcome.elapsed < Duration::from_secs(3));
             quiescent().await;
             assert_eq!(debug_counters().credits_in_use, credits);
-            assert_eq!(
-                std::fs::read_dir("/proc/self/task").unwrap().count(),
-                threads
-            );
+            until(|| thread_count() == threads).await;
+            assert_eq!(thread_count(), threads);
         }
     });
 }

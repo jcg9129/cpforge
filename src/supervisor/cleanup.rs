@@ -204,7 +204,7 @@ fn reserve(count: usize) -> Result<Vec<Admission>, NotStarted> {
 }
 
 /// Reserve all file-sink credits for a pair before creating either worker set.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn reserve_pair_workers(
     admissions: &mut [Admission; 2],
     counts: [usize; 2],

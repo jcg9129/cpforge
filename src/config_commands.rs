@@ -1168,6 +1168,14 @@ pub(crate) fn doctor(
             probe_text(&capability.probe)
         );
     }
+    let connected = capabilities.connected_runs;
+    let _ = writeln!(
+        output,
+        "{}: compiled={}; probe={}",
+        connected.kind,
+        connected.compiled,
+        probe_text(&connected.probe)
+    );
     let cleanup = if cfg!(target_os = "linux") {
         "procfs pgrp scan using pidfd fdinfo Pid; supported unfiltered view required"
     } else if cfg!(target_os = "macos") {

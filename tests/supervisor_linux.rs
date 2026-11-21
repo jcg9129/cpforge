@@ -2728,34 +2728,3 @@ fn macos_rejects_both_limit_kinds_before_workers_files_or_spawn() {
         }
     });
 }
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_connected_sessions_fail_before_admission_or_either_spawn() {
-    use cpforge::supervisor::session::{
-        RunRecord, SessionMode, SessionSpec, StartFailureKind, run_session,
-    };
-    run_test(async {
-        // Occupy every slot: admission, if attempted, would report capacity.
-        let held: Vec<_> = (0..4).map(|_| admit().unwrap()).collect();
-        let before = debug_counters();
-        let path = CapturePath::new();
-        for mode in [SessionMode::Direct, SessionMode::Relay] {
-            let mut solution = spec(&["hold"]);
-            solution.stderr = capture(Sink::File(path.0.clone()), 4096, Exceed::Kill, false);
-            let mut session = SessionSpec::new(solution, spec(&["hold"]), Duration::from_secs(1));
-            session.mode = mode;
-            session.transcript = Some(path.0.with_extension("transcript"));
-            let outcome = run_session(session).await;
-            for record in [&outcome.solution, &outcome.interactor] {
-                assert!(
-                    matches!(record, RunRecord::NotStarted(reason) if reason.kind == StartFailureKind::Unsupported)
-                );
-            }
-            assert!(!path.0.exists());
-            assert!(!path.0.with_extension("transcript").exists());
-            assert_eq!(debug_counters(), before);
-        }
-        drop(held);
-    });
-}

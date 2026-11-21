@@ -19,7 +19,7 @@ pub(super) use linux::{
     observe_status, observer, reap, spawn,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use unix::direct_pipe;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use unix::{InputEnd, console_write, input_pipe};
@@ -32,9 +32,9 @@ mod limits;
 #[cfg(target_os = "linux")]
 pub(super) use limits::{prepare_limits, probe_capabilities};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod transcript_file;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use transcript_file::{TranscriptEvents, TranscriptFile, TranscriptFiles};
 
 #[cfg(all(target_os = "linux", debug_assertions))]

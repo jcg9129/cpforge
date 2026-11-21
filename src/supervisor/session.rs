@@ -1,9 +1,9 @@
-//! Connected Linux sessions. This module records execution facts, never verdicts.
+//! Connected Unix sessions. This module records execution facts, never verdicts.
 mod record;
 pub use record::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod relay;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod transcript;
 
 use super::{
@@ -41,12 +41,20 @@ pub struct SessionSpec {
     pub diagnostics: Option<tokio::sync::mpsc::Sender<TransportDiagnostic>>,
     #[doc(hidden)]
     pub spawn_options: [SpawnOptions; 2],
+    #[doc(hidden)]
+    /// Test readiness signals, published after the coordinator records root exit.
+    pub exit_observed: [Option<CancelToken>; 2],
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub relay_start_gate: Option<CancelToken>,
     #[cfg(debug_assertions)]
     #[doc(hidden)]
+    /// Linux-only kernel pipe capacity injection.
     pub relay_pipe_bytes: Option<usize>,
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    /// Pause each relay after this forwarded prefix and notify the test.
+    pub relay_pause_after: Option<(u64, CancelToken)>,
 }
 impl SessionSpec {
     pub fn new(
@@ -75,10 +83,13 @@ impl SessionSpec {
             cancel: CancelToken::new(),
             diagnostics: None,
             spawn_options: std::array::from_fn(|_| SpawnOptions::default()),
+            exit_observed: [None, None],
             #[cfg(debug_assertions)]
             relay_start_gate: None,
             #[cfg(debug_assertions)]
             relay_pipe_bytes: None,
+            #[cfg(debug_assertions)]
+            relay_pause_after: None,
         }
     }
 }
@@ -238,11 +249,11 @@ pub struct SessionOutcome {
 /// Own both roots and all relay endpoints until drain, then use E's cleanup path.
 /// Dropping this future drops roots into the existing bounded cleanup service.
 pub async fn run_session(spec: SessionSpec) -> SessionOutcome {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        linux::run(spec).await
+        unix::run(spec).await
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         failed(&spec, NotStarted::Unsupported)
     }
@@ -291,11 +302,11 @@ fn unavailable_or_closed(mode: SessionMode) -> DirectionStatistics {
 }
 
 /// Bound for flushing a transcript after the final drain (not process timing).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const TRANSCRIPT_FINALIZE: Duration = Duration::from_secs(1);
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
     use super::*;
     use crate::supervisor::{
         Exceed, Sink, StopTrigger, StreamPolicy, admit_pair, root::unix as roots, stdout_pipe, sys,
@@ -358,7 +369,7 @@ mod linux {
             let i = stdout_pipe()?;
             let (s_input, to_s) = sys::input_pipe()?;
             let (i_input, to_i) = sys::input_pipe()?;
-            #[cfg(debug_assertions)]
+            #[cfg(all(target_os = "linux", debug_assertions))]
             if let Some(bytes) = spec.relay_pipe_bytes {
                 sys::resize_pipe(&to_s, bytes)?;
                 sys::resize_pipe(&to_i, bytes)?;
@@ -427,6 +438,10 @@ mod linux {
             if let Some(relay) = relay {
                 relay.transcript = direction;
                 relay.origin = started;
+                #[cfg(debug_assertions)]
+                {
+                    relay.pause_after = spec.relay_pause_after.clone();
+                }
             }
         }
         let counters = relays.each_ref().map(|relay| {
@@ -652,6 +667,13 @@ mod linux {
                 }
                 record.wakeup_with_diagnostics(pending, spec.diagnostics.as_ref());
                 emit_events(&mut transcript_writer, &record);
+                for role in [Role::S, Role::I] {
+                    if record.exited(role) {
+                        if let Some(observed) = &spec.exit_observed[role.index()] {
+                            observed.cancel();
+                        }
+                    }
+                }
                 // Commit facts before signalling; later triggers cannot replace them.
                 for role in [Role::S, Role::I] {
                     let index = role.index();

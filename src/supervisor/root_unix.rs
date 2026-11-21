@@ -783,7 +783,6 @@ impl Transfer {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Root {
     pub(in crate::supervisor) async fn session_ready(&mut self) {
         let pid = self.pid() as i32;
@@ -888,7 +887,6 @@ impl Root {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(in crate::supervisor) async fn session_finish(
     mut root: Box<Root>,
     wall: Duration,

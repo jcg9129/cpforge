@@ -111,15 +111,30 @@ pub(in crate::supervisor) fn input_pipe() -> io::Result<(InputEnd, tokio::net::u
 }
 
 /// Both dialogue ends belong to children; neither end is nonblocking.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) fn direct_pipe() -> io::Result<(InputEnd, Writer)> {
+    #[cfg(target_os = "macos")]
+    let _creation = super::macos::creation_lock();
     let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
     // SAFETY: writable storage for two new, uniquely owned CLOEXEC descriptors.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+    let result = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(target_os = "macos")]
+    // SAFETY: writable storage; creation_lock prevents inheritance before CLOEXEC.
+    let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if result == -1 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: successful pipe2 returned two distinct owned descriptors.
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+    // SAFETY: successful pipe creation returned two distinct owned descriptors.
+    let (input, output) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    #[cfg(target_os = "macos")]
+    for fd in [&input, &output] {
+        // SAFETY: each descriptor is live and spawn is serialized until marked.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((input, output))
 }
 
 #[cfg(all(target_os = "linux", debug_assertions))]
@@ -155,5 +170,25 @@ pub(in crate::supervisor) fn console_write(
         Err(io::Error::last_os_error())
     } else {
         Ok(result as usize)
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_pipe_keeps_both_child_ends_blocking_and_cloexec() {
+        let (input, output) = direct_pipe().unwrap();
+        for fd in [&input, &output] {
+            // SAFETY: the descriptors are live and owned throughout the checks.
+            let descriptor_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            // SAFETY: F_GETFL only reads the live descriptor's file status flags.
+            let status_flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+            assert_ne!(descriptor_flags, -1);
+            assert_ne!(status_flags, -1);
+            assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+            assert_eq!(status_flags & libc::O_NONBLOCK, 0);
+        }
     }
 }

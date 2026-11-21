@@ -390,7 +390,6 @@ pub(in crate::supervisor) fn reap(pid: i32) -> io::Result<Option<(Termination, R
 }
 
 /// Stop a session root while preserving descendants for the final transport drain.
-#[allow(dead_code)] // Native interface; connected sessions remain Linux-only.
 pub(in crate::supervisor) fn kill_root(pid: i32) -> io::Result<()> {
     // SAFETY: the caller owns the unreaped root and its signalling capability.
     if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {

@@ -8,7 +8,7 @@ pub enum Role {
     I,
 }
 impl Role {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn index(self) -> usize {
         self as usize
     }
@@ -224,7 +224,7 @@ impl SessionRecord {
     pub fn events(&self) -> &[Event] {
         &self.events
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) fn transcript_events(
         &self,
         origin: std::time::Instant,

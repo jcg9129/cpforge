@@ -96,6 +96,7 @@ pub struct Capabilities {
     pub metrics: Vec<Capability<MetricKind>>,
     pub limits: Vec<Capability<LimitKind>>,
     pub observers: Vec<Capability<&'static str>>,
+    pub connected_runs: Capability<&'static str>,
     pub deferred: Vec<Capability<&'static str>>,
 }
 
@@ -154,6 +155,11 @@ pub fn capabilities() -> Capabilities {
                 probe: procfs,
             },
         ],
+        connected_runs: Capability {
+            kind: "connected runs",
+            compiled: linux,
+            probe: if linux { Ok(()) } else { unsupported() },
+        },
         deferred: [
             "cgroup accounting",
             "cgroup containment",
@@ -210,6 +216,11 @@ pub fn capabilities() -> Capabilities {
                 probe: super::sys::macos::probe_cleanup().map_err(|reason| format!("{reason:?}")),
             },
         ],
+        connected_runs: Capability {
+            kind: "connected runs",
+            compiled: true,
+            probe: Ok(()),
+        },
         deferred: [
             "cgroup accounting",
             "cgroup containment",
@@ -306,5 +317,17 @@ pub(super) fn record_usage(outcome: &mut super::RootOutcome, usage: super::sys::
             Completeness::Partial
         };
         measurement.reason = (!confirmed).then(|| "cleanup not confirmed".into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn connected_capability_matches_the_session_platforms() {
+        let connected = super::capabilities().connected_runs;
+        let supported = cfg!(any(target_os = "linux", target_os = "macos"));
+        assert_eq!(connected.kind, "connected runs");
+        assert_eq!(connected.compiled, supported);
+        assert_eq!(connected.probe.is_ok(), supported);
     }
 }

@@ -5,14 +5,9 @@ use std::io;
 use std::time::Duration;
 
 pub(in crate::supervisor) use macos::{
-    CleanupScan, Observer, cleanup_scan, exit_check, init_process, kill_group, observe,
-    prepare_limits, reap, spawn,
+    CleanupScan, Observer, cleanup_scan, exit_check, init_process, kill_group, kill_root, observe,
+    observe_status, prepare_limits, reap, spawn,
 };
-
-// Keep the complete native interface available. Its connected-run callers in
-// the shared core (session root stop) are Linux-only.
-#[allow(unused_imports)]
-pub(in crate::supervisor) use macos::{kill_root, observe_status};
 
 pub(super) fn register_observer(root: &mut Root, pid: i32, opts: &SpawnOptions) {
     if opts.force_polling_observer {
@@ -255,6 +250,35 @@ mod tests {
             assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
             assert!(start.elapsed() >= Duration::from_millis(7));
             assert!(!outcome.notes.contains(&Note::Transferred));
+        });
+    }
+
+    #[test]
+    fn session_exit_latch_and_zero_wait4_retries_preserve_ownership() {
+        test(async {
+            let mut root = Box::new(root(&["hold"], false));
+            let pid = root.pid() as i32;
+            let wall = Duration::from_secs(10);
+            root.session_start();
+            root.session_stop(None, 0).unwrap();
+            root.session_ready().await;
+            // NOTE_EXIT can precede waitid's status publication too. Keep the
+            // root pinned and retry without requiring another queue event.
+            while root.session_observe(wall).unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+            macos::inject_reap_zero(pid, 3);
+            let start = Instant::now();
+            let outcome = unix::session_finish(root, wall, CancelToken::new()).await;
+            assert!(matches!(
+                outcome.status,
+                Termination::Signalled { signal: 9, .. }
+            ));
+            assert_eq!(outcome.termination.cleanup, Cleanup::Confirmed);
+            assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+            assert!(start.elapsed() >= Duration::from_millis(7)); // 1 + 2 + 4 ms
+            assert!(!outcome.notes.contains(&Note::Transferred));
+            assert_eq!(outcome.stop_trigger, None);
         });
     }
 

@@ -67,7 +67,11 @@ existing two-second deadline. Timeout transfers the still-owned root; the
 cleanup service continues polling. No path restores numeric signalling
 authority after a consuming-wait attempt. killpg accepts ESRCH and EPERM (the
 latter also occurs for a zombie-only group); verification independently decides
-whether live members remain. Connected root coordination is still Linux-only.
+whether live members remain. Connected sessions share the same Unix root
+coordination: root-only kills preserve descendant writers until the final
+transport drain, then group kill, libproc verification and consuming wait follow
+the ordinary lifecycle. Kqueue exit latches and zero-return wait4 retries apply
+to both session roots.
 
 ### Group verification
 
@@ -149,7 +153,8 @@ selecting Homebrew g++-14 on macOS.
 Darwin-specific tests cover ESRCH registration after exit, receipt validation,
 registration-error fallback, forced polling, Tokio queue readiness, fresh
 no-event probes, finite zero-return reap retries, CLOEXEC startup, Send transfer
-types, capabilities, unsupported limits and connected refusal before admission.
+types, capabilities, unsupported limits and connected-root zero-return reap
+retries.
 Cleanup tests exercise a root without descendants, group-killed live members,
 a deliberately skipped per-run kill yielding Incomplete{1}, unreaped zombie
 members, membership rechecks, ESRCH, malformed sizes, injected list errors,
@@ -158,8 +163,23 @@ allocation retention, and progress on another transferred run during a delayed
 scan. Kill suppression lives only in the test root's lease; syscall faults live
 only in the affected test scanner, with no process-global switch. Fixtures that
 outlive a skipped kill self-release through file gates, including on panic.
-Direct/relay sessions and transcripts stay Linux-only and return Unsupported
-on macOS before admission or endpoint setup.
+Direct/relay sessions, transcripts, the idle watchdog, shared deadlines and
+cancellation run on Linux and macOS. Direct pipes use pipe plus FD_CLOEXEC under
+the creation mutex on Darwin, preserving blocking child ends. Relay endpoints
+and transcript files share the Unix implementation. Windows sessions still
+return Unsupported before admission or endpoint setup. The capability report
+and doctor advertise connected support on the two supported Unix platforms.
+
+The session acceptance suite runs on both platforms, including stalled and
+independent directions, EOF, peer completion, cancellation/drop, rollback,
+transcript gaps/failures, idleness and repeated leak checks. Darwin counts fds
+through /dev/fd and threads through PROC_PIDTASKINFO; descendant identity and
+zombie checks use PROC_PIDTBSDINFO with arg=1. Readiness files and coordinator
+exit notifications replace timing guesses for exit ordering and cancellation.
+The exact 4096-byte partial-forward case uses a debug-only forwarding barrier on
+both platforms because Darwin has no F_SETPIPE_SZ. Byte counts, queue bounds, timing assertions and
+policy deadlines are unchanged; no macOS session tolerance is added. The tiny
+exchange latency benchmark remains Linux-only.
 
 The compatibility target remains macOS 13+. Validation covers the macOS
 releases and architectures exercised in CI (currently arm64 macOS 26); older

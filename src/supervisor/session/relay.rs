@@ -61,6 +61,8 @@ pub(super) struct Relay {
     pub counters: Arc<Counters>,
     pub transcript: Option<super::transcript::Direction>,
     pub origin: Instant,
+    #[cfg(debug_assertions)]
+    pub pause_after: Option<(u64, CancelToken)>,
     source: Option<ParentReader>,
     destination: Option<Sender>,
     queue: VecDeque<Box<[u8]>>,
@@ -85,6 +87,8 @@ impl Relay {
             counters: Arc::new(Counters::default()),
             transcript: None,
             origin: Instant::now(),
+            #[cfg(debug_assertions)]
+            pause_after: None,
             source: Some(source),
             destination: Some(destination),
             queue: VecDeque::new(),
@@ -197,11 +201,12 @@ impl Relay {
             Read(ReadResult),
             Write(io::Result<usize>),
         }
+        let write_length = self.write_length();
         let progress = tokio::select! { biased;
             result = async {
                 let front = self.queue.front().expect("write enabled");
-                self.destination.as_mut().expect("live destination").write(&front[self.prefix..]).await
-            }, if !self.queue.is_empty() => Progress::Write(result),
+                self.destination.as_mut().expect("live destination").write(&front[self.prefix..self.prefix + write_length]).await
+            }, if write_length > 0 => Progress::Write(result),
             result = async { self.source.as_mut().expect("read enabled").read_chunk(&mut self.buffer[..length]).await }, if can_read => Progress::Read(result),
             else => { std::future::pending::<()>().await; unreachable!() }
         };
@@ -248,7 +253,22 @@ impl Relay {
             Progress::Write(result) => self.wrote(result),
         }
     }
+    fn write_length(&self) -> usize {
+        let Some(front) = self.queue.front() else {
+            return 0;
+        };
+        #[cfg(debug_assertions)]
+        if let Some((limit, _)) = &self.pause_after {
+            let allowed = limit.saturating_sub(self.stats.bytes_forwarded);
+            return ((front.len() - self.prefix) as u64).min(allowed) as usize;
+        }
+        front.len() - self.prefix
+    }
     fn try_forward(&mut self) {
+        let length = self.write_length();
+        if length == 0 {
+            return;
+        }
         let Some(front) = self.queue.front() else {
             return;
         };
@@ -256,7 +276,7 @@ impl Relay {
             .destination
             .as_ref()
             .expect("live destination")
-            .try_write(&front[self.prefix..]);
+            .try_write(&front[self.prefix..self.prefix + length]);
         self.wrote(result);
     }
     fn wrote(&mut self, result: io::Result<usize>) {
@@ -272,6 +292,12 @@ impl Relay {
                     Ordering::Release,
                 );
                 self.stats.bytes_forwarded += n as u64;
+                #[cfg(debug_assertions)]
+                if let Some((limit, entered)) = &self.pause_after {
+                    if self.stats.bytes_forwarded == *limit {
+                        entered.cancel();
+                    }
+                }
                 self.stats.bytes_queued_at_end -= n as u64;
                 self.prefix += n;
                 if self.prefix == self.queue.front().unwrap().len() {

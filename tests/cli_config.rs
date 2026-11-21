@@ -362,6 +362,12 @@ fn doctor_is_informative_on_every_platform_and_reports_capture_plans() {
     ] {
         assert!(output.contains(expected), "missing {expected}: {output}");
     }
+    let connected = if cfg!(any(target_os = "linux", target_os = "macos")) {
+        "connected runs: compiled=true; probe=available"
+    } else {
+        "connected runs: compiled=false; probe=unsupported on this platform"
+    };
+    assert!(output.contains(connected), "{output}");
     // Schema 1 only defines a machine document for config show.
     f.run(&["doctor", "--json"], 2);
     f.run(&["config", "check", "--json"], 2);
