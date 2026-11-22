@@ -23,9 +23,23 @@ use std::time::Duration;
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static PROBE: NativeProbe = NativeProbe;
 
-fn run_test(body: impl Future<Output = ()>) {
+/// Drive a real job engine on a thread with the main thread's 8 MiB stack, as
+/// the CLI does: debug-build poll frames of the job state machine exceed the
+/// 2 MiB default of test threads.
+fn run_test<F: Future<Output = ()>>(body: impl FnOnce() -> F + Send) {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     init_process().unwrap();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, move || drive(body()))
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+}
+
+fn drive(body: impl Future<Output = ()>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -147,7 +161,7 @@ async fn compile(pending: PendingBuild<'_>) -> ValidatedBuild {
 
 #[test]
 fn prepared_argv_build_and_build_free_run_execute_captured_bytes_after_edit() {
-    run_test(async {
+    run_test(|| async {
         for language in ["cpp", "python"] {
             let f = Fixture::new();
             let (name, original, edited) = if language == "cpp" {
@@ -191,7 +205,7 @@ fn prepared_argv_build_and_build_free_run_execute_captured_bytes_after_edit() {
 
 #[test]
 fn literal_original_path_in_shell_script_observes_edit_and_is_unchecked() {
-    run_test(async {
+    run_test(|| async {
         let f = Fixture::new();
         f.write(
             "problem/main.cpp",
@@ -244,7 +258,7 @@ fn managed_two_test_job_persists_reports_and_capture_files() {
     use cpforge::jobs::engine::{Engine, JobRequest, NoHooks, SupervisorExecutor};
     use cpforge::jobs::persist::JobPersistence;
     use cpforge::report::{JobVerdict, wire};
-    run_test(async {
+    run_test(|| async {
         let f = Fixture::new();
         f.write(
             "problem/main.cpp",
