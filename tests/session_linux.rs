@@ -154,6 +154,16 @@ fn program(steps: &[&str]) -> ProgramSpec {
 fn spec(s: &[&str], i: &[&str]) -> SessionSpec {
     SessionSpec::new(program(s), program(i), Duration::from_secs(4))
 }
+// Each invocation is a test job; production callers supply their owning job's
+// creator in the same field. Wait for that worker's credit before leak checks.
+async fn run_session(mut spec: SessionSpec) -> SessionOutcome {
+    let before = debug_counters().credits_in_use;
+    spec.creator = Creator::start().ok().map(std::sync::Arc::new);
+    let outcome = cpforge::supervisor::session::run_session(spec).await;
+    until(|| debug_counters().credits_in_use <= before).await;
+    outcome
+}
+
 fn root(record: &RunRecord) -> &RootOutcome {
     match record {
         RunRecord::Started(outcome) => outcome,
@@ -946,7 +956,7 @@ fn pair_worker_credit_failure_creates_no_workers_or_roots() {
         let held = global_bounds()
             .unwrap()
             .thread_credits
-            .try_reserve(31)
+            .try_reserve(30)
             .unwrap();
         let baseline = debug_counters();
         let mut spec = spec(&["hold"], &["hold"]);

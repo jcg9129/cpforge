@@ -12,6 +12,10 @@ use std::process::Stdio;
 
 mod capture;
 mod cleanup;
+mod creation;
+pub use creation::Creator;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use creation::create_root;
 mod events;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod forward;

@@ -18,6 +18,14 @@ pub enum SessionMode {
 }
 #[derive(Debug)]
 pub struct SessionSpec {
+    /// The owning job supplies its one creation thread before running a session.
+    pub creator: Option<std::sync::Arc<super::Creator>>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    #[doc(hidden)]
+    pub fail_pipe_at: Option<usize>,
     pub solution: ProgramSpec,
     pub interactor: ProgramSpec,
     pub wall_deadline: Duration,
@@ -67,6 +75,12 @@ impl SessionSpec {
             run.stdout = OutputSpec::Connected;
         }
         Self {
+            creator: None,
+            #[cfg(all(
+                feature = "storage-test-hooks",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            fail_pipe_at: None,
             solution,
             interactor,
             wall_deadline,
@@ -247,7 +261,9 @@ pub struct SessionOutcome {
 }
 
 /// Own both roots and all relay endpoints until drain, then use E's cleanup path.
-/// Dropping this future drops roots into the existing bounded cleanup service.
+/// The caller supplies the owning job's thread in `SessionSpec::creator`;
+/// without it, both runs are refused with `NotStarted::Worker`.
+/// Dropping this future publishes cancellation, including during creation.
 pub async fn run_session(spec: SessionSpec) -> SessionOutcome {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -306,6 +322,9 @@ fn unavailable_or_closed(mode: SessionMode) -> DirectionStatistics {
 const TRANSCRIPT_FINALIZE: Duration = Duration::from_secs(1);
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(in crate::supervisor) use unix::{SessionStart, prepare as prepare_session};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
     use super::*;
     use crate::supervisor::{
@@ -313,10 +332,29 @@ mod unix {
     };
     use std::time::Instant;
 
-    pub(super) async fn run(mut spec: SessionSpec) -> SessionOutcome {
+    pub(in crate::supervisor) enum SessionStart {
+        Ready(Box<PreparedSession>),
+        Failed(Box<SessionOutcome>),
+    }
+
+    pub(in crate::supervisor) struct PreparedSession {
+        spec: SessionSpec,
+        started: Instant,
+        owned: [Option<Box<roots::Root>>; 2],
+        records: [Option<RunRecord>; 2],
+        record: SessionRecord,
+        relays: [Option<relay::Relay>; 2],
+        transcript_writer: Option<transcript::Writer>,
+        counters: [std::sync::Arc<relay::Counters>; 2],
+    }
+
+    pub(in crate::supervisor) fn prepare(
+        mut spec: SessionSpec,
+        state: &crate::supervisor::creation::CreationState,
+    ) -> SessionStart {
         let started = Instant::now();
-        if spec.cancel.is_cancelled() {
-            return failed(&spec, NotStarted::CancelledBeforeStart);
+        if state.cancelled() || spec.cancel.is_cancelled() {
+            return SessionStart::Failed(Box::new(failed(&spec, NotStarted::CancelledBeforeStart)));
         }
         if (spec.mode == SessionMode::Direct && (spec.transcript.is_some() || spec.idle.is_some()))
             || (spec.mode == SessionMode::Relay
@@ -337,42 +375,56 @@ mod unix {
                     )
             })
         {
-            return failed(&spec, NotStarted::Unsupported);
+            return SessionStart::Failed(Box::new(failed(&spec, NotStarted::Unsupported)));
         }
         // Create every path before reserving admission or starting a worker.
         let transcript_files = match spec
             .transcript
             .as_ref()
-            .map(|path| sys::TranscriptFiles::create(path))
+            .map(|path| {
+                state.check()?;
+                sys::TranscriptFiles::create(path).map_err(NotStarted::Setup)
+            })
             .transpose()
         {
             Ok(files) => files,
-            Err(error) => return failed(&spec, NotStarted::Setup(error)),
+            Err(error) => return SessionStart::Failed(Box::new(failed(&spec, error))),
         };
+        if state.cancelled() {
+            return SessionStart::Failed(Box::new(failed(&spec, NotStarted::CancelledBeforeStart)));
+        }
         let mut admissions = match admit_pair() {
             Ok(pair) => pair,
-            Err(error) => return failed(&spec, error),
+            Err(error) => return SessionStart::Failed(Box::new(failed(&spec, error))),
         };
         let wiring = (|| {
             if spec.mode == SessionMode::Direct {
-                let (i_input, s_output) = sys::direct_pipe()?;
-                let (s_input, i_output) = sys::direct_pipe()?;
+                state.check()?;
+                let (i_input, s_output) = sys::direct_pipe().map_err(NotStarted::Setup)?;
+                state.check()?;
+                let (s_input, i_output) = sys::direct_pipe().map_err(NotStarted::Setup)?;
                 spec.solution.stdin = StdinSpec::Pipe(s_input);
                 spec.solution.stdout =
                     OutputSpec::Pipe(crate::supervisor::ChildEnd { inner: s_output });
                 spec.interactor.stdin = StdinSpec::Pipe(i_input);
                 spec.interactor.stdout =
                     OutputSpec::Pipe(crate::supervisor::ChildEnd { inner: i_output });
-                return Ok::<_, std::io::Error>([None, None]);
+                return Ok::<_, NotStarted>([None, None]);
             }
-            let s = stdout_pipe()?;
-            let i = stdout_pipe()?;
-            let (s_input, to_s) = sys::input_pipe()?;
-            let (i_input, to_i) = sys::input_pipe()?;
+            state.check()?;
+            let s = stdout_pipe().map_err(NotStarted::Setup)?;
+            state.check()?;
+            let i = stdout_pipe().map_err(NotStarted::Setup)?;
+            state.check()?;
+            let (s_input, to_s) = sys::input_pipe().map_err(NotStarted::Setup)?;
+            state.check()?;
+            let (i_input, to_i) = sys::input_pipe().map_err(NotStarted::Setup)?;
             #[cfg(all(target_os = "linux", debug_assertions))]
             if let Some(bytes) = spec.relay_pipe_bytes {
-                sys::resize_pipe(&to_s, bytes)?;
-                sys::resize_pipe(&to_i, bytes)?;
+                state.check()?;
+                sys::resize_pipe(&to_s, bytes).map_err(NotStarted::Setup)?;
+                state.check()?;
+                sys::resize_pipe(&to_i, bytes).map_err(NotStarted::Setup)?;
             }
             spec.solution.stdin = StdinSpec::Pipe(s_input);
             spec.solution.stdout = OutputSpec::Pipe(s.child);
@@ -397,7 +449,7 @@ mod unix {
         })();
         let mut relays = match wiring {
             Ok(wiring) => wiring,
-            Err(error) => return failed(&spec, NotStarted::Setup(error)),
+            Err(error) => return SessionStart::Failed(Box::new(failed(&spec, error))),
         };
         // Retention is independent of execution limits and forwarding.
         for run in [&mut spec.solution, &mut spec.interactor] {
@@ -412,6 +464,9 @@ mod unix {
                 events: false,
             });
         }
+        if state.cancelled() {
+            return SessionStart::Failed(Box::new(failed(&spec, NotStarted::CancelledBeforeStart)));
+        }
         let counts = [&spec.solution, &spec.interactor].map(|run| {
             usize::from(matches!(
                 run.stderr,
@@ -424,7 +479,7 @@ mod unix {
         if let Err(error) =
             crate::supervisor::cleanup::reserve_pair_workers(&mut admissions, counts)
         {
-            return failed(&spec, error);
+            return SessionStart::Failed(Box::new(failed(&spec, error)));
         }
         let (mut transcript_writer, directions) = match transcript_files {
             Some(files) => {
@@ -455,8 +510,18 @@ mod unix {
         let mut records: [Option<RunRecord>; 2] = [None, None];
         let mut owned = [None, None];
         // Both preparations (credits, pipes, workers) complete before creation.
-        let prepared_s = roots::prepare(spec.solution, s_admission, &spec.spawn_options[0]);
-        let prepared_i = roots::prepare(spec.interactor, i_admission, &spec.spawn_options[1]);
+        let prepared_s = roots::prepare(
+            take_program(&mut spec.solution),
+            s_admission,
+            &spec.spawn_options[0],
+            state,
+        );
+        let prepared_i = roots::prepare(
+            take_program(&mut spec.interactor),
+            i_admission,
+            &spec.spawn_options[1],
+            state,
+        );
         let preparations = [prepared_s, prepared_i];
         let preparation_failed = preparations.iter().any(Result::is_err);
         let mut pending = Vec::new();
@@ -464,8 +529,9 @@ mod unix {
             let role = [Role::S, Role::I][index];
             let result = match prepared {
                 Ok(prepared) if !preparation_failed => {
-                    roots::spawn_prepared(prepared, &spec.spawn_options[index])
+                    roots::spawn_prepared(prepared, &spec.spawn_options[index], state)
                 }
+                Ok(_) if state.cancelled() => Err(NotStarted::CancelledBeforeStart),
                 Ok(_) => Err(NotStarted::Setup(std::io::Error::other(
                     "peer preparation failed",
                 ))),
@@ -486,22 +552,105 @@ mod unix {
                 }
             }
         }
+        let cancelled = spec.cancel.is_cancelled() || records.iter().any(|run| {
+            matches!(run, Some(RunRecord::NotStarted(reason)) if reason.kind == StartFailureKind::CancelledBeforeStart)
+        });
+        if cancelled {
+            // CancelRequested is a prerequisite of NotStarted(CancelledBeforeStart).
+            pending.push(Fact::CancelRequested);
+        }
         record.wakeup(pending);
         emit_events(&mut transcript_writer, &record);
         let startup_failed = records.iter().any(Option::is_some);
         if startup_failed {
+            let teardown = if record.infrastructure() {
+                Teardown::Infrastructure
+            } else {
+                Teardown::Cancel
+            };
             record.wakeup(
                 [Role::S, Role::I]
                     .into_iter()
                     .filter(|r| owned[r.index()].is_some())
                     .map(|role| Fact::StopRequested {
                         role,
-                        cause: StopCause::Teardown(Teardown::Infrastructure),
+                        cause: StopCause::Teardown(teardown),
                     })
                     .collect(),
             );
         }
         emit_events(&mut transcript_writer, &record);
+        SessionStart::Ready(Box::new(PreparedSession {
+            spec,
+            started,
+            owned,
+            records,
+            record,
+            relays,
+            transcript_writer,
+            counters,
+        }))
+    }
+
+    // The program's owning fields move into Prepared; the remaining SessionSpec
+    // carries only coordinator policy after creation.
+    fn take_program(run: &mut ProgramSpec) -> ProgramSpec {
+        ProgramSpec {
+            program: std::mem::take(&mut run.program),
+            args: std::mem::take(&mut run.args),
+            cwd: std::mem::take(&mut run.cwd),
+            env: std::mem::take(&mut run.env),
+            stdin: std::mem::replace(&mut run.stdin, StdinSpec::Null),
+            stdout: std::mem::replace(&mut run.stdout, OutputSpec::Null),
+            stderr: std::mem::replace(&mut run.stderr, OutputSpec::Null),
+            limits: std::mem::take(&mut run.limits),
+            measure: std::mem::take(&mut run.measure),
+        }
+    }
+
+    pub(super) async fn run(mut spec: SessionSpec) -> SessionOutcome {
+        use crate::supervisor::creation::{self, CreationState, Request};
+        if spec.cancel.is_cancelled() {
+            return failed(&spec, NotStarted::CancelledBeforeStart);
+        }
+        let Some(creator) = spec.creator.take() else {
+            return failed(&spec, NotStarted::Worker);
+        };
+        let cancelled = failed(&spec, NotStarted::CancelledBeforeStart);
+        let worker_failed = failed(&spec, NotStarted::Worker);
+        let cancel = spec.cancel.clone();
+        let state = std::sync::Arc::new(CreationState::default());
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        if creator
+            .send(Request::Session {
+                spec: Box::new(spec),
+                state: state.clone(),
+                handle: tokio::runtime::Handle::current(),
+                reply,
+            })
+            .is_err()
+        {
+            return worker_failed;
+        }
+        let start = match creation::receive(state, &cancel, receiver).await {
+            Ok(start) => start,
+            Err(NotStarted::CancelledBeforeStart) => return cancelled,
+            Err(_) => return worker_failed,
+        };
+        let start = match start {
+            SessionStart::Ready(start) => start,
+            SessionStart::Failed(outcome) => return *outcome,
+        };
+        let PreparedSession {
+            spec,
+            started,
+            mut owned,
+            mut records,
+            mut record,
+            relays,
+            mut transcript_writer,
+            counters,
+        } = *start;
         let walls = [
             spec.wall_deadline,
             spec.wall_deadline.saturating_add(spec.interactor_allowance),

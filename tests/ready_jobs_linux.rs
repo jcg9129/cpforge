@@ -280,7 +280,7 @@ fn managed_two_test_job_persists_reports_and_capture_files() {
         let mut receiver = engine.events().subscribe().unwrap();
         let report = engine
             .run(
-                &mut SupervisorExecutor::default(),
+                &mut SupervisorExecutor::start().unwrap(),
                 &mut persistence,
                 &mut NoHooks,
             )

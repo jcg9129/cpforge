@@ -14,11 +14,13 @@ pub(in crate::supervisor) use proc::CleanupScan;
 
 pub(in crate::supervisor) type Observer = AsyncFd<OwnedFd>;
 
-pub(in crate::supervisor) fn spawn(
+pub(in crate::supervisor) fn prepare_spawn(
     spec: ProgramSpec,
     limits: &[InstalledLimit],
+    state: &crate::supervisor::creation::CreationState,
     fail_limit_install: bool,
-) -> Result<(i32, Instant), NotStarted> {
+) -> Result<PreparedSpawn, NotStarted> {
+    state.check()?;
     let stdin = match spec.stdin {
         StdinSpec::Null => Stdio::null(),
         StdinSpec::Pipe(end) => end.into(),
@@ -46,8 +48,19 @@ pub(in crate::supervisor) fn spawn(
         .stdin(stdin)
         .stdout(output(spec.stdout))
         .stderr(output(spec.stderr));
+    state.check()?;
     let phase = super::limits::install_on_spawn(&mut command, limits, fail_limit_install)
         .map_err(NotStarted::Setup)?;
+    Ok(PreparedSpawn { command, phase })
+}
+
+pub(in crate::supervisor) struct PreparedSpawn {
+    command: Command,
+    phase: Option<super::limits::PhasePipe>,
+}
+
+pub(in crate::supervisor) fn spawn(prepared: PreparedSpawn) -> Result<(i32, Instant), NotStarted> {
+    let PreparedSpawn { mut command, phase } = prepared;
     let result = command.spawn();
     let mut child = result.map_err(|error| {
         if let Some(errno) = phase.as_ref().and_then(|pipe| pipe.read_failure()) {

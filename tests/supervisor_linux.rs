@@ -1666,72 +1666,395 @@ fn capture_preserves_invalid_utf8_and_events_in_stream_order() {
 }
 
 #[cfg(feature = "storage-test-hooks")]
-#[test]
-fn force_exit_registry_primitive_does_not_wait_for_blocked_creation() {
-    run_test(async {
-        use cpforge::supervisor::{CreationGate, force_kill_active_for_test};
+struct CreationRelease(Arc<cpforge::supervisor::CreationGate>);
+#[cfg(feature = "storage-test-hooks")]
+impl CreationRelease {
+    fn new(after_commit: bool) -> Self {
+        use cpforge::supervisor::CreationGate;
+        Self(Arc::new(if after_commit {
+            CreationGate::after_commit()
+        } else {
+            CreationGate::before_commit()
+        }))
+    }
+}
+#[cfg(feature = "storage-test-hooks")]
+impl Drop for CreationRelease {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 
-        struct Release(Arc<CreationGate>);
-        impl Drop for Release {
-            fn drop(&mut self) {
-                self.0.release();
-            }
+#[cfg(feature = "storage-test-hooks")]
+async fn at_creation_gate<F: Future>(future: &mut std::pin::Pin<Box<F>>, gate: &CreationRelease) {
+    tokio::time::timeout(allowance(1000), async {
+        tokio::select! { biased;
+            _ = gate.0.entered() => {},
+            _ = future.as_mut() => panic!("creation finished before reaching its gate"),
         }
+    })
+    .await
+    .expect("creation did not reach its gate");
+}
 
-        let baseline = debug_counters();
-        let before = children();
-        let active = spawn(&["hold"], false);
-        let active_pid = active.pid();
-        let gate = Release(Arc::new(CreationGate::default()));
+#[cfg(feature = "storage-test-hooks")]
+async fn assert_creation_pending<F: Future>(future: &mut std::pin::Pin<Box<F>>) {
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())
+        })
+        .await,
+        "committed creation returned while its gate was closed"
+    );
+}
+
+#[cfg(feature = "storage-test-hooks")]
+async fn creation_baseline() -> (cpforge::supervisor::Counters, BTreeSet<u32>, usize, usize) {
+    success(&wait_root(spawn(&["exit:0"], false)).await, 0);
+    quiescent().await;
+    (debug_counters(), children(), fd_count(), thread_count())
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cancel_before_commit_returns_while_creation_is_blocked() {
+    run_test(async {
+        use cpforge::supervisor::{Creator, create_root};
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Creator::start().unwrap();
+        let gate = CreationRelease::new(false);
         let options = SpawnOptions {
             creation_gate: Some(gate.0.clone()),
             ..SpawnOptions::default()
         };
-        let runtime = tokio::runtime::Handle::current();
-        let program = spec(&["exit:0"]);
+        let cancel = CancelToken::new();
         let admission = admit().unwrap();
-        let (created, receive) = tokio::sync::oneshot::channel();
-        let creator = std::thread::spawn(move || {
-            let _entered = runtime.enter();
-            let result = spawn_root(program, admission, &options);
-            // A dropped receiver drops the owned root into cleanup.
-            let _ = created.send(result);
-        });
-        tokio::time::timeout(allowance(1000), gate.0.entered())
+        let ticket = admission.ticket();
+        let mut future = Box::pin(create_root(
+            &creator,
+            spec(&["hold"]),
+            admission,
+            &options,
+            &cancel,
+        ));
+        at_creation_gate(&mut future, &gate).await;
+        assert_eq!(children(), before);
+        cancel.cancel();
+        let result = tokio::time::timeout(allowance(1000), future.as_mut())
             .await
-            .expect("creation did not reach the pre-commit gate");
-        let expected: BTreeSet<_> = before.iter().copied().chain([active_pid]).collect();
-        assert_eq!(children(), expected, "blocked creation started a child");
+            .expect("pre-commit cancellation waited for creation");
+        assert!(matches!(result, Err(NotStarted::CancelledBeforeStart)));
+        drop(future);
+        assert_eq!(children(), before);
+        gate.0.release();
+        assert!(
+            tokio::time::timeout(allowance(1000), ticket.outcome())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(creator);
+        quiescent().await;
+        assert_eq!(children(), before);
+        settled(fds, threads).await;
+        assert_eq!(debug_counters(), baseline);
+    });
+}
 
-        let (finished, forced) = tokio::sync::oneshot::channel();
-        let forcing = std::thread::spawn(move || {
-            force_kill_active_for_test();
-            let _ = finished.send(());
-        });
-        tokio::time::timeout(allowance(1000), forced)
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cancel_after_commit_finishes_creation_then_kills() {
+    run_test(async {
+        use cpforge::supervisor::{Creator, create_root};
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Creator::start().unwrap();
+        let gate = CreationRelease::new(true);
+        let options = SpawnOptions {
+            creation_gate: Some(gate.0.clone()),
+            ..SpawnOptions::default()
+        };
+        let cancel = CancelToken::new();
+        let mut future = Box::pin(create_root(
+            &creator,
+            spec(&["hold"]),
+            admit().unwrap(),
+            &options,
+            &cancel,
+        ));
+        at_creation_gate(&mut future, &gate).await;
+        cancel.cancel();
+        assert_creation_pending(&mut future).await;
+        assert_eq!(children(), before);
+        gate.0.release();
+        let root = tokio::time::timeout(allowance(1000), future.as_mut())
             .await
-            .expect("force exit waited for creation")
+            .unwrap()
             .unwrap();
-        forcing.join().unwrap();
-        // The registry kills its registered run while the other creation is
-        // still blocked. The unregistered Unix creation has the §11 caveat.
-        let outcome = wait_root(active).await;
+        let pid = root.pid();
+        let ticket = root.ticket();
+        drop(future);
+        let outcome = tokio::time::timeout(
+            allowance(1000),
+            wait_root_controlled(
+                root,
+                RunControls {
+                    cancel,
+                    ..controls(Duration::from_secs(5))
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.stop_trigger, Some(StopTrigger::Cancelled));
         assert!(matches!(
             outcome.status,
             Termination::Signalled { signal: 9, .. }
         ));
-        assert!(process(active_pid).is_none());
-        assert_eq!(children(), before);
-        gate.0.release();
-        let root = tokio::time::timeout(allowance(1000), receive)
-            .await
-            .expect("released creation remained blocked")
-            .unwrap()
-            .unwrap();
-        creator.join().unwrap();
-        success(&wait_root(root).await, 0);
+        assert!(process(pid).is_none());
+        assert!(ticket.outcome().await.is_none());
+        drop(creator);
         quiescent().await;
         assert_eq!(children(), before);
+        settled(fds, threads).await;
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+async fn drop_creation(after_commit: bool) {
+    use cpforge::supervisor::{Creator, create_root};
+    let (baseline, before, fds, threads) = creation_baseline().await;
+    let creator = Creator::start().unwrap();
+    let gate = CreationRelease::new(after_commit);
+    let options = SpawnOptions {
+        creation_gate: Some(gate.0.clone()),
+        ..SpawnOptions::default()
+    };
+    let cancel = CancelToken::new();
+    let admission = admit().unwrap();
+    let ticket = admission.ticket();
+    let mut future = Box::pin(create_root(
+        &creator,
+        spec(&["hold"]),
+        admission,
+        &options,
+        &cancel,
+    ));
+    at_creation_gate(&mut future, &gate).await;
+    assert_eq!(children(), before);
+    drop(future);
+    gate.0.release();
+    let outcome = tokio::time::timeout(allowance(1000), ticket.outcome())
+        .await
+        .unwrap();
+    if after_commit {
+        let outcome = outcome.expect("committed child must transfer its record");
+        assert_eq!(outcome.stop_trigger, Some(StopTrigger::Cancelled));
+        assert!(matches!(
+            outcome.status,
+            Termination::Signalled { signal: 9, .. }
+        ));
+    } else {
+        assert!(outcome.is_none(), "uncommitted creation started a child");
+    }
+    drop(creator);
+    quiescent().await;
+    assert_eq!(
+        children(),
+        before,
+        "a child or zombie survived cancellation"
+    );
+    settled(fds, threads).await;
+    assert_eq!(debug_counters(), baseline);
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn drop_before_commit_never_creates_a_child() {
+    run_test(drop_creation(false));
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn drop_after_commit_kills_and_transfers_the_created_child() {
+    run_test(drop_creation(true));
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn force_exit_registry_primitive_does_not_wait_for_blocked_creation() {
+    run_test(async {
+        use cpforge::supervisor::{Creator, create_root, force_kill_active_for_test};
+        // Warm Tokio's test control worker before counting threads.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        for after_commit in [false, true] {
+            let (baseline, before, fds, threads) = creation_baseline().await;
+            let creator = Creator::start().unwrap();
+            let cancel = CancelToken::new();
+            let options = SpawnOptions::default();
+            let active = create_root(
+                &creator,
+                spec(&["hold"]),
+                admit().unwrap(),
+                &options,
+                &cancel,
+            )
+            .await
+            .unwrap();
+            let active_pid = active.pid();
+            let gate = CreationRelease::new(after_commit);
+            let options = SpawnOptions {
+                creation_gate: Some(gate.0.clone()),
+                ..SpawnOptions::default()
+            };
+            let mut future = Box::pin(create_root(
+                &creator,
+                spec(&["exit:0"]),
+                admit().unwrap(),
+                &options,
+                &cancel,
+            ));
+            at_creation_gate(&mut future, &gate).await;
+            let expected: BTreeSet<_> = before.iter().copied().chain([active_pid]).collect();
+            assert_eq!(children(), expected, "blocked creation started a child");
+            tokio::time::timeout(
+                allowance(1000),
+                tokio::task::spawn_blocking(force_kill_active_for_test),
+            )
+            .await
+            .expect("force exit waited for creation")
+            .unwrap();
+            let outcome = tokio::time::timeout(allowance(1000), wait_root(active))
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome.status,
+                Termination::Signalled { signal: 9, .. }
+            ));
+            assert!(process(active_pid).is_none());
+            assert_eq!(children(), before);
+            // This primitive cannot set process-wide EXITING; late creation
+            // completes normally, exercising the narrowed Unix guarantee.
+            gate.0.release();
+            let root = tokio::time::timeout(allowance(1000), future.as_mut())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(future);
+            success(&wait_root(root).await, 0);
+            drop(creator);
+            quiescent().await;
+            assert_eq!(children(), before);
+            settled(fds, threads).await;
+            assert_eq!(debug_counters(), baseline);
+        }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn session_cancel_and_drop_between_root_commits_release_both_roots() {
+    run_test(async {
+        use cpforge::supervisor::{
+            Creator,
+            session::{self, Fact, RunRecord, SessionSpec, StartFailureKind},
+        };
+        for after_commit in [false, true] {
+            for drop_future in [false, true] {
+                let (baseline, before, fds, threads) = creation_baseline().await;
+                let creator = Arc::new(Creator::start().unwrap());
+                let gate = CreationRelease::new(after_commit);
+                let mut session =
+                    SessionSpec::new(spec(&["hold"]), spec(&["hold"]), Duration::from_secs(5));
+                session.creator = Some(creator.clone());
+                session.spawn_options[1].creation_gate = Some(gate.0.clone());
+                let cancel = session.cancel.clone();
+                let mut future = Box::pin(session::run_session(session));
+                at_creation_gate(&mut future, &gate).await;
+                let peers: Vec<_> = children().difference(&before).copied().collect();
+                assert_eq!(peers.len(), 1, "only S exists while I is gated");
+                if drop_future {
+                    drop(future);
+                    gate.0.release();
+                } else {
+                    cancel.cancel();
+                    // S has committed, so its record must be retained while
+                    // the creation worker finishes the pair's request.
+                    assert_creation_pending(&mut future).await;
+                    gate.0.release();
+                    let outcome = tokio::time::timeout(allowance(1000), future.as_mut())
+                        .await
+                        .unwrap();
+                    drop(future);
+                    assert!(
+                        outcome
+                            .record
+                            .events()
+                            .iter()
+                            .any(|e| matches!(e.fact, Fact::CancelRequested))
+                    );
+                    assert!(
+                        !outcome
+                            .record
+                            .events()
+                            .iter()
+                            .any(|e| matches!(e.fact, Fact::Infrastructure { .. }))
+                    );
+                    for (index, run) in [outcome.solution, outcome.interactor]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        match run {
+                            RunRecord::NotStarted(reason) => {
+                                assert_eq!(index, 1);
+                                assert!(!after_commit);
+                                assert_eq!(reason.kind, StartFailureKind::CancelledBeforeStart);
+                            }
+                            RunRecord::Started(outcome) => {
+                                assert!(index == 0 || after_commit);
+                                assert_eq!(outcome.stop_trigger, Some(StopTrigger::Cancelled));
+                                assert!(matches!(
+                                    outcome.status,
+                                    Termination::Signalled { signal: 9, .. }
+                                ));
+                            }
+                        }
+                    }
+                }
+                drop(creator);
+                quiescent().await;
+                for pid in peers {
+                    assert!(process(pid).is_none());
+                }
+                assert_eq!(children(), before, "session leaked a child or zombie");
+                settled(fds, threads).await;
+                assert_eq!(debug_counters(), baseline);
+            }
+        }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn creation_credit_failure_refuses_the_job_before_admission() {
+    run_test(async {
+        use cpforge::jobs::engine::SupervisorExecutor;
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let held = global_bounds()
+            .unwrap()
+            .thread_credits
+            .try_reserve(31)
+            .unwrap();
+        let occupied = debug_counters();
+        assert!(matches!(
+            SupervisorExecutor::start(),
+            Err(NotStarted::Worker)
+        ));
+        assert_eq!(debug_counters(), occupied);
+        assert_eq!(children(), before);
+        drop(held);
+        quiescent().await;
+        settled(fds, threads).await;
         assert_eq!(debug_counters(), baseline);
     });
 }
@@ -1740,7 +2063,7 @@ fn force_exit_registry_primitive_does_not_wait_for_blocked_creation() {
 #[test]
 fn pipe_creation_failures_release_partial_setup_without_starting_children() {
     run_test(async {
-        use cpforge::supervisor::PipeTestGuard;
+        use cpforge::supervisor::{Creator, create_root};
 
         // Warm the runtime and service before checking the quiescent baseline.
         success(&wait_root(spawn(&["exit:0"], false)).await, 0);
@@ -1763,10 +2086,19 @@ fn pipe_creation_failures_release_partial_setup_without_starting_children() {
                 program.stderr = capture(Sink::File(err.0.clone()), 4096, Exceed::Kill, false);
                 let admission = admit().unwrap();
                 let ticket = admission.ticket();
-                let error = {
-                    let _failure = PipeTestGuard::fail_at(k);
-                    spawn_root(program, admission, &SpawnOptions::default()).unwrap_err()
+                let creator = Creator::start().unwrap();
+                let options = SpawnOptions {
+                    fail_pipe_at: Some(k),
+                    ..SpawnOptions::default()
                 };
+                let error = tokio::time::timeout(
+                    allowance(1000),
+                    create_root(&creator, program, admission, &options, &CancelToken::new()),
+                )
+                .await
+                .unwrap()
+                .unwrap_err();
+                drop(creator);
                 assert!(
                     matches!(error, NotStarted::Setup(ref e) if e.raw_os_error() == Some(libc::EMFILE)),
                     "stdin={forward_stdin}, pipe={k}: {error:?}"
@@ -1785,7 +2117,7 @@ fn pipe_creation_failures_release_partial_setup_without_starting_children() {
 #[test]
 fn session_pipe_creation_failures_release_cross_wiring_and_both_admissions() {
     run_test(async {
-        use cpforge::supervisor::PipeTestGuard;
+        use cpforge::supervisor::Creator;
         use cpforge::supervisor::session::{
             RunRecord, SessionMode, SessionSpec, StartFailureKind, run_session,
         };
@@ -1802,20 +2134,20 @@ fn session_pipe_creation_failures_release_cross_wiring_and_both_admissions() {
             for k in 1..=pipes {
                 let out = CapturePath::new();
                 let err = CapturePath::new();
+                let creator = Arc::new(Creator::start().unwrap());
                 let mut session =
                     SessionSpec::new(spec(&["hold"]), spec(&["hold"]), Duration::from_secs(5));
+                session.creator = Some(creator.clone());
+                session.fail_pipe_at = Some(k);
                 session.mode = mode;
                 session.solution.stderr =
                     capture(Sink::File(out.0.clone()), 4096, Exceed::Kill, false);
                 session.interactor.stderr =
                     capture(Sink::File(err.0.clone()), 4096, Exceed::Kill, false);
-                let outcome = {
-                    // Setup runs on this runtime thread, before the first await.
-                    let _failure = PipeTestGuard::fail_at(k);
-                    tokio::time::timeout(allowance(1000), run_session(session))
-                        .await
-                        .expect("partial session setup exceeded its bound")
-                };
+                let outcome = tokio::time::timeout(allowance(1000), run_session(session))
+                    .await
+                    .expect("partial session setup exceeded its bound");
+                drop(creator);
                 let mut emfile = false;
                 for run in [outcome.solution, outcome.interactor] {
                     let RunRecord::NotStarted(reason) = run else {

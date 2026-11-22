@@ -15,8 +15,8 @@ pub(super) use windows::{Reader, Writer, into_stdio, into_stdio_for_tests, pipe,
 mod linux;
 #[cfg(target_os = "linux")]
 pub(super) use linux::{
-    CleanupScan, Observer, cleanup_scan, exit_check, init_process, kill_group, kill_root, observe,
-    observe_status, observer, reap, spawn,
+    CleanupScan, Observer, PreparedSpawn, cleanup_scan, exit_check, init_process, kill_group,
+    kill_root, observe, observe_status, observer, prepare_spawn, reap, spawn,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

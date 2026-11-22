@@ -3,7 +3,8 @@
 //! The cfg-selected `os` module supplies this execution-contract checklist:
 //! - Creation/limits (§3.4–3.5, §4.1–4.2, §7.2):
 //!   `prepare_limits(&[LocalLimit]) -> Result<Vec<InstalledLimit>, NotStarted>`;
-//!   `spawn(ProgramSpec, &[InstalledLimit], bool) -> Result<(i32, Instant), NotStarted>`.
+//!   `prepare_spawn(ProgramSpec, &[InstalledLimit], &CreationState, bool)` prepares
+//!   stdin and the limit phase pipe; `spawn(PreparedSpawn)` performs creation.
 //!   Creation establishes the group before exec, classifies limit-phase failures,
 //!   and returns an owned, unreaped root with its creation-completion timestamp.
 //! - Observation (§3.1, §4.1–4.2): owned `Observer: Debug + Send`;
@@ -32,6 +33,7 @@
 
 use super::*;
 use crate::supervisor::capture::{self, Captures};
+use crate::supervisor::creation::CreationState;
 use std::sync::{Mutex, Weak};
 
 #[cfg(target_os = "linux")]
@@ -320,11 +322,27 @@ pub(super) fn spawn(
     admission: Admission,
     opts: &SpawnOptions,
 ) -> Result<Root, NotStarted> {
-    spawn_prepared(prepare(spec, admission, opts)?, opts)
+    spawn_with_state(spec, admission, opts, &CreationState::default())
+}
+
+pub(in crate::supervisor) fn spawn_with_state(
+    spec: ProgramSpec,
+    admission: Admission,
+    opts: &SpawnOptions,
+    state: &CreationState,
+) -> Result<Root, NotStarted> {
+    if matches!(spec.stdin, StdinSpec::Connected)
+        || matches!(spec.stdout, OutputSpec::Connected)
+        || matches!(spec.stderr, OutputSpec::Connected)
+    {
+        return Err(NotStarted::Unsupported);
+    }
+    spawn_prepared(prepare(spec, admission, opts, state)?, opts, state)
 }
 
 pub(in crate::supervisor) struct Prepared {
-    spec: ProgramSpec,
+    command: sys::PreparedSpawn,
+    measurements: Vec<Measurement>,
     captures: Captures,
     limits: Vec<InstalledLimit>,
     setup_start: Instant,
@@ -334,8 +352,10 @@ pub(in crate::supervisor) fn prepare(
     mut spec: ProgramSpec,
     admission: Admission,
     opts: &SpawnOptions,
+    state: &CreationState,
 ) -> Result<Prepared, NotStarted> {
     let setup_start = Instant::now();
+    state.check()?;
     let limits = sys::prepare_limits(&spec.limits)?;
     let captures = Captures::prepare(
         &mut spec.stdin,
@@ -343,9 +363,14 @@ pub(in crate::supervisor) fn prepare(
         &mut spec.stderr,
         opts,
         admission,
+        state,
     )?;
+    state.check()?;
+    let measurements = crate::supervisor::accounting::measurements(&spec.measure);
+    let command = sys::prepare_spawn(spec, &limits, state, opts.fail_limit_install)?;
     Ok(Prepared {
-        spec,
+        command,
+        measurements,
         captures,
         limits,
         setup_start,
@@ -355,14 +380,15 @@ pub(in crate::supervisor) fn prepare(
 pub(in crate::supervisor) fn spawn_prepared(
     prepared: Prepared,
     opts: &SpawnOptions,
+    state: &CreationState,
 ) -> Result<Root, NotStarted> {
     let Prepared {
-        spec,
+        command,
+        measurements,
         mut captures,
         limits,
         setup_start,
     } = prepared;
-    let measurements = crate::supervisor::accounting::measurements(&spec.measure);
     let mut notes = Vec::with_capacity(16);
     if limits.iter().any(|limit| {
         limit
@@ -372,31 +398,39 @@ pub(in crate::supervisor) fn spawn_prepared(
         notes.push(Note::LimitLowered);
     }
     let errors = Vec::with_capacity(16);
+    let capable = Arc::new(Mutex::new(true));
     #[cfg(feature = "storage-test-hooks")]
     if let Some(gate) = &opts.creation_gate {
-        gate.wait();
+        gate.wait_before_commit();
     }
-    let (pid, create_end) = sys::spawn(spec, &limits, opts.fail_limit_install)?;
-    let admission = captures.take_admission();
-    captures.start_readers();
-    let lease = Lease {
-        pid,
-        key: admission.key(),
-        capable: Arc::new(Mutex::new(true)),
-        #[cfg(all(test, target_os = "macos"))]
-        skip_kill: false,
-    };
+    if !state.commit() {
+        return Err(NotStarted::CancelledBeforeStart);
+    }
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = &opts.creation_gate {
+        gate.wait_after_commit();
+    }
+    let (pid, create_end) = sys::spawn(command)?;
     {
         let mut leases = SIGNAL_LEASES.lock().unwrap_or_else(|e| e.into_inner());
         leases.retain(|entry| entry.capable.strong_count() != 0);
         leases.push(SignalLease {
             pid,
-            capable: Arc::downgrade(&lease.capable),
+            capable: Arc::downgrade(&capable),
         });
         if crate::cancel_signals::force_exit_started() {
             let _ = sys::kill_group(pid);
         }
     }
+    let admission = captures.take_admission();
+    let lease = Lease {
+        pid,
+        key: admission.key(),
+        capable,
+        #[cfg(all(test, target_os = "macos"))]
+        skip_kill: false,
+    };
+    captures.start_readers();
     let mut root = Root {
         lease: Some(lease),
         admission: Some(admission),

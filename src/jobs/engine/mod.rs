@@ -11,17 +11,19 @@
 //! [`Engine::output_events`]. `run` takes an [`Executor`], a [`Persistence`]
 //! service and [`PhaseHooks`], and returns an `Arc<FinalizedReport>` whose
 //! data is reachable only through [`FinalizedReport::data`]. One creation
-//! thread drives the executor; cancellation may arrive from any thread. The
-//! verdict lock covers admission, check arbitration, per-test derivation, V
-//! and F, and is never held across execution, comparison I/O, callbacks or
-//! settlement. Cancellation records intent only; it never assigns a verdict.
+//! thread performs blocking run setup for the executor; cancellation may arrive
+//! from any thread. The verdict lock covers admission, check arbitration,
+//! per-test derivation, V and F, and is never held across execution, comparison
+//! I/O, callbacks or settlement. Cancellation records intent only; it never
+//! assigns a verdict.
 //!
 //! Event consumers drain [`EventReceiver::recv`] until it returns `None`, then
 //! await [`EventReceiver::terminal`]. Sequence numbers start at zero and may
 //! have gaps where events were dropped; closure, not `seq`, is the barrier.
 //!
 //! `JobPersistence` in `jobs::persist` supplies the disk-backed service;
-//! construct it from the ready job before passing that job to this engine.
+//! construct it and start `SupervisorExecutor` before passing the ready job to
+//! this engine.
 //! `SupervisorExecutor` supports Linux and macOS. An executor must keep the
 //! [`RunResources`] guard with the physical resources of the run (writers,
 //! the root) until they are released, and file sinks add every successful

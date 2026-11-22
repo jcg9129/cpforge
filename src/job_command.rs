@@ -606,6 +606,9 @@ pub fn run_with_config(
         } else {
             command.request(target.as_ref().expect("target job"))
         };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut executor = crate::jobs::engine::SupervisorExecutor::start()
+            .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
         let mut persistence = JobPersistence::for_execution(&ready)
             .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
         let after_test = if hook_reason.is_none() && !hook_plans.is_empty() {
@@ -646,7 +649,14 @@ pub fn run_with_config(
                     .start_events(receiver, kind, output)?,
             );
         }
-        execute(engine, &runtime, &mut persistence, hooks.as_mut())
+        execute(
+            engine,
+            &runtime,
+            &mut persistence,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            &mut executor,
+            hooks.as_mut(),
+        )
     })();
     match outcome {
         Ok(report) => {
@@ -1285,15 +1295,13 @@ fn execute(
     engine: Engine<'_>,
     runtime: &tokio::runtime::Runtime,
     persistence: &mut JobPersistence,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    executor: &mut crate::jobs::engine::SupervisorExecutor,
     hooks: &mut dyn PhaseHooks,
 ) -> Result<Arc<FinalizedReport>, Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        Ok(runtime.block_on(Box::pin(engine.run(
-            &mut crate::jobs::engine::SupervisorExecutor::default(),
-            persistence,
-            hooks,
-        ))))
+        Ok(runtime.block_on(Box::pin(engine.run(executor, persistence, hooks))))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -1512,11 +1520,22 @@ pub(crate) fn switch_hooks(selected: &Selected, config: LoadedConfig) -> ExitCod
                 needs_build: false,
                 keep_going: true,
             };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let mut executor = crate::jobs::engine::SupervisorExecutor::start()
+                .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
             let mut persistence = JobPersistence::for_execution(&ready)
                 .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
             let engine = Engine::with_cancellation(ready, request, cancel.clone())
                 .map_err(|e| Error::Config(e.to_string()))?;
-            execute(engine, &runtime, &mut persistence, &mut NoHooks).map(Some)
+            execute(
+                engine,
+                &runtime,
+                &mut persistence,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                &mut executor,
+                &mut NoHooks,
+            )
+            .map(Some)
         },
     ));
     let status = match outcome {

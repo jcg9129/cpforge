@@ -5,8 +5,8 @@ use std::io;
 use std::time::Duration;
 
 pub(in crate::supervisor) use macos::{
-    CleanupScan, Observer, cleanup_scan, exit_check, init_process, kill_group, kill_root, observe,
-    observe_status, prepare_limits, reap, spawn,
+    CleanupScan, Observer, PreparedSpawn, cleanup_scan, exit_check, init_process, kill_group,
+    kill_root, observe, observe_status, prepare_limits, prepare_spawn, reap, spawn,
 };
 
 pub(super) fn register_observer(root: &mut Root, pid: i32, opts: &SpawnOptions) {

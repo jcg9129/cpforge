@@ -107,6 +107,8 @@ impl Captures {
         stderr: &mut OutputSpec,
         opts: &SpawnOptions,
         mut admission: Admission,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        creation: &crate::supervisor::creation::CreationState,
     ) -> Result<Self, NotStarted> {
         let count = [&*stdout, &*stderr]
             .iter()
@@ -137,6 +139,7 @@ impl Captures {
         if matches!(stdin, StdinSpec::Forward) {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
+                creation.check()?;
                 captures.input = Some(crate::supervisor::forward::InputForward::prepare(
                     stdin,
                     credits.pop().expect("reserved stdin credit"),
@@ -157,6 +160,8 @@ impl Captures {
             let OutputSpec::Capture(policy) = std::mem::replace(output, OutputSpec::Null) else {
                 unreachable!()
             };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            creation.check()?;
             let pipe = supervisor::stdout_pipe().map_err(NotStarted::Setup)?;
             let state = Arc::new(Mutex::new(State {
                 record: StreamCapture {
@@ -184,6 +189,8 @@ impl Captures {
                 if test.fail_start {
                     return Err(NotStarted::Worker);
                 }
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                creation.check()?;
                 let writer = sys::CaptureFile::create(path).map_err(NotStarted::Setup)?;
                 let state = state.clone();
                 let space = space.clone();

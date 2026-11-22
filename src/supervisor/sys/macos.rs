@@ -30,12 +30,14 @@ pub(in crate::supervisor) fn prepare_limits(
     }
 }
 
-pub(in crate::supervisor) fn spawn(
+pub(in crate::supervisor) fn prepare_spawn(
     spec: ProgramSpec,
     limits: &[InstalledLimit],
+    state: &crate::supervisor::creation::CreationState,
     _fail_limit_install: bool,
-) -> Result<(i32, Instant), NotStarted> {
+) -> Result<PreparedSpawn, NotStarted> {
     debug_assert!(limits.is_empty());
+    state.check()?;
     let stdin = match spec.stdin {
         StdinSpec::Null => Stdio::null(),
         StdinSpec::Pipe(end) => end.into(),
@@ -63,6 +65,15 @@ pub(in crate::supervisor) fn spawn(
         .stdin(stdin)
         .stdout(output(spec.stdout))
         .stderr(output(spec.stderr));
+    Ok(PreparedSpawn { command })
+}
+
+pub(in crate::supervisor) struct PreparedSpawn {
+    command: Command,
+}
+
+pub(in crate::supervisor) fn spawn(prepared: PreparedSpawn) -> Result<(i32, Instant), NotStarted> {
+    let PreparedSpawn { mut command } = prepared;
     // Rust's Unix Command paths inherit the signal mask and ignored dispositions,
     // except SIGPIPE which std resets to SIG_DFL. init_process restores SIGCHLD.
     // This matches Linux: no blanket signal reset and no pre_exec hook. std sets

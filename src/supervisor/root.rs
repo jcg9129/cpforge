@@ -230,6 +230,11 @@ pub struct SpawnOptions {
         feature = "storage-test-hooks",
         any(target_os = "linux", target_os = "macos")
     ))]
+    pub fail_pipe_at: Option<usize>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
     pub creation_gate: Option<Arc<super::CreationGate>>,
     pub stdout_sink: SinkTestOptions,
     pub stderr_sink: SinkTestOptions,
@@ -255,7 +260,7 @@ pub struct SpawnOptions {
 #[derive(Debug)]
 pub struct Spawned {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    inner: Box<unix::Root>,
+    pub(in crate::supervisor) inner: Box<unix::Root>,
 }
 
 impl Spawned {

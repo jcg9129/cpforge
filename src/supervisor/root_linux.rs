@@ -6,8 +6,8 @@ use std::io;
 use std::time::Duration;
 
 pub(in crate::supervisor) use sys::{
-    CleanupScan, Observer, exit_check, init_process, kill_group, kill_root, observe,
-    observe_status, prepare_limits, reap, spawn,
+    CleanupScan, Observer, PreparedSpawn, exit_check, init_process, kill_group, kill_root, observe,
+    observe_status, prepare_limits, prepare_spawn, reap, spawn,
 };
 
 // Other OS verifiers need the root pid even without an observer. Linux keeps

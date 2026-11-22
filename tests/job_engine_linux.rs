@@ -80,7 +80,7 @@ fn cpp_two_tests_through_the_real_supervisor() {
         .unwrap();
         let report = engine
             .run(
-                &mut SupervisorExecutor::default(),
+                &mut SupervisorExecutor::start().unwrap(),
                 &mut MemoryPersistence::default(),
                 &mut NoHooks,
             )
@@ -144,7 +144,7 @@ fn cpp_cancel_after_the_running_program_announces_readiness() {
         .output_events(true);
         let cancel = engine.cancellation();
         let mut receiver = engine.events().subscribe().unwrap();
-        let mut executor = SupervisorExecutor::default();
+        let mut executor = SupervisorExecutor::start().unwrap();
         let mut persistence = MemoryPersistence::default();
         let mut hooks = NoHooks;
         let (report, terminal) = tokio::join!(
@@ -181,5 +181,72 @@ fn cpp_cancel_after_the_running_program_announces_readiness() {
             report.data().result.cancellation.unwrap().source,
             CancelSource::Api
         );
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cancel_during_executor_creation_keeps_the_runtime_responsive() {
+    run_test(async {
+        use cpforge::supervisor::CreationGate;
+        use std::sync::Arc;
+
+        struct Release(Arc<CreationGate>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+
+        fn allowance(milliseconds: u64) -> Duration {
+            Duration::from_millis(milliseconds * if cfg!(target_os = "macos") { 4 } else { 1 })
+        }
+        let fixture = Fixture::new();
+        let ready = ready(&fixture, "int main() { return 0; }\n");
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let cancel = engine.cancellation();
+        let gate = Release(Arc::new(CreationGate::before_commit()));
+        let mut executor = SupervisorExecutor::start().unwrap();
+        executor.options.creation_gate = Some(gate.0.clone());
+        let mut persistence = MemoryPersistence::default();
+        let mut hooks = NoHooks;
+        let mut future = Box::pin(engine.run(&mut executor, &mut persistence, &mut hooks));
+        tokio::time::timeout(allowance(1000), async {
+            tokio::select! {
+                _ = gate.0.entered() => {},
+                _ = future.as_mut() => panic!("job finished before gated creation"),
+            }
+        })
+        .await
+        .expect("creation blocked the runtime");
+        cancel.request_cancel(CancelSource::Api);
+        let report = tokio::time::timeout(allowance(1000), future.as_mut())
+            .await
+            .expect("job cancellation waited for uncommitted creation");
+        drop(future);
+        assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
+        assert_eq!(report.data().result.counts.primary.started, 0);
+        gate.0.release();
+        drop(executor);
+        tokio::time::timeout(allowance(1000), async {
+            loop {
+                let counters = supervisor::debug_counters();
+                if counters.slots_in_use == 0
+                    && counters.service_pending == 0
+                    && counters.credits_in_use == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("creation resources did not return after cancellation");
     });
 }

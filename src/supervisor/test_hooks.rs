@@ -6,16 +6,40 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Condvar, Mutex};
 
-/// Pause immediately before the OS creation call, without holding registry or
-/// platform creation locks. The test observes entry before cancelling/forcing.
+/// Pause before or after commit, immediately ahead of the OS creation call,
+/// without holding registry or platform creation locks.
 #[derive(Debug, Default)]
 pub struct CreationGate {
+    after_commit: bool,
     entered: super::CancelToken,
     open: Mutex<bool>,
     wake: Condvar,
 }
 
 impl CreationGate {
+    pub fn before_commit() -> Self {
+        Self::default()
+    }
+
+    pub fn after_commit() -> Self {
+        Self {
+            after_commit: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn wait_before_commit(&self) {
+        if !self.after_commit {
+            self.wait();
+        }
+    }
+
+    pub(super) fn wait_after_commit(&self) {
+        if self.after_commit {
+            self.wait();
+        }
+    }
+
     pub async fn entered(&self) {
         self.entered.cancelled().await;
     }
