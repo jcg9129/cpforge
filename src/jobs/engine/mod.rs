@@ -537,16 +537,15 @@ impl<'probe> Engine<'probe> {
             let mut execution = if let Some(reason) = skip {
                 skipped(planned, reason)
             } else {
-                context
-                    .execute(
-                        planned,
-                        &mut target,
-                        executor,
-                        persistence,
-                        report_refused,
-                        &mut admission_closed,
-                    )
-                    .await
+                Box::pin(context.execute(
+                    planned,
+                    &mut target,
+                    executor,
+                    persistence,
+                    report_refused,
+                    &mut admission_closed,
+                ))
+                .await
             };
             execution.result = report::validate_execution(
                 execution.result,
@@ -866,16 +865,15 @@ impl<'probe> Engine<'probe> {
                 } else if admission_closed {
                     skipped(planned, SkipReason::AdmissionClosed)
                 } else {
-                    context
-                        .execute(
-                            planned,
-                            &mut target,
-                            executor,
-                            persistence,
-                            report_refused,
-                            &mut admission_closed,
-                        )
-                        .await
+                    Box::pin(context.execute(
+                        planned,
+                        &mut target,
+                        executor,
+                        persistence,
+                        report_refused,
+                        &mut admission_closed,
+                    ))
+                    .await
                 };
                 execution.result = report::validate_execution(
                     execution.result,
