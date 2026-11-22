@@ -864,6 +864,10 @@ impl TestStore {
                 origin_location: location(&self.catalog_path(), String::new(), None, None),
             };
             for path in entry.paths() {
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(hook) = guard.test_hooks.test_input_before_open {
+                    hook(&self.directory.join(path));
+                }
                 let health = file_health(&self.directory.join(path));
                 if !matches!(health, Health::Ok { .. }) {
                     return Err(format!("{path}: {health}"));

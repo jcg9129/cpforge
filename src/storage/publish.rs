@@ -384,6 +384,9 @@ fn replace_attempts(
             }
         }
         let result = sys::replace(temp, target);
+        if result.is_err() {
+            super::crash::barrier("atomic_replace.failed");
+        }
         #[cfg(feature = "storage-test-hooks")]
         if let (Err(_), Some(hook)) = (&result, guard.test_hooks.replace_after_failure) {
             hook(target, attempt);

@@ -56,7 +56,9 @@ impl Workspace {
             .env("XDG_CONFIG_HOME", self.path(&["user"]))
             .env("APPDATA", self.path(&["user"]))
             .env_remove("CPF_STORAGE_CRASH_AT")
-            .env_remove("CPF_STORAGE_PAUSE_AT");
+            .env_remove("CPF_STORAGE_PAUSE_AT")
+            .env_remove("CPF_STORAGE_FACT_TEST_HOOK")
+            .env_remove("CPF_STORAGE_FACT_RECOVERY_REMOVE_FAILURE");
         command
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -169,6 +171,34 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[cfg(windows)]
+fn is_junction(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    fs::symlink_metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn directory_link(source: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(source, target).unwrap();
+    #[cfg(windows)]
+    {
+        // Junctions require neither developer mode nor symlink privileges.
+        let output = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(target)
+            .arg(source)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(is_junction(target));
+    }
+    assert_eq!(
+        fs::canonicalize(target).unwrap(),
+        fs::canonicalize(source).unwrap()
+    );
 }
 
 fn comparison(value: &serde_json::Value) -> &str {
@@ -561,16 +591,14 @@ fn status_json_delivery_failure_exits_eleven() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn status_does_not_traverse_untracked_directory_links() {
     let workspace = Workspace::new();
     workspace.write(&["user", "hidden", "note.txt"], "user file");
-    std::os::unix::fs::symlink(
-        workspace.path(&["user", "hidden"]),
-        workspace.path(&["problems", "A", "linked"]),
-    )
-    .unwrap();
+    directory_link(
+        &workspace.path(&["user", "hidden"]),
+        &workspace.path(&["problems", "A", "linked"]),
+    );
     let value = workspace.status();
     assert_eq!(
         value["problems"][0]["untracked"].as_array().unwrap().len(),
@@ -1328,6 +1356,429 @@ mod record_command_crashes {
     }
 
     #[test]
+    fn register_enable_disable_crashes_preserve_complete_catalogs_and_rerun() {
+        for operation in ["register", "enable", "disable"] {
+            for (point, committed) in [
+                ("edit_toml.validated", false),
+                ("edit_toml.published", true),
+            ] {
+                let workspace = Workspace::new();
+                workspace.write(&["problems", "A", "tests", "new.in"], "new input");
+                let path = workspace.path(&["problems", "A", "tests.toml"]);
+                let mut old = fs::read_to_string(&path).unwrap();
+                old.insert_str(0, "# preserve catalog comments\nfuture = 'keep'\n");
+                if operation == "enable" {
+                    old = old.replace("enabled = true", "enabled = false");
+                }
+                fs::write(&path, &old).unwrap();
+                let args = if operation == "register" {
+                    vec!["test", operation, "tests/new.in", "--no-answer"]
+                } else {
+                    vec!["test", operation, "one"]
+                };
+                // The ordinary command supplies the exact complete new bytes.
+                workspace.ok(&args);
+                let new = fs::read(&path).unwrap();
+                assert_ne!(new, old.as_bytes());
+                fs::write(&path, &old).unwrap();
+                abort_at(&workspace, &args, point);
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    if committed {
+                        new.as_slice()
+                    } else {
+                        old.as_bytes()
+                    }
+                );
+                assert_eq!(
+                    fs::read(workspace.path(&["problems", "A", "tests", "one.in"])).unwrap(),
+                    b"hello\n"
+                );
+                assert_eq!(
+                    fs::read(workspace.path(&["problems", "A", "tests", "new.in"])).unwrap(),
+                    b"new input"
+                );
+                if committed && operation == "register" {
+                    let output = workspace.run(&args);
+                    assert_eq!(output.status.code(), Some(8), "{output:?}");
+                } else {
+                    workspace.ok(&args);
+                }
+                assert_eq!(fs::read(&path).unwrap(), new);
+                assert!(fs::read_dir(path.parent().unwrap()).unwrap().all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".cpf-tmp-")
+                }));
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_command_admission_crashes_leave_reclaimable_orphans() {
+        use cpforge::storage::{
+            Record,
+            job::{ProbeOutcome, probe, read_job_record},
+            job_seq::read_job_sequence,
+        };
+        for (point, has_dir, has_record, has_lease) in [
+            ("admission.job_seq_replaced", false, false, false),
+            ("admission.directory_created", true, false, false),
+            ("admission.job_record_published", true, true, false),
+            ("admission.lease_created", true, true, true),
+            ("admission.lease_locked", true, true, true),
+            ("admission.lock_released", true, true, true),
+        ] {
+            let workspace = Workspace::new();
+            workspace.write(&["cpforge.toml"], "schema=1\ndefault_language='python'\n[languages.python.run]\nargv=['/bin/cat', '{source}']\n");
+            abort_at(&workspace, &["test", "--json"], point);
+            let Record::Valid(sequence) =
+                read_job_sequence(workspace.path(&[".cpforge", "job-seq"]))
+            else {
+                panic!("valid sequence")
+            };
+            assert_eq!(sequence.next, 1, "{point}");
+            let runs = workspace.path(&[".cpforge", "runs"]);
+            let jobs: Vec<_> = fs::read_dir(&runs)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(jobs.len(), usize::from(has_dir), "{point}");
+            for job in &jobs {
+                assert_eq!(job.join("job.toml").exists(), has_record, "{point}");
+                assert_eq!(job.join("lease").exists(), has_lease, "{point}");
+                if has_record {
+                    assert!(
+                        matches!(read_job_record(job.join("job.toml")), Record::Valid(record) if record.n == 0 && record.epoch.as_str() == sequence.epoch)
+                    );
+                }
+                assert!(
+                    matches!(probe(job), ProbeOutcome::Absent | ProbeOutcome::Acquired(_)),
+                    "{point}"
+                );
+            }
+            workspace.ok(&["clean", "--apply"]);
+            assert_eq!(fs::read_dir(&runs).unwrap().count(), 0, "{point}");
+            let mut command = workspace.command();
+            command.args(["test", "--json"]);
+            let output = run_bounded(command);
+            assert_eq!(output.status.code(), Some(4), "{point}: {output:?}");
+            let Record::Valid(sequence) =
+                read_job_sequence(workspace.path(&[".cpforge", "job-seq"]))
+            else {
+                panic!("valid sequence")
+            };
+            assert_eq!(sequence.next, 2);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    struct PausedCommand {
+        child: std::process::Child,
+        lines: mpsc::Receiver<String>,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    impl PausedCommand {
+        fn start(mut command: Command, point: &str) -> Self {
+            use std::io::{BufRead, BufReader};
+            command
+                .env("CPF_STORAGE_PAUSE_AT", point)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (send, lines) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if send.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let paused = Self { child, lines };
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let line = paused
+                    .lines
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("command did not reach barrier");
+                if line == format!("CPF-PAUSED {point}") {
+                    break;
+                }
+            }
+            paused
+        }
+        fn release(&mut self) {
+            use std::io::Write;
+            self.child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        }
+        fn finish(&mut self) -> Output {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let status = loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(Instant::now() < deadline, "paused command did not exit");
+                std::thread::yield_now();
+            };
+            let mut stderr = Vec::new();
+            self.child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_end(&mut stderr)
+                .unwrap();
+            let mut stdout = Vec::new();
+            while let Ok(line) = self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                stdout.extend_from_slice(line.as_bytes());
+                stdout.push(b'\n');
+            }
+            Output {
+                status,
+                stdout,
+                stderr,
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    impl Drop for PausedCommand {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn killed_test_preserves_old_or_new_fact_with_lease_held() {
+        use cpforge::storage::{
+            Record,
+            facts::read_fact,
+            job::{ProbeOutcome, probe, read_job_record},
+        };
+        use std::os::unix::process::ExitStatusExt;
+        for (point, replaced) in [("fact.after_cutoff", false), ("fact.after_replace", true)] {
+            let workspace = Workspace::new();
+            workspace.write(&["cpforge.toml"], "schema=1\ndefault_language='python'\n[languages.python.run]\nargv=['/bin/cat', '{source}']\n");
+            let mut command = workspace.command();
+            command.args(["test", "--json"]);
+            assert_eq!(run_bounded(command).status.code(), Some(4));
+            let path = workspace.path(&[".cpforge", "facts", "A", "solution.toml"]);
+            let old_bytes = fs::read(&path).unwrap();
+            let old = match read_fact(&path) {
+                Record::Valid(record) => record,
+                other => panic!("{other:?}"),
+            };
+            workspace.write(&["problems", "A", "main.py"], "new captured source\n");
+            let mut command = workspace.command();
+            command.args(["test", "--json"]);
+            let mut child = PausedCommand::start(command, point);
+            let jobs: Vec<_> = fs::read_dir(workspace.path(&[".cpforge", "runs"]))
+                .unwrap().map(|e| e.unwrap().path())
+                .filter(|dir| matches!(read_job_record(dir.join("job.toml")), Record::Valid(record) if record.n == old.n + 1))
+                .collect();
+            assert_eq!(jobs.len(), 1);
+            let job = &jobs[0];
+            assert!(matches!(probe(job), ProbeOutcome::Held));
+            let current = match read_fact(&path) {
+                Record::Valid(record) => record,
+                other => panic!("{other:?}"),
+            };
+            if replaced {
+                assert_eq!(current.n, old.n + 1);
+                assert_ne!(current.source, old.source);
+                assert_eq!(job.file_name().unwrap(), current.job.as_str());
+            } else {
+                assert_eq!(current, old);
+                assert_eq!(fs::read(&path).unwrap(), old_bytes);
+            }
+            let bytes = fs::read(&path).unwrap();
+            child.child.kill().unwrap();
+            let output = child.finish();
+            assert_eq!(
+                output.status.signal(),
+                Some(libc::SIGKILL),
+                "{point}: {output:?}"
+            );
+            assert!(matches!(probe(job), ProbeOutcome::Acquired(_)));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            workspace.ok(&["clean", "--apply"]);
+            assert!(!job.exists());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                comparison(&workspace.status()),
+                if replaced {
+                    "unchanged"
+                } else {
+                    "source_changed"
+                }
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fact_publication_warnings_reach_delivered_and_persisted_reports() {
+        for hook in [
+            "post_commit_sync_failure",
+            "cleanup_pending",
+            "recovery_remove_failure",
+        ] {
+            let workspace = Workspace::new();
+            workspace.write(&["cpforge.toml"], "schema=1\ndefault_language='python'\n[languages.python.run]\nargv=['/bin/cat', '{source}']\n");
+            let path = workspace.path(&[
+                ".cpforge",
+                "facts",
+                "A",
+                ".cpf-tmp-00000000000000000000000000000000",
+            ]);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut command = workspace.command();
+            command
+                .args(["test", "--json"])
+                .env("CPF_STORAGE_FACT_TEST_HOOK", hook);
+            if hook == "recovery_remove_failure" {
+                command.env("CPF_STORAGE_FACT_RECOVERY_REMOVE_FAILURE", &path);
+            }
+            // Admission's recovery has finished; the next lock acquisition is
+            // fact publication. Create its leftover only after this barrier.
+            let mut child = PausedCommand::start(command, "inputs.source_copied");
+            let leftover = if hook == "recovery_remove_failure" {
+                fs::write(&path, b"interrupted fact temp").unwrap();
+                Some(path)
+            } else {
+                None
+            };
+            child.release();
+            let output = child.finish();
+            assert_eq!(output.status.code(), Some(4), "{hook}: {output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["fact"]["outcome"]["kind"], "published", "{report}");
+            assert_eq!(report["result"]["verdict"], "unchecked", "{report}");
+            let warnings = report["warnings"].as_array().unwrap();
+            if hook == "recovery_remove_failure" {
+                let path = leftover.as_ref().unwrap();
+                assert!(path.exists());
+                let expected: serde_json::Value = serde_json::from_slice(
+                    &cpforge::report::wire::encode_native_summary(path.as_os_str(), 128),
+                )
+                .unwrap();
+                assert!(
+                    warnings.iter().any(|w| w["kind"] == "recovery"
+                        && w["paths"] == 1
+                        && w["first"] == expected),
+                    "{report}"
+                );
+            } else {
+                let token = if hook == "post_commit_sync_failure" {
+                    "durability_uncertain"
+                } else {
+                    "cleanup_pending"
+                };
+                let detail = if hook == "post_commit_sync_failure" {
+                    "uncertain"
+                } else {
+                    "cleanup_pending"
+                };
+                assert_eq!(report["fact"]["warnings"], serde_json::json!([token]));
+                assert!(
+                    warnings.iter().any(|w| w["kind"] == "durability"
+                        && w["artefact"] == "fact"
+                        && w["detail"] == detail),
+                    "{report}"
+                );
+            }
+            let fact = match cpforge::storage::facts::read_fact(workspace.path(&[
+                ".cpforge",
+                "facts",
+                "A",
+                "solution.toml",
+            ])) {
+                cpforge::storage::Record::Valid(fact) => fact,
+                other => panic!("{other:?}"),
+            };
+            let saved: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.path(&[".cpforge", "runs", fact.job.as_str(), "report.json"]))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["fact"], report["fact"]);
+            assert_eq!(saved["warnings"], report["warnings"]);
+            assert_eq!(comparison(&workspace.status()), "unchanged");
+            if let Some(path) = leftover {
+                workspace.ok(&["fsck"]);
+                assert!(!path.exists());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gitignore_sharing_retry_revalidates_concurrent_user_edits() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        for edited in [false, true] {
+            let workspace = Workspace::new();
+            let path = workspace.path(&[".gitignore"]);
+            fs::write(&path, b"user rules\n# >>> cpforge\nold\n# <<< cpforge\n").unwrap();
+            let blocker = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)
+                .unwrap();
+            let mut command = workspace.command();
+            command.args(["gitignore", "--write"]);
+            let mut child = PausedCommand::start(command, "atomic_replace.failed");
+            let editor = b"concurrent user edit\n# >>> cpforge\nold\n# <<< cpforge\n";
+            if edited {
+                fs::write(&path, editor).unwrap();
+            }
+            drop(blocker);
+            child.release();
+            let output = child.finish();
+            if edited {
+                assert_eq!(output.status.code(), Some(8), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("concurrent edit"),
+                    "{output:?}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), editor);
+            } else {
+                assert_eq!(output.status.code(), Some(0), "{output:?}");
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    [
+                        b"user rules\n# >>> cpforge\n".as_slice(),
+                        crate_patterns(),
+                        b"# <<< cpforge\n"
+                    ]
+                    .concat()
+                );
+            }
+            assert!(fs::read_dir(&workspace.0).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".cpf-tmp-")
+            }));
+        }
+    }
+
+    #[cfg(windows)]
+    fn crate_patterns() -> &'static [u8] {
+        b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n"
+    }
+
+    #[test]
     fn gitignore_crash_boundaries() {
         let patterns =
             b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n";
@@ -1553,4 +2004,233 @@ fn template_solution_recorded_as_created_is_not_a_provenance_overlap() {
     let output = workspace.ok(&["fsck"]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("provenance overlap"), "{stdout}");
+}
+
+#[test]
+fn status_human_shows_capture_check_next_to_unchanged_comparison() {
+    let workspace = Workspace::new();
+    workspace.fact();
+    let path = workspace.path(&[".cpforge", "facts", "A", "solution.toml"]);
+    let mut record = match cpforge::storage::facts::read_fact(&path) {
+        cpforge::storage::Record::Valid(record) => record,
+        other => panic!("expected fact: {other:?}"),
+    };
+    record.capture_check = CaptureCheck::Unchecked {
+        reasons: vec![cpforge::jobs::CaptureCheckReason::ShellStage],
+    };
+    fs::write(&path, record.encode()).unwrap();
+    let output = workspace.ok(&["status"]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.lines().any(|line| line == "  solution: unchanged (capture unchecked: shell stage); last completed run: unchecked at 2026-11-20T23:01:04.123Z"), "{text}");
+    record.capture_check = CaptureCheck::Checked;
+    fs::write(path, record.encode()).unwrap();
+    let output = workspace.ok(&["status"]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("  solution: unchanged; last completed run:"),
+        "{text}"
+    );
+    assert!(!text.contains("capture unchecked"), "{text}");
+}
+
+#[test]
+fn invalid_parent_provenance_is_ignored_and_reported_by_status_and_fsck() {
+    let workspace = Workspace::new();
+    workspace.write(&["problems", "outside"], "protected outside bytes");
+    workspace.write(&["problems", "A", "notes.txt"], "still untracked");
+    let path = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read_to_string(&path).unwrap();
+    // An invalid entry must not prevent a later valid entry from being used.
+    fs::write(&path, format!("{original}\n[files]\nuser=['../outside','notes.txt']\ncreated=[{{path='../outside',command='add'}}]\n")).unwrap();
+    let before = workspace.snapshot();
+    let status = workspace.status();
+    let diagnostics = status["problems"][0]["diagnostics"].as_array().unwrap();
+    for kind in ["user", "created"] {
+        assert!(
+            diagnostics.iter().any(|d| d
+                .as_str()
+                .unwrap()
+                .contains(&format!("invalid [files] {kind} entry"))),
+            "{status}"
+        );
+    }
+    assert!(
+        !status["problems"][0]["untracked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["utf8"] == "notes.txt")
+    );
+    for args in [vec!["fsck"], vec!["fsck", "--apply"]] {
+        let output = workspace.ok(&args);
+        let text = String::from_utf8(output.stdout).unwrap();
+        for kind in ["user", "created"] {
+            assert!(
+                text.contains(&format!("invalid [files] {kind} entry")),
+                "{text}"
+            );
+        }
+        assert_eq!(workspace.snapshot(), before);
+    }
+}
+
+#[test]
+fn adopt_refuses_case_and_normalization_aliases_on_native_filesystems() {
+    use std::io::Write;
+    let workspace = Workspace::new();
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let before = fs::read(&record).unwrap();
+    for (first, second) in [("notes.txt", "NOTES.TXT"), ("é.txt", "e\u{301}.txt")] {
+        let first_path = workspace.path(&["problems", "A", first]);
+        let second_path = workspace.path(&["problems", "A", second]);
+        fs::write(&first_path, b"original").unwrap();
+        let distinct = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&second_path)
+        {
+            Ok(mut file) => {
+                file.write_all(b"second spelling").unwrap();
+                true
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                false
+            }
+        };
+        eprintln!("{first:?}/{second:?}: distinct native entries = {distinct}");
+        // If the host aliases the pair, requesting the spelling absent from
+        // read_dir must still be refused. APFS may return decomposed names.
+        let names: Vec<_> = fs::read_dir(first_path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let requested = if !distinct && names.iter().any(|n| n == second) {
+            first
+        } else {
+            second
+        };
+        let output = workspace.run(&["adopt", requested]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("collision"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(&record).unwrap(), before);
+        assert_eq!(fs::read(first_path).unwrap(), b"original");
+    }
+    for (first, second) in [("Dir", "dir"), ("Édir", "E\u{301}dir")] {
+        let first_dir = workspace.path(&["problems", "A", first]);
+        let second_dir = workspace.path(&["problems", "A", second]);
+        fs::create_dir(&first_dir).unwrap();
+        match fs::create_dir(&second_dir) {
+            Ok(()) => {}
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists),
+        }
+        fs::write(first_dir.join("note.txt"), b"nested user bytes").unwrap();
+        fs::write(second_dir.join("note.txt"), b"nested user bytes").unwrap();
+        let names: Vec<_> = fs::read_dir(first_dir.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let requested = if names.iter().any(|n| n == second) {
+            first
+        } else {
+            second
+        };
+        let output = workspace.run(&["adopt", &format!("{requested}/note.txt")]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("collision"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(&record).unwrap(), before);
+        assert_eq!(
+            fs::read(first_dir.join("note.txt")).unwrap(),
+            b"nested user bytes"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn adopt_and_provenance_refuse_junction_components() {
+    let workspace = Workspace::new();
+    workspace.write(&["user", "protected", "note.txt"], "keep");
+    let link = workspace.path(&["problems", "A", "linked"]);
+    directory_link(&workspace.path(&["user", "protected"]), &link);
+    let record = workspace.path(&["problems", "A", "problem.toml"]);
+    let original = fs::read(&record).unwrap();
+    for path in ["linked", "linked/note.txt"] {
+        let output = workspace.run(&["adopt", path]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("link"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(&record).unwrap(), original);
+    }
+    let original = String::from_utf8(original).unwrap();
+    fs::write(
+        &record,
+        format!("{original}\n[files]\nuser=['linked/note.txt']\n"),
+    )
+    .unwrap();
+    let status = workspace.status();
+    assert!(
+        status["problems"][0]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("invalid [files] user entry")),
+        "{status}"
+    );
+    assert!(
+        status["problems"][0]["untracked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["utf8"] == "linked"),
+        "{status}"
+    );
+    assert_eq!(fs::read(link.join("note.txt")).unwrap(), b"keep");
+}
+
+#[cfg(windows)]
+#[test]
+fn fsck_never_traverses_junctions_in_reserved_trees_in_either_mode() {
+    for apply in [false, true] {
+        let workspace = Workspace::new();
+        workspace.fact();
+        let fact = fs::read(workspace.path(&[".cpforge", "facts", "A", "solution.toml"])).unwrap();
+        workspace.write(&["user", "protected", "solution.toml"], &fact);
+        workspace.write(&["user", "protected", "sentinel"], "protected");
+        let outside = workspace.path(&["user", "protected"]);
+        for tree in ["runs", "cache", "staging", "facts"] {
+            let parent = workspace.path(&[".cpforge", tree]);
+            fs::create_dir_all(&parent).unwrap();
+            directory_link(&outside, &parent.join("linked"));
+        }
+        let args = if apply {
+            vec!["fsck", "--apply"]
+        } else {
+            vec!["fsck"]
+        };
+        let output = workspace.ok(&args);
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains("sentinel"), "{text}");
+        assert!(!text.contains("fact for deleted problem"), "{text}");
+        assert_eq!(fs::read(outside.join("solution.toml")).unwrap(), fact);
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"protected");
+        for tree in ["runs", "facts"] {
+            assert!(is_junction(&workspace.path(&[".cpforge", tree, "linked"])));
+        }
+        // Sequence repair must refuse an unprobeable junction, too.
+        fs::remove_file(workspace.path(&[".cpforge", "job-seq"])).unwrap();
+        let output = workspace.run(&["fsck", "--apply"]);
+        assert_eq!(output.status.code(), Some(8), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("link cannot be probed"));
+        assert!(!workspace.path(&[".cpforge", "job-seq"]).exists());
+        assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"protected");
+    }
 }

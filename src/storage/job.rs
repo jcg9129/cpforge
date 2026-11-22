@@ -263,6 +263,7 @@ impl JobLease {
         budget: Option<Arc<JobBudget>>,
     ) -> io::Result<JobOwner> {
         let file = sys::open_lease(&job_dir.join("lease"), true)?;
+        super::crash::point("admission.lease_created");
         if !sys::try_lock(&file)? {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,

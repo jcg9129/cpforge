@@ -628,6 +628,59 @@ fn another_process_cannot_prune_between_directory_creation_and_lease_lock() {
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
+fn clean_apply_racing_paused_admission_reports_busy_and_keeps_directory() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("cpforge.toml"), "schema = 1\n").unwrap();
+    fs::create_dir(fixture.root.join("user")).unwrap();
+    let mut admission = Helper::start_mode(&fixture.root, None, "paused");
+    admission.release();
+    admission.message("CPF-ADMISSION-PAUSED");
+    let dirs = fixture.jobs();
+    assert_eq!(dirs.len(), 1);
+    assert!(!dirs[0].join("lease").exists());
+    let sequence = fs::read(fixture.sequence_path()).unwrap();
+    let mut clean = Command::new(env!("CARGO_BIN_EXE_cpf"))
+        .current_dir(&fixture.root)
+        .env("HOME", fixture.root.join("user"))
+        .env("USERPROFILE", fixture.root.join("user"))
+        .env("XDG_CONFIG_HOME", fixture.root.join("user"))
+        .env("APPDATA", fixture.root.join("user"))
+        .env_remove("CPF_STORAGE_CRASH_AT")
+        .env_remove("CPF_STORAGE_PAUSE_AT")
+        .args(["clean", "--apply"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while clean.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = clean.kill();
+            let _ = clean.wait();
+            panic!("clean did not finish while admission was paused");
+        }
+        std::thread::yield_now();
+    }
+    let output = clean.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(8), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("workspace is busy"));
+    assert!(output.stdout.is_empty());
+    assert_eq!(fixture.jobs(), dirs);
+    assert!(dirs[0].is_dir());
+    assert_eq!(fs::read_dir(&dirs[0]).unwrap().count(), 0);
+    assert_eq!(fs::read(fixture.sequence_path()).unwrap(), sequence);
+    admission.release();
+    let (_, id) = admission.admitted();
+    assert_eq!(dirs[0], fixture.runs().join(id.as_str()));
+    admission.release();
+    admission.finish();
+    assert_inactive(&dirs[0]);
+    fixture.prune();
+    assert!(fixture.jobs().is_empty());
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
 fn crash_after_unlock_leaves_renamed_candidates_for_following_admission_to_reclaim() {
     let fixture = Fixture::new();
     let old = fixture
@@ -659,6 +712,7 @@ fn admission_crashes_leave_only_allowed_states_and_following_admission_and_prune
         ("admission.job_seq_replaced", false, false, false),
         ("admission.directory_created", true, false, false),
         ("admission.job_record_published", true, true, false),
+        ("admission.lease_created", true, true, true),
         ("admission.lease_locked", true, true, true),
         ("admission.lock_released", true, true, true),
         // Also cover interruption while a metadata publication temp exists.

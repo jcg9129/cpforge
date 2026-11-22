@@ -243,7 +243,35 @@ pub fn publish_fact(
     fact: &FactRecord,
     cutoff: &mut dyn FnMut() -> bool,
 ) -> Publication {
-    publish_fact_with_options(root, problem, target, fact, cutoff, LockOptions::default())
+    #[cfg(not(feature = "storage-test-hooks"))]
+    {
+        publish_fact_with_options(root, problem, target, fact, cutoff, LockOptions::default())
+    }
+    #[cfg(feature = "storage-test-hooks")]
+    {
+        let options = LockOptions {
+            test_hooks: super::TestHooks {
+                post_commit_sync_failure: std::env::var("CPF_STORAGE_FACT_TEST_HOOK").as_deref()
+                    == Ok("post_commit_sync_failure"),
+                recovery_remove_failure: std::env::var_os(
+                    "CPF_STORAGE_FACT_RECOVERY_REMOVE_FAILURE",
+                )
+                .map(PathBuf::from),
+                ..super::TestHooks::default()
+            },
+            ..LockOptions::default()
+        };
+        let mut publication =
+            publish_fact_with_options(root, problem, target, fact, cutoff, options);
+        // Atomic replacement consumes its temp on success. Inject this result
+        // flag to exercise the report adapter's forward-compatible cleanup arm.
+        if publication.outcome == PublicationOutcome::Published
+            && std::env::var("CPF_STORAGE_FACT_TEST_HOOK").as_deref() == Ok("cleanup_pending")
+        {
+            publication.cleanup_pending = true;
+        }
+        publication
+    }
 }
 
 pub fn publish_fact_with_options(

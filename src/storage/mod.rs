@@ -220,6 +220,8 @@ pub struct TestHooks {
     /// Simulate an independent creator after temp preparation, before a file
     /// no-clobber publication attempts to commit.
     pub before_file_publish: Option<fn(&std::path::Path)>,
+    /// Replace a registration input after path inspection, before its open.
+    pub test_input_before_open: Option<fn(&std::path::Path)>,
     /// Simulate an editor after the baseline read, before parsing/checking it.
     pub edit_after_read: Option<fn(&std::path::Path)>,
     /// Simulate an editor after a failed native replacement attempt.

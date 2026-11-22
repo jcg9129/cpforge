@@ -22,6 +22,7 @@
 //! `job.record_published` (after no-clobber publication of job.toml);
 //! `admission.job_seq_replaced` (job-seq advanced, no job directory yet),
 //! `admission.directory_created`, `admission.job_record_published`,
+//! `admission.lease_created` (lease exists but has no lock),
 //! `admission.lease_locked`, `admission.lock_released` (before reclaim);
 //! `prune.before_rename`, `prune.after_rename` (each candidate's commit),
 //! `prune.before_reclaim` (step 3 entry, after releasing the workspace guard);
@@ -38,6 +39,7 @@
 //! `CPF-PAUSED <name>` to stdout and block until one byte arrives on stdin.
 //! Barriers: `inputs.source_copied` (after the first captured source copy),
 //! `fact.cutoff`, `fact.after_cutoff`, `fact.after_replace`;
+//! `atomic_replace.failed` (after a native failed replace, before retry);
 //! `command.between_iterations` (after the first command job execution);
 //! `config.load`, `selection.resolve` (planning, before admission);
 //! `supervisor.before_cancel_kill` (live root before orderly cancellation kill);
@@ -46,6 +48,12 @@
 //! `manifest.publish` (before publishing inputs/capture.json).
 //! Set `CPF_STORAGE_PANIC_AT=hook.execute` to panic in the executor of an
 //! admitted hook, before launching its child. Only test builds inspect it.
+//! Fact warning injection: `CPF_STORAGE_FACT_TEST_HOOK=post_commit_sync_failure`
+//! uses the guard's sync failure hook only during fact publication;
+//! `cleanup_pending` injects that publication result flag for the report adapter
+//! (successful atomic replacement itself leaves no temp). Set
+//! `CPF_STORAGE_FACT_RECOVERY_REMOVE_FAILURE=<path>` to fail recovery of that
+//! exact leftover only on the fact's lock acquisition.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
 

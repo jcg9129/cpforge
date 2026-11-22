@@ -622,6 +622,43 @@ mod execution {
     }
 
     #[test]
+    fn shared_workspace_cwd_is_never_measured_or_cleared() {
+        let w = Workspace::new("argv = ['sh', '-c', 'printf 123456789 > large']");
+        w.write("cpforge.toml", "schema = 1\n[retention]\ncwd_bytes = 4\n[commands.x]\nrepeat = 2\ncwd = { selector = 'workspace' }\nargv = ['sh', '-c', 'printf 123456789 > large']\n");
+        w.write("keep", "protected user bytes");
+        let output = w.run(&["cmd", "x", "--json"]);
+        status(&output, 0);
+        let report = document(&output);
+        assert_eq!(report["result"]["verdict"], "succeeded");
+        assert_eq!(report["aggregates"][0]["succeeded"], 2);
+        for execution in report["executions"].as_array().unwrap() {
+            assert!(execution["summary"]["cwd_overflow_bytes"].is_null());
+            assert!(
+                execution["summary"]["notes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|note| note != "cwd_overflow")
+            );
+            let run = execution["run"].as_str().unwrap();
+            let spec: Value =
+                serde_json::from_slice(&fs::read(w.job().join(run).join("spec.json")).unwrap())
+                    .unwrap();
+            assert_eq!(spec["cwd"]["utf8"], w.0.to_str().unwrap());
+        }
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| warning["detail"] != "cwd_overflow")
+        );
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("CwdOverflow"));
+        assert_eq!(fs::read(w.path("large")).unwrap(), b"123456789");
+        assert_eq!(fs::read(w.path("keep")).unwrap(), b"protected user bytes");
+    }
+
+    #[test]
     fn problem_identity_and_cwd_require_context_without_requiring_a_language() {
         for command in [
             "argv = ['sh', '-c', 'exit 0', '{problem_id}']",

@@ -725,3 +725,102 @@ mod add_transactions {
         );
     }
 }
+
+#[cfg(all(unix, feature = "storage-test-hooks"))]
+mod fifo_swap {
+    use super::*;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn replace_inspected_input(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(fs::metadata(path).unwrap().is_file());
+        fs::remove_file(path).unwrap();
+        let native = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a live, terminated pathname of a now-absent fixture entry.
+        assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), 0o600) }, 0);
+    }
+
+    #[test]
+    fn registration_refuses_fifo_swapped_after_inspection_without_blocking() {
+        let directory = Directory::new();
+        setup(&directory);
+        fs::write(directory.path("problems/A/tests/one.in"), b"regular input").unwrap();
+        let original = b"# unchanged catalog\nschema = 1\n";
+        fs::write(directory.path("problems/A/tests.toml"), original).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "fifo_swap::register_fifo_child",
+                "--nocapture",
+            ])
+            .env("CPF_FIFO_SWAP_ROOT", &directory.0)
+            .env_remove("CPF_STORAGE_CRASH_AT")
+            .env_remove("CPF_STORAGE_PAUSE_AT")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("registration blocked opening a swapped FIFO");
+            }
+            std::thread::yield_now();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(directory.path("problems/A/tests.toml")).unwrap(),
+            original
+        );
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            fs::symlink_metadata(directory.path("problems/A/tests/one.in"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        assert_no_temps(&directory.path("problems/A"));
+    }
+
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn register_fifo_child() {
+        use cpforge::storage::{LockOptions, TestHooks};
+        let Some(root) = std::env::var_os("CPF_FIFO_SWAP_ROOT") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let lock = WorkspaceLock::new(&root).unwrap();
+        let guard = lock
+            .acquire_with_options(
+                "swapped FIFO",
+                LockOptions {
+                    test_hooks: TestHooks {
+                        test_input_before_open: Some(replace_inspected_input),
+                        ..TestHooks::default()
+                    },
+                    ..LockOptions::default()
+                },
+            )
+            .unwrap();
+        let store = TestStore::new(root.join("problems").join("A"));
+        let request = RegisterRequest {
+            current_dir: root.join("problems").join("A"),
+            input: "tests/one.in".into(),
+            answer: None,
+            no_answer: true,
+            id: None,
+        };
+        let error = store.register(&guard, &request).unwrap_err();
+        assert!(
+            error.message.contains("not a regular file (FIFO)"),
+            "{error}"
+        );
+    }
+}
