@@ -1372,7 +1372,7 @@ mod record_command_crashes {
                 }
                 fs::write(&path, &old).unwrap();
                 let args = if operation == "register" {
-                    vec!["test", operation, "tests/new.in", "--no-answer"]
+                    vec!["test", operation, "problems/A/tests/new.in", "--no-answer"]
                 } else {
                     vec!["test", operation, "one"]
                 };

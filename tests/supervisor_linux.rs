@@ -2038,7 +2038,17 @@ fn real_enospc_reports_write_loss_without_blocking_or_conflating_budget_loss() {
             .expect("ENOSPC blocked the run past three seconds");
             success(&outcome, 0);
             assert_eq!(outcome.stop_trigger, None);
-            assert!(outcome.violations.is_empty());
+            // A breach of the smaller budget is reported alongside the write error.
+            let breach = Violation::OutputBudget {
+                stream: Stream::Stdout,
+                offset: budget + 1,
+            };
+            let expected = if budget < 1024 * 1024 {
+                vec![breach]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(outcome.violations, expected, "{outcome:?}");
             let record = outcome.stdout.unwrap();
             assert!(record.eof);
             assert_eq!(record.observed, 1024 * 1024);

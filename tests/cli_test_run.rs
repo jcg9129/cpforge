@@ -664,6 +664,24 @@ mod execution {
     }
 
     #[test]
+    fn one_output_budget_failure_among_two_runs_exits_one() {
+        let w = Workspace::new(Some("python"));
+        w.write(
+            "cpforge.toml",
+            "schema = 1\n[build]\ndeadline_s = 90\n[run]\nstdout_cap = 4\n",
+        );
+        w.cases(&[
+            ("short", "1\n", Some("1\n"), true),
+            ("long", "123456789\n", Some("123456789\n"), true),
+        ]);
+        let output = w.run(&["test", "--json"]);
+        status(&output, 1);
+        let report = document(&output);
+        assert_eq!(verdicts(&report), ["passed", "output_budget"]);
+        assert_eq!(report["result"]["verdict"], "output_budget");
+    }
+
+    #[test]
     fn compile_failure_marks_every_test_not_run_and_cannot_reuse_prior_artifacts() {
         let w = Workspace::new(Some("cpp"));
         w.cases(&[

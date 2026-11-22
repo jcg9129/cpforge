@@ -638,6 +638,20 @@ fn clean_apply_racing_paused_admission_reports_busy_and_keeps_directory() {
     let dirs = fixture.jobs();
     assert_eq!(dirs.len(), 1);
     assert!(!dirs[0].join("lease").exists());
+    // The paused publication's `.cpf-tmp-` file already sits in the job directory.
+    let entries = |dir: &Path| {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = entries(&dirs[0]);
+    assert!(
+        before.len() == 1 && before[0].to_string_lossy().starts_with(".cpf-tmp-"),
+        "{before:?}"
+    );
     let sequence = fs::read(fixture.sequence_path()).unwrap();
     let mut clean = Command::new(env!("CARGO_BIN_EXE_cpf"))
         .current_dir(&fixture.root)
@@ -667,7 +681,7 @@ fn clean_apply_racing_paused_admission_reports_busy_and_keeps_directory() {
     assert!(output.stdout.is_empty());
     assert_eq!(fixture.jobs(), dirs);
     assert!(dirs[0].is_dir());
-    assert_eq!(fs::read_dir(&dirs[0]).unwrap().count(), 0);
+    assert_eq!(entries(&dirs[0]), before);
     assert_eq!(fs::read(fixture.sequence_path()).unwrap(), sequence);
     admission.release();
     let (_, id) = admission.admitted();

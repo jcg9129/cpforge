@@ -372,24 +372,28 @@ mod execution {
     }
 
     #[test]
-    fn one_output_budget_failure_among_two_runs_exits_one() {
+    fn discard_breach_on_command_stdout_is_a_note_not_an_output_budget_failure() {
+        // Command stdout is never consumed and its budget policy is `Discard`
+        // (E §5.5), so a breach is evidence and a note, not a run failure.
         let w = Workspace::new(
             "repeat = 2\nkeep_going = true\nstdout_cap = 4\nshell = { interpreter = ['sh', '-c'], script = 'if test \"$1\" = 2; then printf 123456789; fi', args = ['{iteration}'] }",
         );
         let output = w.run(&["cmd", "x", "--json"]);
-        status(&output, 1);
+        status(&output, 0);
         let report = document(&output);
         assert_eq!(report["executions"].as_array().unwrap().len(), 2);
+        let breached = &report["executions"][1]["summary"];
+        assert_eq!(breached["class"]["kind"], "exited_zero");
         assert_eq!(
-            report["executions"][0]["summary"]["class"]["kind"],
-            "exited_zero"
-        );
-        assert_eq!(
-            report["executions"][1]["summary"]["class"]["kind"],
+            breached["execution"]["violations"][0]["kind"],
             "output_budget"
         );
-        assert_eq!(report["result"]["verdict"], "output_budget");
-        assert_eq!(report["aggregates"][0]["succeeded"], 1);
+        assert_eq!(breached["stdout"]["exceeded_at"], "5");
+        assert_eq!(breached["stdout"]["stored"], "4");
+        assert_eq!(breached["notes"][0], "truncated_stdout");
+        assert_eq!(w.stdout(&report, 1), b"1234");
+        assert_eq!(report["result"]["verdict"], "succeeded");
+        assert_eq!(report["aggregates"][0]["succeeded"], 2);
     }
 
     #[test]
