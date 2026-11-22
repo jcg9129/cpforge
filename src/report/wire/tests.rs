@@ -23,6 +23,11 @@ pub(super) fn small_summary() -> e::RunSummary {
         observation: e::SummaryEvidence::default(),
         class: r::RunClass::ExitedZero,
         record: Arc::new(e::ExecutionRecord::Started(Box::new(p::RootOutcome {
+            #[cfg(all(
+                feature = "storage-test-hooks",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            milestones: None,
             kill_attempts: 0,
             stdout: None,
             stderr: None,

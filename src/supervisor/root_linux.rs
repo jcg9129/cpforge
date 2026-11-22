@@ -23,7 +23,14 @@ pub(super) fn register_observer(root: &mut Root, pid: i32, opts: &SpawnOptions) 
     if opts.force_polling_observer {
         root.outcome().notes.push(Note::ObserverFallback);
     } else {
-        match sys::observer(pid) {
+        #[cfg(feature = "storage-test-hooks")]
+        let result = opts.pidfd_open_error.map_or_else(
+            || sys::observer(pid),
+            |errno| Err(io::Error::from_raw_os_error(errno)),
+        );
+        #[cfg(not(feature = "storage-test-hooks"))]
+        let result = sys::observer(pid);
+        match result {
             Ok(observer) => {
                 root.observer = Some(observer);
                 root.outcome().timing.observer = ObserverKind::Pidfd;

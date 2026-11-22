@@ -214,6 +214,11 @@ impl Executor for Fake {
 
 fn root(code: i64) -> supervisor::RootOutcome {
     supervisor::RootOutcome {
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        milestones: None,
         kill_attempts: 0,
         stdout: Some(supervisor::StreamCapture {
             observed: 4,

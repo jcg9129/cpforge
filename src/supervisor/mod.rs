@@ -43,7 +43,9 @@ pub use root::*;
     any(target_os = "linux", target_os = "macos")
 ))]
 #[doc(hidden)]
-pub use test_hooks::{CreationGate, PipeTestGuard, force_kill_active_for_test};
+pub use test_hooks::{
+    CreationGate, Milestone, Milestones, PipeTestGuard, force_kill_active_for_test,
+};
 
 /// Persistence shares the process-wide credit bound without changing signal
 /// setup. A stalled worker retains this credit until its syscall returns.

@@ -203,6 +203,17 @@ impl JobPersistence {
                         stopped.store(true, Ordering::Release);
                         break;
                     }
+                    #[cfg(all(
+                        feature = "storage-test-hooks",
+                        any(target_os = "linux", target_os = "macos")
+                    ))]
+                    let milestones = match &write.content {
+                        Content::Record { record, .. } => match record.as_ref() {
+                            ExecutionRecord::Started(root) => root.milestones.clone(),
+                            ExecutionRecord::NotStarted(_) => None,
+                        },
+                        _ => None,
+                    };
                     let bytes = match write.content {
                         Content::Bytes(bytes) => Ok(bytes),
                         Content::Report(report) => wire::encode_report_data(&report),
@@ -287,6 +298,13 @@ impl JobPersistence {
                             gate.completed.notify_one();
                         }
                         break;
+                    }
+                    #[cfg(all(
+                        feature = "storage-test-hooks",
+                        any(target_os = "linux", target_os = "macos")
+                    ))]
+                    if let (Some(stamps), Some(_)) = (milestones, &result.reference.path) {
+                        stamps.mark(crate::supervisor::Milestone::RecordPersisted);
                     }
                     if let Some(spec) = write.spec_result {
                         *spec.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -658,6 +676,10 @@ pub(crate) fn account(
         .expect("publication stays within its reserved file and temp bounds");
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/tiny_filesystem.rs"]
+mod tiny_filesystem;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +835,70 @@ mod tests {
         );
         drop(service);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_enospc_keeps_failed_references_and_worker_accepts_a_later_write() {
+        let Some(filesystem) = tiny_filesystem::TinyFs::one_mib() else {
+            return;
+        };
+        let path = filesystem.directory.join("job");
+        std::fs::create_dir(&path).unwrap();
+        let budget = Arc::new(JobBudget::new(1024));
+        let owner = JobLease::create_and_lock_with_budget(&path, budget.clone()).unwrap();
+        let weak_owner = Arc::downgrade(&owner);
+        let mut service = JobPersistence::start(owner, DEADLINE, None).unwrap();
+        filesystem.fill_completely();
+        service.enqueue_write(request(0, &budget));
+        runtime(async {
+            tokio::time::timeout(DEADLINE + Duration::from_millis(100), service.wait())
+                .await
+                .unwrap();
+        });
+        let failed = service.pending[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .reference
+            .clone();
+        assert_eq!(
+            failed.error,
+            Some(PersistError::Io {
+                os_error: Some(libc::ENOSPC)
+            })
+        );
+        assert!(failed.path.is_none());
+        assert!(!path.join("file0").exists());
+        assert!(!service.unavailable.load(Ordering::Acquire));
+        std::fs::remove_file(filesystem.directory.join("filler")).unwrap();
+        service.enqueue_write(request(1, &budget));
+        runtime(async {
+            tokio::time::timeout(DEADLINE + Duration::from_millis(100), service.wait())
+                .await
+                .unwrap();
+        });
+        let published = &service.pending[1].result.as_ref().unwrap().reference;
+        assert_eq!(published.error, None);
+        assert_eq!(
+            published.path.as_deref(),
+            Some(std::path::Path::new("file1"))
+        );
+        assert_eq!(std::fs::read(path.join("file1")).unwrap(), [42]);
+        assert_eq!(
+            service.pending[0].result.as_ref().unwrap().reference.error,
+            failed.error
+        );
+        assert_eq!(budget.usage().reserved, 0);
+        drop(service);
+        runtime(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while weak_owner.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("persistence worker did not exit");
+        });
     }
 }

@@ -51,3 +51,14 @@ pub(in crate::supervisor) struct RawRusage {
     pub user: std::time::Duration,
     pub system: std::time::Duration,
 }
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+mod creation_pause;
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(in crate::supervisor) use creation_pause::CreationPause;

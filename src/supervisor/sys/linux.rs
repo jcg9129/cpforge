@@ -59,8 +59,15 @@ pub(in crate::supervisor) struct PreparedSpawn {
     phase: Option<super::limits::PhasePipe>,
 }
 
-pub(in crate::supervisor) fn spawn(prepared: PreparedSpawn) -> Result<(i32, Instant), NotStarted> {
+pub(in crate::supervisor) fn spawn(
+    prepared: PreparedSpawn,
+    #[cfg(feature = "storage-test-hooks")] gate: Option<&crate::supervisor::CreationGate>,
+) -> Result<(i32, Instant), NotStarted> {
     let PreparedSpawn { mut command, phase } = prepared;
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = gate {
+        gate.install(&mut command);
+    }
     let result = command.spawn();
     let mut child = result.map_err(|error| {
         if let Some(errno) = phase.as_ref().and_then(|pipe| pipe.read_failure()) {

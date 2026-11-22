@@ -34,6 +34,8 @@
 use super::*;
 use crate::supervisor::capture::{self, Captures};
 use crate::supervisor::creation::CreationState;
+#[cfg(feature = "storage-test-hooks")]
+use crate::supervisor::{Milestone, Milestones};
 use std::sync::{Mutex, Weak};
 
 #[cfg(target_os = "linux")]
@@ -117,6 +119,8 @@ impl Lease {
 
 #[derive(Debug)]
 pub(in crate::supervisor) struct Root {
+    #[cfg(feature = "storage-test-hooks")]
+    milestones: Option<Arc<Milestones>>,
     lease: Option<Lease>,
     admission: Option<Admission>,
     observer: Option<sys::Observer>,
@@ -233,6 +237,13 @@ impl Drop for Root {
                 });
         } else {
             self.observer.take();
+            #[cfg(feature = "storage-test-hooks")]
+            if self.captures.is_none() {
+                self.admission.take();
+                if let Some(stamps) = &self.milestones {
+                    stamps.mark(Milestone::ResourcesReleased);
+                }
+            }
             if let (Some(captures), Some(outcome), Some(admission)) = (
                 self.captures.take(),
                 self.outcome.take(),
@@ -294,6 +305,10 @@ fn request_kill(lease: &Lease, outcome: &mut RootOutcome) {
 }
 
 fn record_exit(outcome: &mut RootOutcome, deadline: Option<Duration>) {
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(stamps) = &outcome.milestones {
+        stamps.observed_exit();
+    }
     let observed = *outcome
         .timing
         .exit_observed
@@ -410,7 +425,11 @@ pub(in crate::supervisor) fn spawn_prepared(
     if let Some(gate) = &opts.creation_gate {
         gate.wait_after_commit();
     }
-    let (pid, create_end) = sys::spawn(command)?;
+    let (pid, create_end) = sys::spawn(
+        command,
+        #[cfg(feature = "storage-test-hooks")]
+        opts.creation_gate.as_deref(),
+    )?;
     {
         let mut leases = SIGNAL_LEASES.lock().unwrap_or_else(|e| e.into_inner());
         leases.retain(|entry| entry.capable.strong_count() != 0);
@@ -432,6 +451,8 @@ pub(in crate::supervisor) fn spawn_prepared(
     };
     captures.start_readers();
     let mut root = Root {
+        #[cfg(feature = "storage-test-hooks")]
+        milestones: opts.milestones.clone(),
         lease: Some(lease),
         admission: Some(admission),
         observer: None,
@@ -441,6 +462,8 @@ pub(in crate::supervisor) fn spawn_prepared(
         cleanup_started: false,
         captures: Some(captures),
         outcome: Some(RootOutcome {
+            #[cfg(feature = "storage-test-hooks")]
+            milestones: opts.milestones.clone(),
             kill_attempts: 0,
             stdout: None,
             stderr: None,
@@ -479,6 +502,10 @@ pub(in crate::supervisor) fn spawn_prepared(
             root.scan = Some(scan);
         }
         Err(reason) => root.outcome().termination.cleanup = Cleanup::Unverified { reason },
+    }
+    #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+    if let Some(gate) = &opts.registration_gate {
+        gate.before_registration(pid);
     }
     sys::register_observer(&mut root, pid, opts);
     Ok(root)
@@ -608,6 +635,10 @@ async fn finish_observed(
         )
         .await;
     }
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(stamps) = &root.outcome().milestones {
+        stamps.mark(Milestone::CleanupResult);
+    }
     root.lease.as_mut().unwrap().revoke();
     let mut backoff = 1;
     loop {
@@ -657,6 +688,10 @@ async fn finish_capture(root: &mut Root, transferred: bool) -> RootOutcome {
             .await;
         if captures.resources_released() {
             root.captures.take();
+            #[cfg(feature = "storage-test-hooks")]
+            if let Some(stamps) = &root.outcome().milestones {
+                stamps.mark(Milestone::RecordFinalized);
+            }
             return root.outcome.take().expect("final outcome");
         }
         if captures.raw_mode() {

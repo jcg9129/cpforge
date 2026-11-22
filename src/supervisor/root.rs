@@ -208,6 +208,11 @@ pub enum SupervisorError {
 
 #[derive(Clone, Debug)]
 pub struct RootOutcome {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub milestones: Option<Arc<super::Milestones>>,
     pub kill_attempts: u32,
     pub stdout: Option<StreamCapture>,
     pub stderr: Option<StreamCapture>,
@@ -226,6 +231,15 @@ pub struct RootOutcome {
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub milestones: Option<Arc<super::Milestones>>,
+    #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+    pub pidfd_open_error: Option<i32>,
+    #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+    pub registration_gate: Option<Arc<super::CreationGate>>,
     #[cfg(all(
         feature = "storage-test-hooks",
         any(target_os = "linux", target_os = "macos")

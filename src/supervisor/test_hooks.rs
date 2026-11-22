@@ -4,13 +4,17 @@ use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
-/// Pause before or after commit, immediately ahead of the OS creation call,
-/// without holding registry or platform creation locks.
+/// Pause before/after commit, inside the OS creation call, or before observer
+/// registration. The pre_exec handshake holds no registry lock.
 #[derive(Debug, Default)]
 pub struct CreationGate {
     after_commit: bool,
+    during: Option<super::sys::CreationPause>,
+    pid: AtomicU32,
     entered: super::CancelToken,
     open: Mutex<bool>,
     wake: Condvar,
@@ -28,8 +32,35 @@ impl CreationGate {
         }
     }
 
+    /// Hold the child in pre_exec: Command::spawn is still waiting for exec.
+    pub fn during_creation() -> io::Result<Self> {
+        Ok(Self {
+            during: Some(super::sys::CreationPause::new()?),
+            ..Self::default()
+        })
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        match self.pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn before_registration(&self, pid: i32) {
+        self.pid.store(pid as u32, Ordering::Release);
+        self.wait();
+    }
+
+    pub(super) fn install(&self, command: &mut std::process::Command) {
+        if let Some(pause) = &self.during {
+            pause.install(command);
+        }
+    }
+
     pub(super) fn wait_before_commit(&self) {
-        if !self.after_commit {
+        if !self.after_commit && self.during.is_none() {
             self.wait();
         }
     }
@@ -41,11 +72,25 @@ impl CreationGate {
     }
 
     pub async fn entered(&self) {
-        self.entered.cancelled().await;
+        if self.entered.is_cancelled() {
+            return;
+        }
+        if let Some(pause) = &self.during {
+            pause.entered().await;
+            self.entered.cancel();
+        } else {
+            self.entered.cancelled().await;
+        }
     }
 
     pub fn release(&self) {
-        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        if !*open {
+            if let Some(pause) = &self.during {
+                pause.release();
+            }
+            *open = true;
+        }
         self.wake.notify_all();
     }
 
@@ -101,4 +146,40 @@ pub(super) fn before_pipe() -> io::Result<()> {
             Ok(())
         }
     })
+}
+
+/// In-memory acceptance timestamps; never serialized into records or reports.
+#[derive(Clone, Copy, Debug)]
+#[repr(usize)]
+pub enum Milestone {
+    CleanupResult,
+    DrainStart,
+    ReadersStopped,
+    CaptureFrozen,
+    RecordFinalized,
+    RecordPersisted,
+    ResourcesReleased,
+}
+
+#[derive(Debug, Default)]
+pub struct Milestones {
+    times: Mutex<[Option<Instant>; 7]>,
+    exit_observations: AtomicU32,
+}
+impl Milestones {
+    pub fn exit_observations(&self) -> u32 {
+        self.exit_observations.load(Ordering::Acquire)
+    }
+    pub(in crate::supervisor) fn observed_exit(&self) {
+        self.exit_observations.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn get(&self, milestone: Milestone) -> Option<Instant> {
+        self.times.lock().unwrap_or_else(|e| e.into_inner())[milestone as usize]
+    }
+    pub(crate) fn mark(&self, milestone: Milestone) {
+        self.mark_at(milestone, Instant::now());
+    }
+    pub(in crate::supervisor) fn mark_at(&self, milestone: Milestone, at: Instant) {
+        self.times.lock().unwrap_or_else(|e| e.into_inner())[milestone as usize].get_or_insert(at);
+    }
 }

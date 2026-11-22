@@ -19,6 +19,11 @@ const FINALISE: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 struct State {
     record: StreamCapture,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    reader_stopped_at: Option<Instant>,
     reader_stopped: bool,
     worker_done: bool,
     failed: bool,
@@ -54,6 +59,13 @@ struct ReaderGuard(Shared);
 impl Drop for ReaderGuard {
     fn drop(&mut self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        {
+            state.reader_stopped_at.get_or_insert_with(Instant::now);
+        }
         state.reader_stopped = true;
         if !state.record.eof
             && !state
@@ -177,6 +189,11 @@ impl Captures {
                         Sink::Discard | Sink::Memory | Sink::Forward(_) => None,
                     },
                 },
+                #[cfg(all(
+                    feature = "storage-test-hooks",
+                    any(target_os = "linux", target_os = "macos")
+                ))]
+                reader_stopped_at: None,
                 reader_stopped: false,
                 worker_done: matches!(policy.sink, Sink::Discard | Sink::Memory),
                 failed: false,
@@ -327,6 +344,18 @@ impl Captures {
         };
         let now = Instant::now();
         let cutoff = self.transfer_cutoff.unwrap_or(start + FINALISE);
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        let mut readers_stopped = Some(outcome.timing.create_end);
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        if let Some(stamps) = &outcome.milestones {
+            stamps.mark_at(supervisor::Milestone::DrainStart, start);
+        }
         let mut all = true;
         for capture in &mut self.streams {
             let forward = matches!(capture.policy.sink, Sink::Forward(_));
@@ -341,6 +370,13 @@ impl Captures {
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     all = false;
+                    #[cfg(all(
+                        feature = "storage-test-hooks",
+                        any(target_os = "linux", target_os = "macos")
+                    ))]
+                    {
+                        readers_stopped = None;
+                    }
                     continue;
                 }
             };
@@ -349,6 +385,13 @@ impl Captures {
                 // for a concurrently-ready read whose abort is still pending.
                 if let Some(reader) = &capture.reader {
                     reader.abort();
+                }
+                #[cfg(all(
+                    feature = "storage-test-hooks",
+                    any(target_os = "linux", target_os = "macos")
+                ))]
+                {
+                    state.reader_stopped_at.get_or_insert_with(Instant::now);
                 }
                 state.reader_stopped = true;
                 state.loss(CaptureLoss::NoEofBeforeDrainDeadline);
@@ -387,7 +430,28 @@ impl Captures {
                     }
                 }
             }
+            #[cfg(all(
+                feature = "storage-test-hooks",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            {
+                readers_stopped = readers_stopped
+                    .zip(state.reader_stopped_at)
+                    .map(|(a, b)| a.max(b));
+            }
             all &= state.frozen;
+        }
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        if let Some(stamps) = &outcome.milestones {
+            if let Some(at) = readers_stopped {
+                stamps.mark_at(supervisor::Milestone::ReadersStopped, at);
+            }
+            if all {
+                stamps.mark(supervisor::Milestone::CaptureFrozen);
+            }
         }
         all
     }

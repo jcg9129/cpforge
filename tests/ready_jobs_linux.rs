@@ -161,7 +161,7 @@ async fn compile(pending: PendingBuild<'_>) -> ValidatedBuild {
 
 #[test]
 fn prepared_argv_build_and_build_free_run_execute_captured_bytes_after_edit() {
-    run_test(|| async {
+    run_test(move || async move {
         for language in ["cpp", "python"] {
             let f = Fixture::new();
             let (name, original, edited) = if language == "cpp" {
@@ -205,7 +205,7 @@ fn prepared_argv_build_and_build_free_run_execute_captured_bytes_after_edit() {
 
 #[test]
 fn literal_original_path_in_shell_script_observes_edit_and_is_unchecked() {
-    run_test(|| async {
+    run_test(move || async move {
         let f = Fixture::new();
         f.write(
             "problem/main.cpp",
@@ -258,7 +258,7 @@ fn managed_two_test_job_persists_reports_and_capture_files() {
     use cpforge::jobs::engine::{Engine, JobRequest, NoHooks, SupervisorExecutor};
     use cpforge::jobs::persist::JobPersistence;
     use cpforge::report::{JobVerdict, wire};
-    run_test(|| async {
+    run_test(move || async move {
         let f = Fixture::new();
         f.write(
             "problem/main.cpp",

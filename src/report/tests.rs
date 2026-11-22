@@ -2713,6 +2713,11 @@ fn root_outcome() -> supervisor::RootOutcome {
         sink: None,
     };
     supervisor::RootOutcome {
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        milestones: None,
         kill_attempts: 0,
         stdout: Some(capture.clone()),
         stderr: Some(capture),

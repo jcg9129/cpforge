@@ -135,6 +135,8 @@ pub enum Point {
     BeforeRecipeCompletion(u32),
     BeforeCheck(u32),
     AfterCheckAdmission(u32),
+    #[cfg(feature = "storage-test-hooks")]
+    BeforeRecordEnqueue(u32),
     BeforeClass(u32),
     BeforeSummary(u32),
     BeforeTestVerdict(u32),
@@ -1374,6 +1376,8 @@ impl Context<'_> {
             None
         };
         let writable = writable && metadata.is_some();
+        #[cfg(feature = "storage-test-hooks")]
+        self.point(Point::BeforeRecordEnqueue(plan.index));
         // Enqueue finalized evidence before deriving anything or comparing.
         let enqueued = catch_unwind(AssertUnwindSafe(|| {
             persistence.enqueue(PendingArtifacts {

@@ -19,6 +19,9 @@ impl Fixture {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("ready-job-{}", BuildId::generate().unwrap()));
+        Self::at(path)
+    }
+    pub fn at(path: PathBuf) -> Self {
         fs::create_dir_all(&path).unwrap();
         let f = Self(cpforge::storage::paths::plain(
             &fs::canonicalize(path).unwrap(),

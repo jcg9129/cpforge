@@ -2173,179 +2173,8 @@ fn session_pipe_creation_failures_release_cross_wiring_and_both_admissions() {
 // below (which also runs on macOS). No mount privilege is required when
 // CI supplies CPF_TEST_TINY_FS or a small /dev/shm.
 #[cfg(target_os = "linux")]
-mod tiny_filesystem {
-    use super::*;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-    use std::process::Stdio;
-
-    const MAX_BYTES: u64 = 64 * 1024 * 1024;
-
-    #[derive(Debug)]
-    pub(super) struct TinyFs {
-        pub directory: PathBuf,
-        mounted: bool,
-        sudo: bool,
-    }
-
-    fn bounded_command(command: &mut Command) -> std::io::Result<bool> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let failure = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break None,
-                // Polls the helper's exit; nothing else is coordinated here.
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Ok(None) => {
-                    break Some(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "mount helper timed out",
-                    ));
-                }
-                Err(error) => break Some(error),
-            }
-        };
-        if failure.is_some() {
-            let _ = child.kill();
-        }
-        // Every path reaps here; after a successful try_wait std returns the
-        // cached status.
-        let status = child.wait();
-        match failure {
-            Some(error) => Err(error),
-            None => status.map(|status| status.success()),
-        }
-    }
-
-    fn small_tmpfs(path: &Path) -> bool {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-            return false;
-        };
-        let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
-        // SAFETY: path is NUL-terminated; stat has space for the full reply.
-        if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-            return false;
-        }
-        // SAFETY: statfs initialized the complete structure on success.
-        let stat = unsafe { stat.assume_init() };
-        stat.f_type == libc::TMPFS_MAGIC
-            && stat.f_bsize > 0
-            && stat.f_blocks.saturating_mul(stat.f_bsize as u64) <= MAX_BYTES
-            && stat.f_bavail.saturating_mul(stat.f_bsize as u64) >= 128 * 1024
-    }
-
-    impl TinyFs {
-        pub fn acquire() -> Option<Self> {
-            let name = format!("cpf-enospc-{}", std::process::id());
-            let candidates = std::env::var_os("CPF_TEST_TINY_FS")
-                .map(PathBuf::from)
-                .into_iter()
-                .chain([PathBuf::from("/dev/shm")]);
-            for base in candidates {
-                if small_tmpfs(&base) {
-                    let directory = base.join(&name);
-                    if fs::create_dir(&directory).is_ok() {
-                        return Some(Self {
-                            directory,
-                            mounted: false,
-                            sudo: false,
-                        });
-                    }
-                }
-            }
-            let directory = std::env::current_dir().unwrap().join("target").join(name);
-            fs::create_dir_all(directory.parent().unwrap()).unwrap();
-            fs::create_dir(&directory).unwrap();
-            // SAFETY: these identity queries have no pointer arguments or side effects.
-            let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-            let sudo = uid != 0;
-            let mut command = if sudo {
-                let mut command = Command::new("sudo");
-                command.args(["-n", "mount"]);
-                command
-            } else {
-                Command::new("mount")
-            };
-            command
-                .args(["-t", "tmpfs", "-o"])
-                .arg(format!("size=1m,mode=0700,uid={uid},gid={gid}"))
-                .arg("tmpfs")
-                .arg(&directory);
-            let result = bounded_command(&mut command);
-            if matches!(result, Ok(true)) {
-                Some(Self {
-                    directory,
-                    mounted: true,
-                    sudo,
-                })
-            } else {
-                fs::remove_dir(&directory).unwrap();
-                eprintln!(
-                    "SKIP real ENOSPC: no writable tmpfs <=64 MiB in CPF_TEST_TINY_FS or /dev/shm; root/sudo -n tmpfs mount unavailable: {result:?}"
-                );
-                None
-            }
-        }
-
-        pub fn fill(&self) {
-            let path = self.directory.join("filler");
-            let mut file = fs::File::create(path).unwrap();
-            let bytes = [0_u8; 64 * 1024];
-            let mut written = 0;
-            loop {
-                match file.write(&bytes) {
-                    Ok(0) => panic!("tmpfs filler made no progress"),
-                    Ok(n) => {
-                        written += n as u64;
-                        assert!(written <= MAX_BYTES, "tmpfs grew beyond the test's bound");
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) => {
-                        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
-                        // Leave enough room for file setup and a stored prefix;
-                        // even the smaller capture budget exceeds this headroom.
-                        assert!(written >= 64 * 1024);
-                        file.set_len(written - 64 * 1024).unwrap();
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    impl Drop for TinyFs {
-        fn drop(&mut self) {
-            for name in ["stdout", "filler"] {
-                let _ = fs::remove_file(self.directory.join(name));
-            }
-            if self.mounted {
-                let mut command = if self.sudo {
-                    let mut command = Command::new("sudo");
-                    command.args(["-n", "umount"]);
-                    command
-                } else {
-                    Command::new("umount")
-                };
-                let result = bounded_command(command.arg(&self.directory));
-                if !matches!(result, Ok(true)) {
-                    // Never panic while unwinding from a failed assertion.
-                    eprintln!("tmpfs cleanup failed: {result:?}");
-                    assert!(std::thread::panicking(), "tmpfs cleanup failed");
-                    return;
-                }
-            }
-            let removed = fs::remove_dir(&self.directory);
-            assert!(removed.is_ok() || std::thread::panicking(), "{removed:?}");
-        }
-    }
-}
+#[path = "support/tiny_filesystem.rs"]
+mod tiny_filesystem;
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -3514,6 +3343,204 @@ fn macos_rejects_both_limit_kinds_before_workers_files_or_spawn() {
             assert!(!path.0.exists());
             assert_eq!(debug_counters(), baseline);
             assert_eq!(fd_count(), fds);
+        }
+    });
+}
+
+#[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+#[test]
+fn exit_during_pidfd_registration_is_observed_and_reaped_once() {
+    run_test(async {
+        use cpforge::supervisor::{Creator, create_root};
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Creator::start().unwrap();
+        let gate = CreationRelease::new(false);
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
+        let options = SpawnOptions {
+            milestones: Some(stamps.clone()),
+            registration_gate: Some(gate.0.clone()),
+            ..SpawnOptions::default()
+        };
+        let cancel = CancelToken::new();
+        let mut future = Box::pin(create_root(
+            &creator,
+            spec(&["exit:23"]),
+            admit().unwrap(),
+            &options,
+            &cancel,
+        ));
+        at_creation_gate(&mut future, &gate).await;
+        let pid = gate.0.pid().unwrap();
+        until(|| process(pid).is_some_and(|p| p.state == 'Z')).await;
+        assert_creation_pending(&mut future).await;
+        gate.0.release();
+        let root = tokio::time::timeout(allowance(1000), future.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        let ticket = root.ticket();
+        drop(future);
+        let outcome = wait_root(root).await;
+        success(&outcome, 23);
+        assert_eq!(outcome.kill_attempts, 1);
+        assert_eq!(stamps.exit_observations(), 1);
+        assert_eq!(
+            outcome.timing.method,
+            cpforge::supervisor::WallMethod::Observed
+        );
+        assert!(process(pid).is_none());
+        assert!(ticket.clone().outcome().await.is_none());
+        assert!(ticket.outcome().await.is_none());
+        drop(creator);
+        quiescent().await;
+        assert_eq!(children(), before);
+        settled(fds, threads).await;
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
+#[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+#[test]
+fn pidfd_open_enosys_and_emfile_fall_back_to_polling() {
+    run_test(async {
+        for errno in [libc::ENOSYS, libc::EMFILE] {
+            let root = spawn_root(
+                spec(&["exit:17"]),
+                admit().unwrap(),
+                &SpawnOptions {
+                    pidfd_open_error: Some(errno),
+                    ..SpawnOptions::default()
+                },
+            )
+            .unwrap();
+            let pid = root.pid();
+            let outcome = wait_root(root).await;
+            assert_eq!(outcome.status, Termination::Exited { code: 17 });
+            assert_eq!(outcome.timing.observer, ObserverKind::Polling);
+            assert_eq!(
+                outcome.timing.method,
+                cpforge::supervisor::WallMethod::Observed
+            );
+            assert_eq!(outcome.stop_trigger, None);
+            assert!(outcome.violations.is_empty());
+            assert_eq!(outcome.kill_attempts, 1);
+            if errno == libc::ENOSYS {
+                assert_eq!(outcome.notes, [Note::ObserverFallback]);
+                assert!(outcome.errors.is_empty());
+            } else {
+                assert!(outcome.notes.is_empty());
+                assert_eq!(outcome.errors, [SupervisorError::Register(libc::EMFILE)]);
+            }
+            assert!(process(pid).is_none());
+        }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cancel_inside_os_creation_finishes_spawn_then_kills_and_reaps() {
+    run_test(async {
+        use cpforge::supervisor::{CreationGate, Creator, create_root};
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Creator::start().unwrap();
+        let gate = CreationRelease(Arc::new(CreationGate::during_creation().unwrap()));
+        let options = SpawnOptions {
+            creation_gate: Some(gate.0.clone()),
+            ..SpawnOptions::default()
+        };
+        let cancel = CancelToken::new();
+        let mut future = Box::pin(create_root(
+            &creator,
+            spec(&["hold"]),
+            admit().unwrap(),
+            &options,
+            &cancel,
+        ));
+        at_creation_gate(&mut future, &gate).await;
+        // pre_exec has announced readiness: a child exists, but spawn cannot
+        // return until exec closes std's creation-error pipe.
+        let created: Vec<_> = children().difference(&before).copied().collect();
+        assert_eq!(created.len(), 1);
+        let pid = created[0];
+        cancel.cancel();
+        assert_creation_pending(&mut future).await;
+        assert!(process(pid).is_some());
+        gate.0.release();
+        let root = tokio::time::timeout(allowance(1000), future.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.pid(), pid);
+        let ticket = root.ticket();
+        drop(future);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2) + allowance(100),
+            wait_root_controlled(
+                root,
+                RunControls {
+                    cancel,
+                    ..controls(Duration::from_secs(5))
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        killed(&outcome, StopTrigger::Cancelled);
+        assert!(outcome.errors.is_empty(), "{outcome:?}");
+        assert!(process(pid).is_none());
+        assert!(ticket.outcome().await.is_none());
+        drop(creator);
+        drop(options);
+        drop(gate);
+        quiescent().await;
+        assert_eq!(children(), before);
+        settled(fds, threads).await;
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn root_exit_to_cleanup_result_meets_the_cleanup_deadline() {
+    run_test(async {
+        use cpforge::supervisor::{Milestone, Milestones};
+        for delayed in [false, true] {
+            let stamps = Arc::new(Milestones::default());
+            let root = spawn_root(
+                spec(&["exit:0"]),
+                admit().unwrap(),
+                &SpawnOptions {
+                    milestones: Some(stamps.clone()),
+                    cleanup_entry_delay: if delayed {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::ZERO
+                    },
+                    ..SpawnOptions::default()
+                },
+            )
+            .unwrap();
+            let outcome = wait_root(root).await;
+            success(&outcome, 0);
+            let elapsed = stamps
+                .get(Milestone::CleanupResult)
+                .unwrap()
+                .duration_since(outcome.timing.exit_observed.unwrap());
+            assert!(
+                elapsed <= Duration::from_secs(1) + allowance(50),
+                "{delayed}: {elapsed:?}"
+            );
+            // Linux always enumerates /proc entries; Darwin can report an
+            // already-empty group without inspecting a delayed entry.
+            #[cfg(target_os = "linux")]
+            if delayed && outcome.timing.observer != ObserverKind::Polling {
+                assert_eq!(
+                    outcome.termination.cleanup,
+                    Cleanup::Unverified {
+                        reason: UnverifiedReason::ScanIncomplete
+                    }
+                );
+            }
         }
     });
 }

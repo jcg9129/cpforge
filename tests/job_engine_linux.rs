@@ -22,18 +22,38 @@ use std::time::Duration;
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static PROBE: NativeProbe = NativeProbe;
 
-fn run_test(future: impl Future<Output = ()>) {
+fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
+    run_test_with_timeout(Duration::from_secs(120), future);
+}
+
+/// Drive the job engine on a thread with the main thread's 8 MiB stack, as the
+/// CLI does: debug-build poll frames of the job state machine exceed the
+/// 2 MiB default of test threads.
+fn run_test_with_timeout<F: Future<Output = ()>>(
+    timeout: Duration,
+    future: impl FnOnce() -> F + Send,
+) {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     supervisor::init_process().unwrap();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            tokio::time::timeout(Duration::from_secs(120), future)
-                .await
-                .expect("job engine integration timed out");
-        });
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, move || {
+                let future = future();
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        tokio::time::timeout(timeout, future)
+                            .await
+                            .expect("job engine integration timed out");
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
 }
 
 fn ready(f: &Fixture, source: &str) -> ReadyJob<'static> {
@@ -63,7 +83,7 @@ fn ready(f: &Fixture, source: &str) -> ReadyJob<'static> {
 
 #[test]
 fn cpp_two_tests_through_the_real_supervisor() {
-    run_test(async {
+    run_test(move || async move {
         let f = Fixture::new();
         let ready = ready(
             &f,
@@ -128,7 +148,7 @@ fn cpp_two_tests_through_the_real_supervisor() {
 
 #[test]
 fn cpp_cancel_after_the_running_program_announces_readiness() {
-    run_test(async {
+    run_test(move || async move {
         let f = Fixture::new();
         let ready = ready(
             &f,
@@ -187,7 +207,7 @@ fn cpp_cancel_after_the_running_program_announces_readiness() {
 #[cfg(feature = "storage-test-hooks")]
 #[test]
 fn cancel_during_executor_creation_keeps_the_runtime_responsive() {
-    run_test(async {
+    run_test(move || async move {
         use cpforge::supervisor::CreationGate;
         use std::sync::Arc;
 
@@ -419,15 +439,334 @@ async fn cancel_paused_run_setup(point: cpforge::jobs::engine::Point) {
 #[cfg(feature = "storage-test-hooks")]
 #[test]
 fn cancel_before_run_mkdir_keeps_the_runtime_responsive() {
-    run_test(cancel_paused_run_setup(
-        cpforge::jobs::engine::Point::BeforeRunMkdir(0),
-    ));
+    run_test(|| cancel_paused_run_setup(cpforge::jobs::engine::Point::BeforeRunMkdir(0)));
 }
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
 fn cancel_before_recipe_completion_keeps_the_runtime_responsive() {
-    run_test(cancel_paused_run_setup(
-        cpforge::jobs::engine::Point::BeforeRecipeCompletion(0),
-    ));
+    run_test(|| cancel_paused_run_setup(cpforge::jobs::engine::Point::BeforeRecipeCompletion(0)));
+}
+
+// A build-free ready job with a resolved fixture command avoids compiler and
+// interpreter startup. Every iteration still uses the real supervisor, pipes,
+// capture workers, creation thread, cleanup scan and engine event queue.
+#[cfg(feature = "storage-test-hooks")]
+fn fixture_command_job(f: &Fixture, count: u32, budget: u64) -> (ReadyJob<'static>, JobRequest) {
+    use cpforge::build::PlannedTarget;
+    use cpforge::exec::ResolvedCommand;
+    use cpforge::jobs::engine::{CommandKind, Iteration, Recipe, Role};
+    f.write(
+        "problem/main.py",
+        "# frozen input; the resolved command runs cpf-fixture\n",
+    );
+    f.write("problem/tests.toml", "schema = 1\n");
+    let target = f.target("python", "");
+    let registered = f.job(budget, PrunePolicy::default());
+    let frozen = registered
+        .inputs()
+        .freeze(
+            &f.store(),
+            &[],
+            &CapturedSource::from_target(&target),
+            &f.path("problem"),
+        )
+        .unwrap();
+    let ready = prepare_job(registered, frozen, &target, f.inputs(&ready_support::Tools)).unwrap();
+    let PlannedTarget::BuildFree(free) = &ready.planned_target else {
+        panic!("expected a build-free fixture");
+    };
+    let mut stage = free.run(ready.dir.join("cwd")).unwrap();
+    let ResolvedCommand::Argv { program, args } = &mut stage.command else {
+        panic!("expected argv");
+    };
+    program.path = cpf_fixture::harness::fixture_path();
+    program.record.chosen_path = program.path.clone();
+    program.record.request = cpforge::exec::ProgramRequest::Path(program.path.clone());
+    *args = vec!["exit:0".into()];
+    let iterations = (0..count)
+        .map(|index| Iteration {
+            role: Role::Command {
+                test: None,
+                iteration: index + 1,
+            },
+            recipe: Recipe::Resolved(Box::new(stage.clone())),
+            stdin: None,
+            depends_on_build: false,
+        })
+        .collect();
+    (
+        ready,
+        JobRequest::Iterations {
+            kind: CommandKind::Cmd,
+            iterations,
+            needs_build: false,
+            keep_going: true,
+        },
+    )
+}
+
+// The contract fixes the count at 10 000 real runs, so the test is not scaled
+// down. It runs once per platform, in the all-features pass, instead of in
+// both test passes; no per-milestone bound is relaxed.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn ten_thousand_real_runs_with_stalled_events_keep_terminal_sequence_and_report() {
+    // Give the real executor a separate suite watchdog for 10 000 forks and scans.
+    let scale = if cfg!(target_os = "macos") { 4 } else { 1 };
+    run_test_with_timeout(Duration::from_secs(600 * scale), move || async move {
+        let f = Fixture::new();
+        // MemoryPersistence retains metadata allowances until settlement.
+        let (ready, request) = fixture_command_job(&f, 10_000, 64 << 30);
+        let engine = Engine::new(ready, request).unwrap();
+        let receiver = engine.events().subscribe().unwrap();
+        let mut persistence = MemoryPersistence::default();
+        let report = engine
+            .run(
+                &mut SupervisorExecutor::start().unwrap(),
+                &mut persistence,
+                &mut NoHooks,
+            )
+            .await;
+        // The receiver was subscribed but never polled while any run executed.
+        assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+        assert_eq!(report.data().executions.len(), 10_000);
+        assert_eq!(report.data().result.counts.primary.started, 10_000);
+        for execution in &report.data().executions {
+            assert_eq!(execution.result.invariant, None);
+            let Some(cpforge::jobs::engine::ExecutionRecord::Started(root)) =
+                execution.evidence.as_deref()
+            else {
+                panic!("fixture did not start: {execution:?}");
+            };
+            assert_eq!(root.status, supervisor::Termination::Exited { code: 0 });
+        }
+        let mut delivery = cpforge::transport::Delivery::new(Vec::new(), false);
+        delivery
+            .events(receiver, cpforge::report::JobKind::Cmd, false)
+            .await
+            .unwrap();
+        let bytes = delivery.into_inner();
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let lines: Vec<serde_json::Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["document"], "event_stream");
+        let events = &lines[1..lines.len() - 1];
+        let sequence: Vec<u64> = events
+            .iter()
+            .map(|event| event["seq"].as_str().unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(sequence[0], 0);
+        assert!(sequence.windows(2).all(|pair| pair[0] < pair[1]));
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal["event"], "job_finished");
+        let dropped: u64 = terminal["dropped"].as_str().unwrap().parse().unwrap();
+        assert!(dropped > 0);
+        assert_eq!(
+            *sequence.last().unwrap(),
+            (events.len() - 1) as u64 + dropped
+        );
+        assert_eq!(dropped, report.data().events.dropped);
+        let final_event = lines.last().unwrap();
+        assert_eq!(final_event["event"], "report");
+        assert_eq!(final_event["report"]["document"], "job_report");
+        assert_eq!(final_event["report"]["result"]["verdict"], "succeeded");
+        assert_eq!(
+            final_event["report"]["executions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10_000
+        );
+        assert!(persistence.pending.is_empty());
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn healthy_run_milestones_meet_each_bound_over_five_runs() {
+    run_test(move || async move {
+        use cpforge::jobs::persist::JobPersistence;
+        use cpforge::supervisor::{Milestone as M, Milestones};
+        use std::sync::Arc;
+        let f = Fixture::new();
+        let mut maxima = [Duration::ZERO; 6];
+        for _ in 0..5 {
+            let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
+            let mut persistence = JobPersistence::new(&ready).unwrap();
+            let stamps = Arc::new(Milestones::default());
+            let mut executor = SupervisorExecutor::start().unwrap();
+            executor.options.milestones = Some(stamps.clone());
+            let report = Engine::new(ready, request)
+                .unwrap()
+                .run(&mut executor, &mut persistence, &mut NoHooks)
+                .await;
+            assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+            let Some(cpforge::jobs::engine::ExecutionRecord::Started(root)) =
+                report.data().executions[0].evidence.as_deref()
+            else {
+                panic!("healthy fixture did not start");
+            };
+            assert!(root.errors.is_empty());
+            assert!(root.stdout.as_ref().unwrap().complete());
+            assert!(root.stderr.as_ref().unwrap().complete());
+            assert!(
+                report.data().executions[0]
+                    .record
+                    .as_ref()
+                    .unwrap()
+                    .path
+                    .is_some()
+            );
+            for (index, (from, to)) in [
+                (M::CleanupResult, M::DrainStart),
+                (M::DrainStart, M::ReadersStopped),
+                (M::ReadersStopped, M::CaptureFrozen),
+                (M::CaptureFrozen, M::RecordFinalized),
+                (M::RecordFinalized, M::RecordPersisted),
+                (M::RecordFinalized, M::ResourcesReleased),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let earlier = stamps.get(from).unwrap();
+                let later = stamps.get(to).unwrap();
+                // EOF may stop the readers before the supervisor begins drain.
+                if index != 1 {
+                    assert!(later >= earlier, "{from:?} → {to:?}");
+                }
+                let elapsed = later.saturating_duration_since(earlier);
+                maxima[index] = maxima[index].max(elapsed);
+            }
+        }
+        let scale = if cfg!(target_os = "macos") { 4 } else { 1 };
+        for (max, (milestone, milliseconds)) in maxima.into_iter().zip([
+            ("cleanup → drain", 50),
+            ("drain → readers stopped", 100),
+            ("readers stopped → frozen", 100),
+            ("frozen → finalized", 100),
+            ("finalized → persisted", 100),
+            ("finalized → released", 100),
+        ]) {
+            assert!(
+                max <= Duration::from_millis(milliseconds * scale),
+                "{milestone}: maximum {max:?}; bound {milliseconds} ms × {scale}"
+            );
+        }
+    });
+}
+
+#[cfg(all(target_os = "linux", feature = "storage-test-hooks"))]
+#[path = "support/tiny_filesystem.rs"]
+mod tiny_filesystem;
+
+#[cfg(all(target_os = "linux", feature = "storage-test-hooks"))]
+#[test]
+fn real_enospc_record_and_report_failures_keep_verdict_refs_and_delivery() {
+    run_test(move || async move {
+        use cpforge::exit::ExitCode;
+        use cpforge::jobs::engine::{PersistError, Point, ReportPersistence, Warning};
+        use cpforge::jobs::persist::JobPersistence;
+        use cpforge::transport::{Delivery, MachineMode, delivered_status};
+        use std::sync::Arc;
+        for records_fail in [false, true] {
+            let Some(filesystem) = tiny_filesystem::TinyFs::one_mib() else {
+                return;
+            };
+            let filesystem = Arc::new(filesystem);
+            let f = Fixture::at(filesystem.directory.join("workspace"));
+            let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
+            let directory = ready.dir.clone();
+            let mut persistence = JobPersistence::new(&ready).unwrap();
+            let fill = filesystem.clone();
+            let spec_path = directory.join("r00000/spec.json");
+            let engine = Engine::new(ready, request).unwrap().observe(move |point| {
+                if (records_fail && point == Point::BeforeRecordEnqueue(0))
+                    || (!records_fail && point == Point::BeforeSnapshot)
+                {
+                    if records_fail {
+                        // Finish admission-time persistence before exhausting
+                        // space, so no failed spec temporary can free pages
+                        // concurrently with the record write.
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while !spec_path.is_file() {
+                            assert!(std::time::Instant::now() < deadline);
+                            std::thread::yield_now();
+                        }
+                    }
+                    fill.fill_completely();
+                }
+            });
+            let mut receiver = engine.events().subscribe().unwrap();
+            let report = engine
+                .run(
+                    &mut SupervisorExecutor::start().unwrap(),
+                    &mut persistence,
+                    &mut NoHooks,
+                )
+                .await;
+            assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+            let enospc = PersistError::Io {
+                os_error: Some(libc::ENOSPC),
+            };
+            let reference = report.data().executions[0].record.as_ref().unwrap();
+            if records_fail {
+                assert!(reference.path.is_none());
+                assert_eq!(reference.error, Some(enospc));
+                assert!(report.data().warnings.iter().any(|warning| matches!(warning, Warning::Persistence { artefact: "record", error, .. } if *error == enospc)));
+            } else {
+                assert!(reference.path.is_some());
+                assert_eq!(reference.error, None);
+                assert!(
+                    report
+                        .data()
+                        .warnings
+                        .iter()
+                        .all(|warning| !matches!(warning, Warning::Persistence { .. }))
+                );
+            }
+            assert!(
+                matches!(report.persistence(), ReportPersistence::Failed { error, .. } if *error == enospc)
+            );
+            assert!(!directory.join("report.json").exists());
+            while receiver.recv().await.is_some() {}
+            let terminal = receiver.terminal().await;
+            assert!(terminal.report_id.is_none());
+            assert!(Arc::ptr_eq(&terminal.report, &report));
+            let mut delivery = Delivery::new(Vec::new(), false);
+            let delivered = delivery.report(&report);
+            assert!(delivered.is_ok());
+            assert_eq!(
+                delivered_status(&report, MachineMode::Json, &delivered),
+                ExitCode::Success
+            );
+            let bytes = delivery.into_inner();
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(document["document"], "job_report");
+            assert_eq!(document["persistence"]["report"]["kind"], "failed");
+            drop(persistence);
+            drop(report);
+            drop(terminal);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match cpforge::storage::job::probe(&directory) {
+                        cpforge::storage::job::ProbeOutcome::Acquired(lock) => {
+                            drop(lock);
+                            break;
+                        }
+                        cpforge::storage::job::ProbeOutcome::Held => tokio::task::yield_now().await,
+                        outcome => panic!("persistence lease cleanup failed: {outcome:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("persistence worker did not release its lease");
+            drop(f);
+            drop(filesystem);
+        }
+    });
 }

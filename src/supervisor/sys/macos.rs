@@ -72,11 +72,18 @@ pub(in crate::supervisor) struct PreparedSpawn {
     command: Command,
 }
 
-pub(in crate::supervisor) fn spawn(prepared: PreparedSpawn) -> Result<(i32, Instant), NotStarted> {
+pub(in crate::supervisor) fn spawn(
+    prepared: PreparedSpawn,
+    #[cfg(feature = "storage-test-hooks")] gate: Option<&crate::supervisor::CreationGate>,
+) -> Result<(i32, Instant), NotStarted> {
     let PreparedSpawn { mut command } = prepared;
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = gate {
+        gate.install(&mut command);
+    }
     // Rust's Unix Command paths inherit the signal mask and ignored dispositions,
     // except SIGPIPE which std resets to SIG_DFL. init_process restores SIGCHLD.
-    // This matches Linux: no blanket signal reset and no pre_exec hook. std sets
+    // This matches Linux: no blanket signal reset or production pre_exec hook. std sets
     // the process group before exec (spawn attributes or child-side setpgid),
     // duplicates CLOEXEC stdio, and owns its spawn-error channel. See the audit
     // in docs/design-macos-supervisor.md; re-audit when changing Rust toolchains.
