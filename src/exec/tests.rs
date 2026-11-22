@@ -314,6 +314,25 @@ fn program_requests_use_phase_one_paths_and_classify_expanded_text() {
 }
 
 #[test]
+fn program_position_expands_problem_directory_without_rebasing() {
+    let dir = Directory::new();
+    let plan = dir.command("argv = ['{problem_dir}/x']");
+    let StageCommand::Argv(argv) = &plan.stage.command else {
+        panic!("argv expected")
+    };
+    assert!(
+        argv[0].path.is_none(),
+        "placeholder program must not be rebased"
+    );
+    let context = command_context(&plan, dir.dirs());
+    let stage = prepared(&plan.stage, &context);
+    assert_eq!(
+        program(&stage),
+        &ProgramRequest::Path(dir.path("ws").join("problems").join("p").join("x"))
+    );
+}
+
+#[test]
 fn windows_expanded_paths_reject_drive_relative_and_root_relative_forms() {
     let dir = Directory::new();
     let plan = dir.command("argv = ['{problem_id}']");

@@ -75,6 +75,7 @@ impl Workspace {
             .env("XDG_CONFIG_HOME", self.path("user"))
             .env_remove("CPF_HOOK_DEPTH")
             .env_remove("CPF_STORAGE_CRASH_AT")
+            .env_remove("CPF_STORAGE_PANIC_AT")
             .env_remove("CPF_STORAGE_PAUSE_AT")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -441,8 +442,20 @@ fn canonical_trust_accepts_symlinks_and_ignores_unresolvable_entries() {
         "user/cpforge/config.toml",
         &format!("schema = 1\n[hooks]\ntrusted_workspaces = [{missing}]\n"),
     );
-    let report = document(&w.test(), 0);
+    let output = w.test();
+    let report = document(&output, 0);
     assert_eq!(report["hooks"][0]["outcome"]["reason"], "untrusted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "warning",
+        "cannot be canonicalised",
+        "untrusted",
+        "config.toml:",
+        "hooks.trusted_workspaces[0]",
+        w.path("missing").to_str().unwrap(),
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
     assert_eq!(fs::read_to_string(w.path("hooked")).unwrap(), "ran\nran\n");
 }
 
@@ -497,4 +510,34 @@ fn cancelling_switch_hook_preserves_identity_and_committed_selection() {
     let report = &w.reports()[0];
     assert_eq!(report["command"], "hook");
     assert_eq!(report["result"]["verdict"], "cancelled");
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn panicking_switch_hook_job_exits_seventy_after_committing_selection() {
+    let w = Workspace::new("echo should-not-run > \"$2/hooked\"\n");
+    w.trust(true);
+    w.write(
+        ".cpforge/state.toml",
+        "schema = 1\ncurrent_problem = 'local:B'\n",
+    );
+    let output = wait(
+        w.command(&["switch", "A"])
+            .env("CPF_STORAGE_PANIC_AT", "hook.execute")
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(70), "{output:?}");
+    assert_eq!(output.stdout, b"local:A\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("selection was committed"));
+    assert_eq!(w.run(&["current"]).stdout, b"local:A\n");
+    assert!(!w.path("hooked").exists());
+    let reports = w.reports();
+    assert_eq!(reports.len(), 1);
+    let report = &reports[0];
+    assert_eq!(report["command"], "hook");
+    assert_eq!(report["result"]["verdict"], "internal_error");
+    assert_eq!(report["executions"][0]["coverage"]["kind"], "admitted");
+    assert_eq!(report["executions"][0]["invariant"], "record_missing");
+    assert!(report["executions"][0]["summary"].is_null());
 }

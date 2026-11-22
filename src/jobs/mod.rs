@@ -387,6 +387,7 @@ pub fn prepare_job<'probe>(
         .created
         .borrow_mut()
         .push(registered.dir.join("inputs"));
+    crate::storage::crash::barrier("manifest.publish");
     let published = crate::storage::publish_file_noclobber(&guard, "inputs/capture.json", &bytes);
     persist::account(&mut reservation, bytes.len() as u64, &published);
     let published = published.map_err(ReadyError::Storage)?;

@@ -374,3 +374,33 @@ fn native_bytes_are_not_lossily_compared() {
         CaptureCheck::Checked
     );
 }
+
+#[test]
+fn shell_build_sources_require_run_cwd() {
+    let fixture = Fixture::new();
+    let base = fixture.stage();
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        let (workspace, job, cwd) = paths(platform);
+        // Use the emulated platform's lexical spelling even on Windows hosts.
+        let arguments = ExpandedArguments::ShellArgs(vec![
+            format!("{}/inputs/src/a.cpp", job.display()).into(),
+        ]);
+        for selector in [Cwd::Run, Cwd::Workspace, Cwd::Problem] {
+            let mut stage = shell_stage(&base, vec![text(&base, "{sources}")]);
+            stage.cwd.value = selector.clone();
+            let result = check_capture(&stage, &arguments, &cwd, &workspace, &job, platform);
+            if selector == Cwd::Run {
+                assert_eq!(
+                    result.unwrap(),
+                    CaptureCheck::Unchecked {
+                        reasons: vec![CaptureCheckReason::ShellStage],
+                    }
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error, GuardError::CwdSelector);
+                assert!(error.to_string().contains("phase 3"));
+            }
+        }
+    }
+}

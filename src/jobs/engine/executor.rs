@@ -61,6 +61,10 @@ impl Executor for SupervisorExecutor {
             self, OutputSpec, ProgramSpec, RunControls, Sink, StdinSpec, StreamPolicy,
         };
         Box::pin(async move {
+            #[cfg(feature = "storage-test-hooks")]
+            if spec.stage == super::Stage::Hook {
+                crate::storage::crash::panic_point("hook.execute");
+            }
             if cancel.is_cancelled() {
                 return not_started(supervisor::NotStarted::CancelledBeforeStart);
             }

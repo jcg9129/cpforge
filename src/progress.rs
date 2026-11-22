@@ -112,6 +112,8 @@ impl ProgressWriter {
         let worker = std::thread::Builder::new()
             .name("cpf-stderr".into())
             .spawn(move || {
+                #[cfg(feature = "storage-test-hooks")]
+                let mut first_write = true;
                 loop {
                     let line = {
                         let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -132,6 +134,11 @@ impl ProgressWriter {
                     let Some(line) = line else {
                         break;
                     };
+                    #[cfg(feature = "storage-test-hooks")]
+                    if first_write {
+                        first_write = false;
+                        crate::storage::crash::barrier("stderr.write");
+                    }
                     if !crate::cancel_signals::force_exit_started() {
                         let _ = writer.write_all(line.as_bytes());
                     }

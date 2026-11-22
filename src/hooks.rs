@@ -18,27 +18,36 @@ pub(crate) fn authorize(
 ) -> Result<(), &'static str> {
     // Same spelling rules as other path comparisons: verbatim prefixes are
     // stripped on both sides, then Windows names fold case-insensitively.
-    let canonical = |path: &Path| {
-        std::fs::canonicalize(path).ok().map(|p| {
-            let path = crate::storage::paths::comparable(&p);
-            if cfg!(windows) {
-                PathBuf::from(crate::config::env_name_fold_os(
-                    Platform::Windows,
-                    path.as_os_str(),
-                ))
-            } else {
-                path
-            }
-        })
+    let canonical = |path: &Path, origin: Option<&crate::config::Origin>| {
+        std::fs::canonicalize(path)
+            .map_err(|error| {
+                let location = origin.map_or_else(String::new, |origin| format!("{origin}: "));
+                eprintln!(
+                    "cpf: {location}warning: workspace {} cannot be canonicalised; untrusted: {error}",
+                    path.display()
+                );
+            })
+            .ok()
+            .map(|p| {
+                let path = crate::storage::paths::comparable(&p);
+                if cfg!(windows) {
+                    PathBuf::from(crate::config::env_name_fold_os(
+                        Platform::Windows,
+                        path.as_os_str(),
+                    ))
+                } else {
+                    path
+                }
+            })
     };
-    let root = canonical(root);
+    let root = canonical(root, None);
     let trusted = settings
         .trusted_workspaces
         .iter()
         .flatten()
         // An entry that cannot be canonicalised (e.g. a deleted directory)
         // trusts nothing, but does not revoke the other entries.
-        .filter_map(|p| canonical(&p.value))
+        .filter_map(|p| canonical(&p.value, Some(&p.origin)))
         .collect::<Vec<_>>();
     let depth = baseline
         .entries()

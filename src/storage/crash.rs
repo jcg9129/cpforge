@@ -41,7 +41,11 @@
 //! `command.between_iterations` (after the first command job execution);
 //! `config.load`, `selection.resolve` (planning, before admission);
 //! `supervisor.before_cancel_kill` (live root before orderly cancellation kill);
-//! `job.after_delivery` (after the final summary, while signals remain installed).
+//! `job.after_delivery` (after the final summary, while signals remain installed),
+//! `stderr.write` (before the first progress-writer write),
+//! `manifest.publish` (before publishing inputs/capture.json).
+//! Set `CPF_STORAGE_PANIC_AT=hook.execute` to panic in the executor of an
+//! admitted hook, before launching its child. Only test builds inspect it.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
 
@@ -117,5 +121,16 @@ pub(crate) fn signal_observed() {
     #[cfg(feature = "storage-test-hooks")]
     if let Some(path) = std::env::var_os("CPF_STORAGE_SIGNAL_READY") {
         std::fs::write(path, b"signal observed\n").expect("publish signal readiness");
+    }
+}
+
+/// Inject an unwind at a named job boundary, rather than aborting the process.
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn panic_point(name: &'static str) {
+    if std::env::var("CPF_STORAGE_PANIC_AT").is_ok_and(|value| value == name) {
+        panic!("CPF-PANIC-AT {name}");
     }
 }

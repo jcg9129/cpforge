@@ -372,6 +372,27 @@ mod execution {
     }
 
     #[test]
+    fn one_output_budget_failure_among_two_runs_exits_one() {
+        let w = Workspace::new(
+            "repeat = 2\nkeep_going = true\nstdout_cap = 4\nshell = { interpreter = ['sh', '-c'], script = 'if test \"$1\" = 2; then printf 123456789; fi', args = ['{iteration}'] }",
+        );
+        let output = w.run(&["cmd", "x", "--json"]);
+        status(&output, 1);
+        let report = document(&output);
+        assert_eq!(report["executions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            report["executions"][0]["summary"]["class"]["kind"],
+            "exited_zero"
+        );
+        assert_eq!(
+            report["executions"][1]["summary"]["class"]["kind"],
+            "output_budget"
+        );
+        assert_eq!(report["result"]["verdict"], "output_budget");
+        assert_eq!(report["aggregates"][0]["succeeded"], 1);
+    }
+
+    #[test]
     fn retention_refusal_is_infrastructure_and_closes_later_admission() {
         let w = Workspace::new("repeat = 3\nargv = ['sh', '-c', 'exit 0']");
         w.write("cpforge.toml", "schema = 1\n[retention]\njob_bytes = '1MiB'\n[commands.x]\nrepeat = 3\nargv = ['sh', '-c', 'exit 0']\n");
@@ -500,16 +521,17 @@ mod execution {
     }
 
     #[test]
-    fn planned_run_cap_accepts_ten_thousand_and_rejects_ten_thousand_and_one_before_admission() {
+    fn planned_run_cap_accepts_9999_and_10000_and_rejects_10001_before_admission() {
         // The legal product reaches answer validation; the larger product fails
         // the cap first. Neither case executes or creates a job directory.
-        for (count, repeat, build, capped) in [
-            (101, 99, false, false),
-            (10, 1000, false, false),
-            (137, 73, false, true),
-            (101, 99, true, false),
-            (10, 1000, true, true),
+        for (count, repeat, build, capped, planned) in [
+            (101, 99, false, false, 9_999),
+            (10, 1000, false, false, 10_000),
+            (137, 73, false, true, 10_001),
+            (101, 99, true, false, 10_000),
+            (10, 1000, true, true, 10_001),
         ] {
+            assert_eq!(count * repeat + usize::from(build), planned);
             let w = Workspace::new(&format!(
                 "needs_build = {build}\nfor_each_test = true\nrepeat = {repeat}\nargv = ['sh', '-c', 'exit 0', '{{test_answer}}']"
             ));

@@ -164,6 +164,17 @@ fn create_problem(
         operation: Operation::Other,
         ..ConfigRequest::default()
     });
+    materialize_problem(guard, name, language, &loaded, report)
+}
+
+/// Resolve the prospective record before staging or publishing any files.
+fn materialize_problem(
+    guard: &WorkspaceGuard<'_>,
+    name: &Identifier,
+    language: Option<&str>,
+    loaded: &crate::config::LoadedConfig,
+    report: &mut Report,
+) -> Result<bool, Error> {
     if loaded.has_errors() {
         return Err(configuration_error(loaded.diagnostics()));
     }
@@ -595,6 +606,80 @@ mod tests {
     }
 
     const METADATA: &[u8] = b"schema = 1\n\n[problem]\nid = \"local:one\"\n";
+
+    #[test]
+    fn prospective_solution_files_control_template_materialization_before_publication() {
+        for (solutions, count) in [
+            ("['solution.cpp']", 1),
+            ("[]", 0),
+            ("['solution.cpp', 'grader.cpp']", 2),
+        ] {
+            let dir = Directory::new();
+            fs::write(dir.0.join("cpforge.toml"), "schema = 1\n").unwrap();
+            fs::write(
+                dir.0.join("user.toml"),
+                "schema = 1\n[languages.cpp]\ntemplate = { path = 'template.cpp' }\n",
+            )
+            .unwrap();
+            let template = b"// contestant template\n";
+            fs::write(dir.0.join("template.cpp"), template).unwrap();
+            let lock = WorkspaceLock::new(&dir.0).unwrap();
+            let guard = lock.acquire("materialize prospective problem").unwrap();
+            guard.create_dir_all(".cpforge/staging").unwrap();
+            let name = Identifier::new("one").unwrap();
+            let loaded = load_config(&ConfigRequest {
+                current_dir: dir.0.clone(),
+                workspace_root: Some(dir.0.clone()),
+                config_path: Some(dir.0.join("user.toml")),
+                problem_file: Some(dir.0.join("problems").join("one").join("problem.toml")),
+                prospective_problem: Some(format!(
+                    "schema = 1\n[problem]\nid = 'local:one'\n[config]\nlanguage = 'cpp'\nsources = ['solution.cpp', 'grader.cpp']\nsolution_files = {solutions}\n"
+                )),
+                ..ConfigRequest::default()
+            });
+            assert!(!loaded.has_errors(), "{:?}", loaded.diagnostics());
+            let mut report = Report::default();
+            let result = materialize_problem(&guard, &name, Some("cpp"), &loaded, &mut report);
+            let problem = dir.0.join("problems").join("one");
+            if count == 1 {
+                assert!(result.unwrap());
+                assert_eq!(fs::read(problem.join("solution.cpp")).unwrap(), template);
+                assert!(!problem.join("main.cpp").exists());
+                assert!(!problem.join("grader.cpp").exists());
+                let metadata = fs::read_to_string(problem.join("problem.toml")).unwrap();
+                let metadata: DocumentMut = metadata.parse().unwrap();
+                let created = metadata["files"]["created"].as_array().unwrap();
+                assert_eq!(created.len(), 1);
+                assert_eq!(
+                    created
+                        .get(0)
+                        .unwrap()
+                        .as_inline_table()
+                        .unwrap()
+                        .get("path")
+                        .unwrap()
+                        .as_str(),
+                    Some("solution.cpp")
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.exit_code(), crate::exit::ExitCode::Config);
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("found {count} solution files"))
+                );
+                assert!(!problem.exists());
+                assert!(report.lines.is_empty());
+            }
+            assert_eq!(
+                fs::read_dir(dir.0.join(".cpforge").join("staging"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+    }
 
     #[test]
     fn failed_directory_publications_remove_staging_without_publishing() {

@@ -492,12 +492,27 @@ mod tests {
     #[test]
     fn ignore_patterns_match_components_and_unicode_units() {
         for (pattern, parts, expected) in [
+            ("*.o", vec!["a.o"], true),
+            ("*.o", vec!["x", "y", "a.o"], true),
+            ("x/*.o", vec!["x", "a.o"], true),
+            ("x/*.o", vec!["x", "y", "a.o"], false),
+            ("x/*.o", vec!["y", "x", "a.o"], false),
+            ("**", vec!["a.o"], true),
+            ("**", vec!["x", "a.txt"], true),
+            ("**", vec!["x", "y", "extensionless"], true),
+            ("x/**/a.o", vec!["x", "a.o"], true),
+            ("x/**/a.o", vec!["x", "p", "q", "a.o"], true),
             ("*.swp", vec!["nested", "a.swp"], true),
             ("scratch/**", vec!["scratch", "a", "b"], true),
             ("a/**/b", vec!["a", "b"], true),
             ("a/**/b", vec!["a", "x", "b"], true),
             ("a/*/b", vec!["a", "b"], false),
             ("?.txt", vec!["é.txt"], true),
+            ("??.txt", vec!["é.txt"], false),
+            ("?.txt", vec!["e\u{301}.txt"], false),
+            ("??.txt", vec!["e\u{301}.txt"], true),
+            ("é.txt", vec!["e\u{301}.txt"], false),
+            ("e\u{301}.txt", vec!["é.txt"], false),
             ("a/b", vec!["x", "a", "b"], false),
             ("A", vec!["a"], cfg!(any(windows, target_os = "macos"))),
         ] {
