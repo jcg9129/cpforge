@@ -715,7 +715,7 @@ fn real_enospc_record_and_report_failures_keep_verdict_refs_and_delivery() {
             let reference = report.data().executions[0].record.as_ref().unwrap();
             if records_fail {
                 assert!(reference.path.is_none());
-                assert_eq!(reference.error, Some(enospc));
+                assert_eq!(reference.error, Some(enospc.clone()));
                 assert!(report.data().warnings.iter().any(|warning| matches!(warning, Warning::Persistence { artefact: "record", error, .. } if *error == enospc)));
             } else {
                 assert!(reference.path.is_some());
