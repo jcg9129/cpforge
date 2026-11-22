@@ -681,8 +681,8 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 | `role` | object | `{"kind":"build"}`, `{"kind":"test","test":ident}`, `{"kind":"command","test":ident?,"iteration":u32}`, `{"kind":"raw"}`, `{"kind":"hook","name":ident,"trigger":token}` |
 | `coverage` | object | `{"kind":"started"}`, `{"kind":"not_started","reason":NotStarted}`, `{"kind":"skipped","reason":token}` |
 | `run` | `rid?` | `null` iff `skipped` |
-| `program` | `nsum(256)?` | resolved executable (E §2); `null` iff `skipped` |
-| `spec` | `Ref?` | `null` iff `skipped` |
+| `program` | `nsum(256)?` | resolved executable (E §2); `null` iff `skipped` or interrupted preparation (below) |
+| `spec` | `Ref?` | `null` iff `skipped` or interrupted preparation (below) |
 | `record` | `Ref?` | `null` iff `skipped` or `admitted` |
 | `summary` | `RunSummary?` | `null` iff `skipped`, `admitted`, or `invariant = summary_underivable` |
 | `class` | object? | only with `summary` `null`: the run class (§2.2, in the `summary.class` form) derived before the summary failed (`invariant: summary_underivable`); `null` in every other case (with a non-null `summary` the class is `summary.class`). Mutually exclusive with `summary`, so the §3.7 entry bound is unchanged |
@@ -690,6 +690,14 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 
 - `coverage` also has the variant `{"kind":"admitted"}` (§2.1), which
   always comes with `invariant: "record_missing"`.
+- **Interrupted preparation**: when cancellation stops run preparation on
+  the creation thread (E §3.4) before run-directory creation and recipe
+  resolution complete, the execution is
+  `not_started{cancelled_before_start}` with `program` and `spec` `null`.
+  No other coverage or `not_started` reason allows a `null` `program` or
+  `spec`. `run` stays the id allocated at admission (non-null); its
+  directory may be absent or incomplete. `record` is non-null as for any
+  `not_started`.
 - `Ref`: `{digest: hex64?, path: rel? (≤ 18), error: PersistError?}`;
   `spec.digest` is E §2's `spec_digest`, `record.digest` is `null`. After
   phase W exactly one of `path` (job-relative `<run>/spec.json`,
@@ -1247,6 +1255,12 @@ F), `persist.report`, `events.enqueue`, `delivery.write`, `stderr.write`,
   completes, warning `late_cancellation`, cancellation status.
 - Intent at `finalize.snapshot` → recorded with phase `closure`; intent
   after F → not recorded, status by verdict.
+- Intent while run preparation is paused before its first mkdir, and before
+  deferred program completion → that execution is
+  `not_started{cancelled_before_start}` with `run` set, `program` and `spec`
+  `null` (§4.5), the job returns without waiting for the paused step, and
+  the lease is released once it returns. Intent after preparation
+  completed → `program` and `spec` non-null.
 - Real signals: Ctrl-C during the build → `cancelled`, Unix death by
   `SIGINT`, Windows 6; `SIGTERM` → death by `SIGTERM`; API → 6; second
   Ctrl-C → force exit, death by `SIGINT` / 6.

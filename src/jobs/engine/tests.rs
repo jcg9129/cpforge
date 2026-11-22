@@ -120,6 +120,9 @@ struct Fake {
     runs: Vec<RunId>,
     entered: Option<oneshot::Sender<()>>,
     resume: Option<oneshot::Receiver<()>>,
+    /// Cancel the job and report preparation as interrupted, as the creation
+    /// thread does when cancellation stops it before the first mkdir.
+    interrupt_prepare: Option<CancelState>,
 }
 impl Fake {
     fn with(behavior: impl IntoIterator<Item = Behavior>) -> Self {
@@ -130,6 +133,23 @@ impl Fake {
     }
 }
 impl Executor for Fake {
+    fn prepare_run(
+        &mut self,
+        preparation: RunPreparation,
+        _cancel: CancelToken,
+    ) -> JobFuture<'_, PreparedRun> {
+        let interrupt = self.interrupt_prepare.take();
+        Box::pin(async move {
+            match interrupt {
+                Some(cancel) => {
+                    cancel.request_cancel(CancelSource::Api);
+                    PreparedRun::interrupted()
+                }
+                None => preparation.prepare(None),
+            }
+        })
+    }
+
     fn execute(
         &mut self,
         spec: Arc<ExecutionSpec>,
@@ -568,6 +588,9 @@ fn existing_run_tree_is_untouched_and_id_is_consumed() {
         report.data().executions[0].run.as_ref().unwrap().as_str(),
         "r00000"
     );
+    // Only interrupted preparation may leave `program` and `spec` null.
+    assert!(report.data().executions[0].program.is_some());
+    assert!(report.data().executions[0].spec.is_some());
     assert_eq!(fake.runs[0].as_str(), "r00001");
     assert_eq!(report.data().result.verdict, JobVerdict::Infrastructure);
 }
@@ -804,7 +827,46 @@ fn cancellation_after_admission_produces_a_not_started_record() {
         }
     );
     assert!(execution.record.is_some() && execution.summary.is_some());
+    // Cancelled after preparation completed: program and spec stay non-null.
+    assert!(execution.program.is_some());
+    assert!(execution.spec.as_ref().is_some_and(|s| s.digest.is_some()));
     assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
+}
+
+#[test]
+fn cancellation_interrupting_run_preparation_nulls_program_and_spec() {
+    use crate::report::wire;
+    let f = Fixture::new();
+    let engine = test_engine(&f, "python", 1);
+    let dir = engine.ready.dir.clone();
+    let mut fake = Fake {
+        interrupt_prepare: Some(engine.cancellation()),
+        ..Fake::default()
+    };
+    let report = runtime(run(engine, &mut fake));
+    assert!(fake.runs.is_empty());
+    let execution = &report.data().executions[0];
+    assert_eq!(
+        execution.result.coverage,
+        Coverage::NotStarted {
+            reason: NotStartedReason::CancelledBeforeStart
+        }
+    );
+    assert_eq!(execution.result.invariant, None);
+    assert_eq!(execution.run.as_ref().unwrap().as_str(), "r00000");
+    assert!(!dir.join("r00000").exists());
+    assert!(execution.program.is_none() && execution.spec.is_none());
+    assert!(execution.record.is_some());
+    assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
+    let value = wire::read::read_json(&wire::encode_report(&report).unwrap()).unwrap();
+    let encoded = &value["executions"][0];
+    assert_eq!(encoded["coverage"]["kind"], "not_started");
+    assert_eq!(
+        encoded["coverage"]["reason"]["kind"],
+        "cancelled_before_start"
+    );
+    assert_eq!(encoded["run"], "r00000");
+    assert!(encoded["program"].is_null() && encoded["spec"].is_null());
 }
 
 #[test]

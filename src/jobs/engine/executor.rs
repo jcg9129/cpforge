@@ -1,7 +1,13 @@
+use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{ExecutionRecord, ExecutionSpec, JobFuture, RunEvents};
+use super::{ExecutionRecord, ExecutionSpec, JobFuture, Recipe, RunEvents, StartFailure};
+use crate::build::{self, BuildExecutionOutcome, PendingBuild, ValidatedBuild};
+use crate::exec::{DeferredStage, NativeProbe, ResolvedStage};
+use crate::report::{NotStartedReason, PostBuild};
 use crate::storage::budget::Reservation;
 use crate::storage::job::JobOwner;
 use crate::supervisor::CancelToken;
@@ -29,10 +35,214 @@ impl Drop for RunResources {
     }
 }
 
+/// Owned inputs for directory creation and per-run recipe resolution.
+#[derive(Debug)]
+pub struct RunPreparation {
+    pub(super) directory: PathBuf,
+    pub(super) recipe: Option<PreparationRecipe>,
+    // A cancelled caller may return while the creation thread still uses paths.
+    pub(super) owner: JobOwner,
+    #[cfg(feature = "storage-test-hooks")]
+    pub(super) observation: Option<super::Observation>,
+    #[cfg(feature = "storage-test-hooks")]
+    pub(super) execution: u32,
+}
+
+#[derive(Debug)]
+pub(super) enum PreparationRecipe {
+    Stage(Recipe),
+    Target(Box<build::StageRecipe>),
+}
+
+/// Keep directory writability separate from recipe resolution: a failed mkdir
+/// retains its Setup record even when the recipe can still be resolved.
+#[derive(Debug)]
+pub struct PreparedRun {
+    pub stage: Option<ResolvedStage>,
+    pub failure: Option<StartFailure>,
+    pub writable: bool,
+    /// Cancellation stopped preparation before the stage was resolved: the
+    /// report's `program` and `spec` are null (report §4.5).
+    pub interrupted: bool,
+}
+
+impl PreparedRun {
+    fn failed(failure: StartFailure) -> Self {
+        Self {
+            stage: None,
+            interrupted: matches!(failure.reason, NotStartedReason::CancelledBeforeStart),
+            failure: Some(failure),
+            writable: false,
+        }
+    }
+
+    /// Cancelled before any run directory was created.
+    pub(super) fn interrupted() -> Self {
+        Self::failed(cancelled())
+    }
+}
+
+impl RunPreparation {
+    /// With a cancel token, stop at the next step boundary once it is set and
+    /// report an interrupted `CancelledBeforeStart`; work that completes keeps
+    /// its result, so the engine's own intent check decides as it does after
+    /// inline setup.
+    pub(super) fn prepare(self, cancel: Option<&CancelToken>) -> PreparedRun {
+        let _owner = self.owner;
+        let stop = || cancel.is_some_and(CancelToken::is_cancelled);
+        let mut result = PreparedRun {
+            stage: None,
+            failure: None,
+            writable: true,
+            interrupted: false,
+        };
+        #[cfg(feature = "storage-test-hooks")]
+        if let Some(observer) = &self.observation {
+            (observer.0)(super::Point::BeforeRunMkdir(self.execution));
+        }
+        // Never inspect, write or remove any part of a colliding run tree.
+        for path in [
+            &self.directory,
+            &self.directory.join("cwd"),
+            &self.directory.join("out"),
+        ] {
+            if stop() {
+                return PreparedRun::interrupted();
+            }
+            if let Err(error) = fs::create_dir(path) {
+                result.writable = false;
+                result.failure = Some(StartFailure {
+                    os_error: error.raw_os_error(),
+                    ..setup_failure()
+                });
+                break;
+            }
+        }
+        let mut interrupted = false;
+        result.stage = catch_unwind(AssertUnwindSafe(|| {
+            if stop() {
+                interrupted = true;
+                return None;
+            }
+            let cwd = self.directory.join("cwd");
+            match self.recipe? {
+                PreparationRecipe::Target(recipe) => recipe.prepare(cwd).ok(),
+                PreparationRecipe::Stage(recipe) => {
+                    let mut stage = match recipe {
+                        Recipe::Resolved(stage) => *stage,
+                        Recipe::Deferred(stage) => {
+                            #[cfg(feature = "storage-test-hooks")]
+                            if let Some(observer) = &self.observation {
+                                (observer.0)(super::Point::BeforeRecipeCompletion(self.execution));
+                            }
+                            if stop() {
+                                interrupted = true;
+                                return None;
+                            }
+                            stage.complete(&NativeProbe).ok()?
+                        }
+                        Recipe::TargetRun => return None,
+                    };
+                    if !stage.shared_cwd {
+                        stage.cwd = cwd;
+                    }
+                    Some(stage)
+                }
+            }
+        }))
+        .ok()
+        .flatten();
+        if interrupted {
+            // Cancellation outranks a directory failure here, so the record
+            // matches the null program and spec; a fully created tree stays
+            // writable for the cancellation record.
+            return PreparedRun {
+                stage: None,
+                failure: Some(cancelled()),
+                writable: result.writable,
+                interrupted: true,
+            };
+        }
+        result
+    }
+}
+
+fn setup_failure() -> StartFailure {
+    StartFailure {
+        reason: NotStartedReason::Setup,
+        api: None,
+        os_error: None,
+        invalid_limit: None,
+    }
+}
+
+fn cancelled() -> StartFailure {
+    StartFailure {
+        reason: NotStartedReason::CancelledBeforeStart,
+        ..setup_failure()
+    }
+}
+
+/// Finalized post-build observations and the resulting consumer capability.
+#[derive(Debug)]
+pub struct BuildCompletion {
+    pub post: PostBuild,
+    pub validated: Option<ValidatedBuild>,
+}
+
+fn complete_build(
+    validation: Result<ValidatedBuild, build::BuildFailure>,
+    generated: Vec<DeferredStage>,
+) -> BuildCompletion {
+    let mut post = PostBuild::from_validation(validation.as_ref());
+    let mut validated = validation.ok();
+    if let Some(build) = &validated {
+        for generated in generated {
+            if let Err(error) = generated.complete(&NativeProbe) {
+                post = PostBuild::from_failure_kind(
+                    &build::BuildFailureKind::GeneratedProgramNotLaunchable(error),
+                    build.output_root(),
+                );
+                validated = None;
+                break;
+            }
+        }
+    }
+    BuildCompletion { post, validated }
+}
+
 /// Platform boundary. The future returns finalized evidence and must transfer
 /// resources to cleanup before returning when physical work remains. Futures
 /// need not be Send: a ready job's planning probe is thread-bound.
 pub trait Executor {
+    /// Fakes may prepare inline; the supervisor uses the job's creation thread.
+    fn prepare_run(
+        &mut self,
+        preparation: RunPreparation,
+        _cancel: CancelToken,
+    ) -> JobFuture<'_, PreparedRun> {
+        // Preserve the original inline setup behaviour for fake executors.
+        Box::pin(async move { preparation.prepare(None) })
+    }
+
+    /// Consume the build only on the setup worker in production. Inline fakes
+    /// retain the planning probe, which need not be Send or Sync.
+    fn finish_build<'a>(
+        &'a mut self,
+        pending: PendingBuild<'a>,
+        outcome: BuildExecutionOutcome,
+        generated: Vec<DeferredStage>,
+        owner: JobOwner,
+    ) -> JobFuture<'a, Result<BuildCompletion, StartFailure>> {
+        Box::pin(async move {
+            let _owner = owner;
+            Ok(complete_build(
+                build::finish_build(pending, outcome),
+                generated,
+            ))
+        })
+    }
+
     fn execute(
         &mut self,
         spec: Arc<ExecutionSpec>,
@@ -67,6 +277,46 @@ impl SupervisorExecutor {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Executor for SupervisorExecutor {
+    fn prepare_run(
+        &mut self,
+        preparation: RunPreparation,
+        cancel: CancelToken,
+    ) -> JobFuture<'_, PreparedRun> {
+        Box::pin(async move {
+            let worker_cancel = cancel.clone();
+            match self
+                .creator
+                .prepare(&cancel, move || preparation.prepare(Some(&worker_cancel)))
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(reason) => PreparedRun::failed(start_failure(reason)),
+            }
+        })
+    }
+
+    fn finish_build<'a>(
+        &'a mut self,
+        pending: PendingBuild<'a>,
+        outcome: BuildExecutionOutcome,
+        generated: Vec<DeferredStage>,
+        owner: JobOwner,
+    ) -> JobFuture<'a, Result<BuildCompletion, StartFailure>> {
+        let finish = pending.native_finisher();
+        Box::pin(async move {
+            // Job cancellation does not interrupt validation: an exited-zero
+            // build's result is its post-build check (report §2.3). The wait
+            // is on the creation thread, so the runtime stays responsive.
+            self.creator
+                .prepare(&CancelToken::new(), move || {
+                    let _owner = owner;
+                    complete_build(finish(outcome), generated)
+                })
+                .await
+                .map_err(start_failure)
+        })
+    }
+
     fn execute(
         &mut self,
         spec: Arc<ExecutionSpec>,
@@ -163,6 +413,11 @@ impl Executor for SupervisorExecutor {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn not_started(reason: crate::supervisor::NotStarted) -> ExecutionRecord {
+    ExecutionRecord::NotStarted(start_failure(reason))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn start_failure(reason: crate::supervisor::NotStarted) -> StartFailure {
     use crate::report::NotStartedReason as R;
     use crate::supervisor::NotStarted as N;
     let mut failure = super::StartFailure {
@@ -195,5 +450,5 @@ fn not_started(reason: crate::supervisor::NotStarted) -> ExecutionRecord {
             R::Setup
         }
     };
-    ExecutionRecord::NotStarted(failure)
+    failure
 }

@@ -281,7 +281,7 @@ impl ExpandedArguments {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RunRecipe {
     target: TargetPlan,
     dirs: InvocationDirs,
@@ -324,6 +324,36 @@ impl PlannedTarget<'_> {
     }
 }
 
+/// Owned staging data; contains no thread-bound planning probe or output capability.
+#[derive(Debug)]
+pub(crate) struct StageRecipe {
+    recipe: RunRecipe,
+    stage: ResolvedStage,
+    build: bool,
+}
+
+impl StageRecipe {
+    pub(crate) fn prepare(self, cwd: PathBuf) -> Result<ResolvedStage, PrepareErrors> {
+        if !self.build {
+            return self.recipe.run(&self.stage, cwd);
+        }
+        let mut dirs = self.recipe.dirs.clone();
+        dirs.run_cwd = cwd;
+        let context =
+            Context::target_build(&self.recipe.target, dirs, self.recipe.bindings.clone())?;
+        let prepared = exec::prepare(
+            self.recipe.target.build.as_ref().expect("build stage"),
+            &context,
+            &self.recipe.baseline,
+            self.recipe.platform,
+            &[],
+        )?;
+        let mut stage = self.stage;
+        stage.cwd = prepared.cwd;
+        Ok(stage)
+    }
+}
+
 /// A resolved build-free run recipe, with no output root or build identity.
 #[derive(Debug)]
 pub struct PreflightedBuildFree {
@@ -335,6 +365,14 @@ pub struct PreflightedBuildFree {
 impl PreflightedBuildFree {
     pub fn run(&self, per_run_cwd: PathBuf) -> Result<ResolvedStage, PrepareErrors> {
         self.recipe.run(&self.stage, per_run_cwd)
+    }
+
+    pub(crate) fn stage_recipe(&self) -> StageRecipe {
+        StageRecipe {
+            recipe: self.recipe.clone(),
+            stage: self.stage.clone(),
+            build: false,
+        }
     }
 
     pub fn expanded_arguments(&self) -> &ExpandedArguments {
@@ -375,20 +413,49 @@ impl PendingBuild<'_> {
     }
     /// Select the admitted cwd while keeping the preflighted program frozen.
     pub fn stage_for_cwd(&self, cwd: PathBuf) -> Result<ResolvedStage, PrepareErrors> {
-        let mut dirs = self.recipe.dirs.clone();
-        dirs.run_cwd = cwd;
-        let context =
-            Context::target_build(&self.recipe.target, dirs, self.recipe.bindings.clone())?;
-        let prepared = exec::prepare(
-            self.recipe.target.build.as_ref().expect("build stage"),
-            &context,
-            &self.recipe.baseline,
-            self.recipe.platform,
-            &[],
-        )?;
-        let mut stage = self.build.clone();
-        stage.cwd = prepared.cwd;
-        Ok(stage)
+        self.stage_recipe().prepare(cwd)
+    }
+    pub(crate) fn stage_recipe(&self) -> StageRecipe {
+        StageRecipe {
+            recipe: self.recipe.clone(),
+            stage: self.build.clone(),
+            build: true,
+        }
+    }
+
+    // Drop the borrowed planning probe before transferring owned data. The
+    // returned closure validates with the native probe (the only probe a
+    // supervised job plans with) on the creation thread.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn native_finisher(
+        self,
+    ) -> impl FnOnce(BuildExecutionOutcome) -> Result<ValidatedBuild, BuildFailure> + Send + use<>
+    {
+        let Self {
+            outputs,
+            build,
+            run,
+            recipe,
+            required,
+            arguments,
+            build_bytes,
+            probe: _,
+        } = self;
+        move |outcome| {
+            finish_build(
+                PendingBuild {
+                    outputs,
+                    build,
+                    run,
+                    recipe,
+                    required,
+                    arguments,
+                    build_bytes,
+                    probe: ProbeRef(&exec::NativeProbe),
+                },
+                outcome,
+            )
+        }
     }
     pub fn expanded_arguments(&self) -> &ExpandedArguments {
         &self.arguments
@@ -740,6 +807,13 @@ impl ValidatedBuild {
     }
     pub fn output_root(&self) -> &Path {
         &self.outputs.root
+    }
+    pub(crate) fn stage_recipe(&self) -> StageRecipe {
+        StageRecipe {
+            recipe: self.recipe.clone(),
+            stage: self.stage.clone(),
+            build: false,
+        }
     }
     pub fn run(&self, per_run_cwd: PathBuf) -> Result<ResolvedStage, PrepareErrors> {
         self.recipe.run(&self.stage, per_run_cwd)

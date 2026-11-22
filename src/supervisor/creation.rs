@@ -82,6 +82,8 @@ mod unix {
 
     pub(in crate::supervisor) enum Request {
         Root(Box<RootRequest>),
+        /// Owned engine setup, with no process creation before its reply.
+        Prepare(Box<dyn FnOnce() + Send>),
         Session {
             spec: Box<session::SessionSpec>,
             state: Arc<CreationState>,
@@ -111,6 +113,7 @@ mod unix {
                     let _credit = credit;
                     while let Ok(request) = receiver.recv() {
                         match request {
+                            Request::Prepare(work) => work(),
                             Request::Root(request) => {
                                 let RootRequest {
                                     spec,
@@ -154,6 +157,34 @@ mod unix {
                 })
                 .map_err(|_| NotStarted::Worker)?;
             Ok(Self { sender })
+        }
+
+        /// Run owned setup on this job's FIFO thread. Commit only after all
+        /// blocking work returns, so cancellation never waits for setup I/O.
+        pub(crate) async fn prepare<T: Send + 'static>(
+            &self,
+            cancel: &CancelToken,
+            work: impl FnOnce() -> T + Send + 'static,
+        ) -> Result<T, NotStarted> {
+            if cancel.is_cancelled() {
+                return Err(NotStarted::CancelledBeforeStart);
+            }
+            let state = Arc::new(CreationState::default());
+            let worker_state = state.clone();
+            let (reply, receiver) = oneshot::channel();
+            self.send(Request::Prepare(Box::new(move || {
+                let result = worker_state.check().and_then(|()| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                        .map_err(|_| NotStarted::Worker)
+                });
+                let result = if worker_state.commit() {
+                    result
+                } else {
+                    Err(NotStarted::CancelledBeforeStart)
+                };
+                let _ = reply.send(result);
+            })))?;
+            receive(state, cancel, receiver).await?
         }
 
         pub(in crate::supervisor) fn send(&self, request: Request) -> Result<(), NotStarted> {

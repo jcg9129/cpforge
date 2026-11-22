@@ -184,6 +184,11 @@ cleanup service finalizes and persists the record and releases resources.
 - Each job's **creation thread** (§3.3) performs every potentially blocking setup step in order: opening stdin and
   sink files, creating pipes, the job object (Windows), the OS creation call.
   Async code never performs them.
+  Run-directory creation, recipe resolution (deferred program completion and
+  staging for cwd), and post-build validation also run on the creation thread.
+  Cancellation interrupts the first two at step boundaries (the run is
+  `NotStarted{CancelledBeforeStart}`, report contract §4.5); post-build
+  validation is awaited, since it decides the build result.
 - Per run, `committed` and `cancel` are atomics. The creation thread checks
   `cancel`, sets `committed`, calls the OS creation function. Cancellation
   sets `cancel` and returns **without waiting**; if `committed` was set, the

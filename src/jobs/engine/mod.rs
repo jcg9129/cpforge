@@ -129,6 +129,10 @@ impl PhaseHooks for NoHooks {}
 pub enum Point {
     BeforeAdmission(u32),
     AfterAdmission(u32),
+    #[cfg(feature = "storage-test-hooks")]
+    BeforeRunMkdir(u32),
+    #[cfg(feature = "storage-test-hooks")]
+    BeforeRecipeCompletion(u32),
     BeforeCheck(u32),
     AfterCheckAdmission(u32),
     BeforeClass(u32),
@@ -503,7 +507,7 @@ impl<'probe> Engine<'probe> {
         let generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
-                Recipe::Deferred(stage) => Some(stage.clone()),
+                Recipe::Deferred(stage) => Some(stage.as_ref().clone()),
                 _ => None,
             })
             .collect();
@@ -587,30 +591,25 @@ impl<'probe> Engine<'probe> {
                     .take(16)
                     .collect();
                 if let Some(ExecutionRecord::Started(outcome)) = execution.evidence.as_deref() {
-                    match catch_unwind(AssertUnwindSafe(|| {
-                        build::finish_build(pending, build::BuildExecutionOutcome::from(&**outcome))
-                    })) {
-                        Ok(validation) => {
-                            post = PostBuild::from_validation(validation.as_ref());
-                            target.validated = validation.ok();
+                    match caught(async {
+                        executor
+                            .finish_build(
+                                pending,
+                                build::BuildExecutionOutcome::from(&**outcome),
+                                generated.clone(),
+                                ready.owner.clone(),
+                            )
+                            .await
+                    })
+                    .await
+                    {
+                        Ok(Ok(completion)) => {
+                            post = completion.post;
+                            target.validated = completion.validated;
                         }
-                        Err(_) => post.invariant = Some(Invariant::BuildEvidence),
-                    }
-                }
-                if target.validated.is_some() {
-                    for generated in &generated {
-                        if let Err(error) = generated
-                            .as_ref()
-                            .clone()
-                            .complete(&crate::exec::NativeProbe)
-                        {
-                            post = PostBuild::from_failure_kind(
-                                &build::BuildFailureKind::GeneratedProgramNotLaunchable(error),
-                                root.as_deref().expect("admitted build output root"),
-                            );
-                            target.validated = None;
-                            break;
-                        }
+                        // A panic or an unavailable creation thread, as a
+                        // panicking inline validation before.
+                        Ok(Err(_)) | Err(()) => post.invariant = Some(Invariant::BuildEvidence),
                     }
                 }
                 let result = report::build_result(&execution.result, &post);
@@ -1181,66 +1180,47 @@ impl Context<'_> {
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.phase_point(Point::AfterAdmission(plan.index));
         let directory = self.dir.join(run.as_str());
-        let mut failure = None;
-        let mut writable = true;
-        // Do not inspect, write or remove any part of a colliding run tree.
-        for path in [&directory, &directory.join("cwd"), &directory.join("out")] {
-            if let Err(error) = fs::create_dir(path) {
-                writable = false;
-                failure = Some(StartFailure {
-                    reason: NotStartedReason::Setup,
-                    api: None,
-                    os_error: error.raw_os_error(),
-                    invalid_limit: None,
-                });
-                break;
-            }
-        }
-        let mut stage = catch_unwind(AssertUnwindSafe(|| -> Result<_, ()> {
-            if plan.stage == Stage::Build {
-                target
-                    .pending
-                    .as_ref()
-                    .ok_or(())?
-                    .stage_for_cwd(directory.join("cwd"))
-                    .map_err(|_| ())
-            } else {
-                match &plan.recipe {
-                    Recipe::Resolved(stage) => {
-                        let mut stage = stage.as_ref().clone();
-                        if !stage.shared_cwd {
-                            stage.cwd = directory.join("cwd");
-                        }
-                        Ok(stage)
-                    }
-                    Recipe::Deferred(stage) => {
-                        let mut resolved = stage
-                            .as_ref()
-                            .clone()
-                            .complete(&crate::exec::NativeProbe)
-                            .map_err(|_| ())?;
-                        if !resolved.shared_cwd {
-                            resolved.cwd = directory.join("cwd");
-                        }
-                        Ok(resolved)
-                    }
-                    Recipe::TargetRun => {
-                        if let Some(build) = &target.validated {
-                            build.run(directory.join("cwd")).map_err(|_| ())
-                        } else {
-                            target
-                                .free
-                                .as_ref()
-                                .ok_or(())?
-                                .run(directory.join("cwd"))
-                                .map_err(|_| ())
-                        }
-                    }
-                }
-            }
-        }))
-        .ok()
-        .and_then(Result::ok);
+        let recipe = if plan.stage == Stage::Build {
+            target
+                .pending
+                .as_ref()
+                .map(|pending| PreparationRecipe::Target(Box::new(pending.stage_recipe())))
+        } else if matches!(plan.recipe, Recipe::TargetRun) {
+            target
+                .validated
+                .as_ref()
+                .map(|build| PreparationRecipe::Target(Box::new(build.stage_recipe())))
+                .or_else(|| {
+                    target
+                        .free
+                        .as_ref()
+                        .map(|free| PreparationRecipe::Target(Box::new(free.stage_recipe())))
+                })
+        } else {
+            Some(PreparationRecipe::Stage(plan.recipe.clone()))
+        };
+        let preparation = RunPreparation {
+            directory: directory.clone(),
+            recipe,
+            owner: self.owner.clone(),
+            #[cfg(feature = "storage-test-hooks")]
+            observation: self.observer.cloned(),
+            #[cfg(feature = "storage-test-hooks")]
+            execution: plan.index,
+        };
+        let prepared =
+            caught(async { executor.prepare_run(preparation, self.cancel.token()).await }).await;
+        let PreparedRun {
+            mut stage,
+            mut failure,
+            writable,
+            interrupted,
+        } = prepared.unwrap_or(PreparedRun {
+            stage: None,
+            failure: None,
+            writable: false,
+            interrupted: false,
+        });
         if plan.stage == Stage::Hook {
             if let Some(stage) = &mut stage {
                 let mut injected = vec![
@@ -1480,8 +1460,9 @@ impl Context<'_> {
             plan,
             run: Some(run),
             program: spec.as_ref().map(|s| s.command.program.clone()),
-            // Report §4.5: `spec` is null only for skipped executions.
-            spec: Some(ArtifactRef {
+            // Report §4.5: `spec` is null only for skipped executions and for
+            // cancellation that interrupted run preparation (E §3.4).
+            spec: (!interrupted).then(|| ArtifactRef {
                 digest: spec.as_ref().and_then(|s| s.digest),
                 ..ArtifactRef::memory()
             }),
