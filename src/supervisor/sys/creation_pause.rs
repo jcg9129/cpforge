@@ -20,7 +20,11 @@ impl CreationPause {
     }
 
     pub(in crate::supervisor) async fn entered(&self) {
-        let fd = AsyncFd::new(self.parent.try_clone().unwrap()).unwrap();
+        let socket = self.parent.try_clone().unwrap();
+        // SAFETY: the cloned stream owns its descriptor and keeps it valid and
+        // unchanged until the AsyncFd drops; it is never closed behind its back.
+        let fd = unsafe { AsyncFd::register_with_interest(socket, tokio::io::Interest::READABLE) }
+            .unwrap();
         loop {
             let mut ready = fd.readable().await.unwrap();
             match ready.try_io(|fd| {
