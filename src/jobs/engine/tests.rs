@@ -1446,6 +1446,105 @@ fn stalled_persistence_bounds_w_times_out_the_queue_and_omits_terminal_path() {
     );
 }
 
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn late_persistence_rename_keeps_report_final_at_w_without_duplicate_warnings() {
+    use crate::jobs::persist::{JobPersistence, RenameGate};
+    use crate::report::wire;
+
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 1, &Tools);
+    let dir = ready.dir.clone();
+    let gate = Arc::new(RenameGate::default());
+    let mut persistence =
+        JobPersistence::stalled_rename(&ready, Duration::from_secs(5), gate.clone());
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let mut receiver = engine.events().subscribe().unwrap();
+    runtime(async {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut fake = Fake::default();
+            let mut hooks = NoHooks;
+            let (report, ()) =
+                tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), async {
+                    gate.reached.notified().await
+                },);
+            assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+            let execution = &report.data().executions[0];
+            for reference in [&execution.spec, &execution.record] {
+                let reference = reference.as_ref().expect("settled artefact");
+                assert_eq!(reference.error, Some(PersistError::Timeout));
+                assert!(reference.path.is_none());
+            }
+            let warnings: Vec<_> = report
+                .data()
+                .warnings
+                .iter()
+                .filter_map(|warning| match warning {
+                    Warning::Persistence {
+                        artefact,
+                        run,
+                        error,
+                    } => {
+                        assert_eq!(Some(run), execution.run.as_ref());
+                        assert_eq!(*error, PersistError::Timeout);
+                        Some(*artefact)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(warnings, ["spec", "record", "cleanup_log"]);
+            assert!(matches!(
+                report.persistence(),
+                ReportPersistence::Failed {
+                    error: PersistError::WorkerUnavailable,
+                    ..
+                }
+            ));
+            let frozen = wire::encode_stdout_report(&report).unwrap();
+            let json = wire::read::read_json(&frozen).unwrap();
+            assert_eq!(
+                json["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|warning| warning["kind"] == "persist")
+                    .count(),
+                3
+            );
+            assert!(!dir.join("r00000/spec.json").exists());
+            while receiver.recv().await.is_some() {}
+            let terminal = receiver.terminal().await;
+            assert!(terminal.report_id.is_none());
+            let frozen_terminal = wire::encode_job_finished(&terminal).unwrap();
+
+            // W and the terminal slot have settled before the syscall resumes.
+            gate.release.notify_one();
+            gate.completed.notified().await;
+            let landed = fs::read(dir.join("r00000/spec.json")).unwrap();
+            assert!(wire::read::read_json(&landed).is_ok());
+            assert!(!dir.join("r00000/record.json").exists());
+            assert!(!dir.join("r00000/cleanup.log").exists());
+            assert!(!dir.join("report.json").exists());
+            assert_eq!(wire::encode_stdout_report(&report).unwrap(), frozen);
+            assert_eq!(
+                wire::encode_job_finished(&terminal).unwrap(),
+                frozen_terminal
+            );
+            assert!(receiver.recv().await.is_none());
+            let mut executions = report.data().executions.clone();
+            assert!(persistence.settle(&mut executions).await.is_empty());
+        })
+        .await
+        .expect("late publication must not delay settlement or crash the job");
+    });
+}
+
 #[test]
 fn report_collision_fails_publication_without_rewriting_or_changing_verdict() {
     use crate::jobs::persist::JobPersistence;

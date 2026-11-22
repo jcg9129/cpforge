@@ -3,6 +3,7 @@ use cpf_fixture::harness::fixture_path;
 use cpforge::supervisor::session::*;
 use cpforge::supervisor::*;
 use std::future::Future;
+use std::io::Write;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -515,6 +516,11 @@ fn fixture_05_slow_destination_and_exact_loss_accounting() {
         assert_eq!(stop(&outcome, Role::S).unwrap().1, StopCause::SessionLimit);
         let stats = outcome.solution_to_interactor.as_relay().unwrap();
         assert!(stats.delivery_incomplete.bytes > 0);
+        assert_eq!(stats.discarded_over_cap, 0);
+        assert_eq!(
+            stats.delivery_incomplete.bytes,
+            stats.bytes_read - stats.bytes_forwarded
+        );
         assert_eq!(
             stats.delivery_incomplete.unread_pipe_contents,
             UnreadPipeContents::Unknown
@@ -711,21 +717,55 @@ fn fixture_15_cancel_during_blocked_forward() {
     });
 }
 #[test]
-fn fixture_18_twenty_sessions_return_fds_threads_and_credits() {
-    test(async {
-        for _ in 0..2 {
-            trace(&run_session(spec(&["exit:0"], &["exit:0"])).await);
+fn fixture_18_fifty_warmup_then_five_hundred_sessions_release_all_resources() {
+    test_with_timeout(Duration::from_secs(120), async {
+        let directory = TranscriptDirectory::new();
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let paths = [directory.0.join("s"), directory.0.join("i")];
+        let mut identities = Vec::with_capacity(1100);
+        async fn once(paths: &[std::path::PathBuf; 2], identities: &mut Vec<(u32, u64)>) {
+            // No dialogue, descendants, or barrier round trips: publish each
+            // root's identity solely so an unreaped zombie cannot be missed.
+            let outcome = run_session(spec(
+                &[&format!("identity-file:{}", paths[0].display()), "exit:0"],
+                &[&format!("identity-file:{}", paths[1].display()), "exit:0"],
+            ))
+            .await;
+            trace(&outcome);
+            for run in [&outcome.solution, &outcome.interactor] {
+                assert_eq!(root(run).status, Termination::Exited { code: 0 });
+            }
+            identities.extend(paths.iter().map(|path| identity_file(path)));
+        }
+        fn counts(identities: &[(u32, u64)]) -> (usize, usize, Counters, usize) {
+            let mut zombies = 0;
+            for &(pid, start) in identities {
+                if let Some((observed_start, zombie)) = process_identity(pid) {
+                    if observed_start == start {
+                        assert!(zombie, "session root {pid} is still live at quiescence");
+                        zombies += 1;
+                    }
+                }
+            }
+            (fd_count(), thread_count(), debug_counters(), zombies)
+        }
+        for _ in 0..50 {
+            once(&paths, &mut identities).await;
         }
         quiescent().await;
-        fn counts() -> (usize, usize) {
-            (fd_count(), thread_count())
-        }
-        let baseline = counts();
-        for _ in 0..20 {
-            trace(&run_session(spec(&["exit:0"], &["exit:0"])).await);
+        let baseline = counts(&identities);
+        assert_eq!(baseline.2.slots_in_use, 0);
+        assert_eq!(baseline.2.service_pending, 0);
+        assert_eq!(baseline.2.credits_in_use, 1); // the process cleanup service
+        assert_eq!(baseline.3, 0);
+        for batch in 1..=5 {
+            for _ in 0..100 {
+                once(&paths, &mut identities).await;
+            }
             quiescent().await;
-            until(|| counts() == baseline).await;
-            assert_eq!(counts(), baseline);
+            // OS thread disappearance can trail the last credit release.
+            until(|| counts(&identities) == baseline).await;
+            assert_eq!(counts(&identities), baseline, "session batch {batch}");
         }
     });
 }
@@ -1780,28 +1820,54 @@ fn direct_mode_transcript_and_idle_requests_are_rejected_before_start() {
     });
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-#[ignore = "fixture 17: reports latency without a performance threshold"]
-fn fixture_17_tiny_exchange_latency_benchmark() {
-    test_with_timeout(Duration::from_secs(120), async {
-        for mode in [SessionMode::Relay, SessionMode::Direct] {
-            let mut spec = spec(&["pingpong:100000"], &["pong:100000"]);
-            spec.mode = mode;
-            spec.wall_deadline = Duration::from_secs(60);
-            let outcome = run_session(spec).await;
-            trace(&outcome);
-            for run in [&outcome.solution, &outcome.interactor] {
-                assert_eq!(root(run).status, Termination::Exited { code: 0 });
-            }
-            println!(
-                "{mode:?}: 100000 round trips, total {:.6} s, {:.3} us/round trip, coordinator wakeups {}",
-                outcome.elapsed.as_secs_f64(),
-                outcome.elapsed.as_secs_f64() * 1e6 / 100000.0,
-                outcome.coordinator_wakeups
+async fn tiny_exchange_latency(exchanges: u32, ceiling: Option<Duration>) {
+    for mode in [SessionMode::Relay, SessionMode::Direct] {
+        let mut spec = spec(
+            &[&format!("pingpong:{exchanges}")],
+            &[&format!("pong:{exchanges}")],
+        );
+        spec.mode = mode;
+        spec.wall_deadline = Duration::from_secs(60);
+        let outcome = run_session(spec).await;
+        trace(&outcome);
+        for run in [&outcome.solution, &outcome.interactor] {
+            assert_eq!(root(run).status, Termination::Exited { code: 0 });
+        }
+        // Write through the OS stream so successful tests retain the numbers
+        // in CI logs even when libtest's output capture is enabled.
+        writeln!(
+            std::io::stdout().lock(),
+            "{mode:?}: {exchanges} round trips, total {:.6} s, {:.3} us/round trip, coordinator wakeups {}",
+            outcome.elapsed.as_secs_f64(),
+            outcome.elapsed.as_secs_f64() * 1e6 / f64::from(exchanges),
+            outcome.coordinator_wakeups
+        )
+        .unwrap();
+        if let Some(ceiling) = ceiling {
+            assert!(
+                outcome.elapsed < ceiling,
+                "{mode:?}: {} us/round trip exceeds generous CI ceiling",
+                outcome.elapsed.as_secs_f64() * 1e6 / f64::from(exchanges)
             );
         }
+    }
+}
+
+#[test]
+fn fixture_17_ten_thousand_exchange_latency_ci() {
+    test_with_timeout(Duration::from_secs(90), async {
+        // 3 ms per round trip allows heavily loaded shared CI hosts.
+        tiny_exchange_latency(10_000, Some(Duration::from_secs(30))).await;
     });
+}
+
+#[test]
+#[ignore = "fixture 17: full latency benchmark without a performance threshold"]
+fn fixture_17_tiny_exchange_latency_benchmark() {
+    test_with_timeout(
+        Duration::from_secs(130),
+        tiny_exchange_latency(100_000, None),
+    );
 }
 
 #[test]

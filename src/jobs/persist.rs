@@ -58,6 +58,38 @@ enum Content {
         spec: Arc<Mutex<Option<ArtifactRef>>>,
     },
 }
+// Reuse storage's pre-rename seam, after the temporary file is complete and
+// synced. The gate is local to this worker thread and never affects other jobs.
+#[cfg(all(test, feature = "storage-test-hooks"))]
+thread_local! {
+    static RENAME_GATE: std::cell::RefCell<Option<Arc<RenameGate>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(all(test, feature = "storage-test-hooks"))]
+#[derive(Debug, Default)]
+pub(crate) struct RenameGate {
+    pub(crate) reached: Notify,
+    pub(crate) release: Notify,
+    pub(crate) completed: Notify,
+}
+
+#[cfg(all(test, feature = "storage-test-hooks"))]
+fn pause_before_rename(_: &std::path::Path) {
+    let gate = RENAME_GATE.with(|cell| cell.borrow().as_ref().unwrap().clone());
+    gate.reached.notify_one();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), gate.release.notified())
+                .await
+                .expect("rename gate was not released");
+        });
+}
+
 struct Write {
     path: PathBuf,
     content: Content,
@@ -68,6 +100,8 @@ struct Write {
     spec_result: Option<Arc<Mutex<Option<ArtifactRef>>>>,
     #[cfg(test)]
     gate: Option<Arc<Notify>>,
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    rename_gate: Option<Arc<RenameGate>>,
 }
 
 struct Request {
@@ -95,6 +129,8 @@ pub struct JobPersistence {
     report_attempted: bool,
     #[cfg(test)]
     report_gate: Option<Arc<Notify>>,
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    rename_gate: Option<Arc<RenameGate>>,
 }
 impl JobPersistence {
     /// Reserves the worker's thread credit and creates the worker. Failure
@@ -121,6 +157,17 @@ impl JobPersistence {
         let mut service =
             Self::start(ready.owner.clone(), bound, None).expect("persistence worker");
         service.report_gate = Some(gate);
+        service
+    }
+
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    pub(crate) fn stalled_rename(
+        ready: &super::ReadyJob<'_>,
+        bound: Duration,
+        gate: Arc<RenameGate>,
+    ) -> Self {
+        let mut service = Self::start(ready.owner.clone(), bound, None).unwrap();
+        service.rename_gate = Some(gate);
         service
     }
 
@@ -195,8 +242,21 @@ impl JobPersistence {
                                     .borrow_mut()
                                     .push(worker_owner.directory().join(parent));
                             }
+                            #[cfg(all(test, feature = "storage-test-hooks"))]
+                            let guard = {
+                                let mut guard = guard;
+                                if let Some(gate) = &write.rename_gate {
+                                    RENAME_GATE
+                                        .with(|cell| *cell.borrow_mut() = Some(gate.clone()));
+                                    guard.test_hooks.before_file_publish =
+                                        Some(pause_before_rename);
+                                }
+                                guard
+                            };
                             let published =
                                 storage::publish_file_noclobber(&guard, &write.path, &bytes);
+                            #[cfg(all(test, feature = "storage-test-hooks"))]
+                            RENAME_GATE.with(|cell| *cell.borrow_mut() = None);
                             account(&mut write.reservation, bytes.len() as u64, &published);
                             match published {
                                 Ok(published) => Outcome {
@@ -222,6 +282,10 @@ impl JobPersistence {
                     // A completion after its deadline is never a publication observation.
                     if Instant::now() >= write.deadline || stopped.load(Ordering::Acquire) {
                         stopped.store(true, Ordering::Release);
+                        #[cfg(all(test, feature = "storage-test-hooks"))]
+                        if let Some(gate) = &write.rename_gate {
+                            gate.completed.notify_one();
+                        }
                         break;
                     }
                     if let Some(spec) = write.spec_result {
@@ -242,6 +306,8 @@ impl JobPersistence {
             report_attempted: false,
             #[cfg(test)]
             report_gate: None,
+            #[cfg(all(test, feature = "storage-test-hooks"))]
+            rename_gate: None,
         })
     }
 
@@ -313,6 +379,8 @@ impl JobPersistence {
                 } else {
                     None
                 },
+                #[cfg(all(test, feature = "storage-test-hooks"))]
+                rename_gate: self.rename_gate.take(),
             };
             match &self.sender {
                 Some(sender) => match sender.try_send(write) {
@@ -682,6 +750,46 @@ mod tests {
             .await
             .unwrap();
         });
+        drop(service);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn late_rename_keeps_timeout_and_never_fills_the_success_cell() {
+        let (path, owner, budget) = fixture();
+        let gate = Arc::new(RenameGate::default());
+        let mut service = JobPersistence::start(owner, Duration::from_secs(1), None).unwrap();
+        service.rename_gate = Some(gate.clone());
+        let cell = Arc::new(Mutex::new(None));
+        let mut write = request(0, &budget);
+        write.spec_result = Some(cell.clone());
+        let start = Instant::now();
+        service.enqueue_write(write);
+        runtime(async {
+            tokio::time::timeout(Duration::from_secs(4), async {
+                gate.reached.notified().await;
+                assert!(!path.join("file0").exists());
+                service.wait().await;
+                let outcome = service.pending[0].result.as_ref().unwrap();
+                assert_eq!(outcome.reference.error, Some(PersistError::Timeout));
+                assert!(outcome.reference.path.is_none());
+                assert!(!path.join("file0").exists());
+                gate.release.notify_one();
+                gate.completed.notified().await;
+                assert_eq!(std::fs::read(path.join("file0")).unwrap(), [42]);
+                // A later wait must not turn the timed-out write into success.
+                service.wait().await;
+                let outcome = service.pending[0].result.as_ref().unwrap();
+                assert_eq!(outcome.reference.error, Some(PersistError::Timeout));
+                assert!(outcome.reference.path.is_none());
+                assert!(cell.lock().unwrap().is_none());
+                assert!(service.unavailable.load(Ordering::Acquire));
+            })
+            .await
+            .expect("late rename must be bounded");
+        });
+        assert!(start.elapsed() < Duration::from_secs(4));
         drop(service);
         std::fs::remove_dir_all(path).unwrap();
     }
