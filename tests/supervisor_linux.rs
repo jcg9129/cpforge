@@ -188,6 +188,33 @@ fn fd_count() -> usize {
     fs::read_dir(path).unwrap().count()
 }
 
+#[cfg(target_os = "linux")]
+fn thread_count() -> usize {
+    fs::read_dir("/proc/self/task").unwrap().count()
+}
+
+#[cfg(target_os = "macos")]
+fn thread_count() -> usize {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    // SAFETY: proc_pidinfo writes at most size bytes into this structure and
+    // retains no pointer. Querying our own task does not acquire Mach rights.
+    let count = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as i32,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    assert_eq!(count, size, "short PROC_PIDTASKINFO reply");
+    // SAFETY: the kernel returned the entire initialized structure.
+    let threads = unsafe { info.assume_init() }.pti_threadnum;
+    assert!(threads > 0);
+    threads as usize
+}
+
 // Scale runner scheduling allowances only; policy deadlines stay fixed.
 fn allowance(milliseconds: u64) -> Duration {
     Duration::from_millis(milliseconds * if cfg!(target_os = "macos") { 4 } else { 1 })
@@ -211,6 +238,26 @@ async fn until(mut condition: impl FnMut() -> bool) {
         assert!(
             Instant::now() < deadline,
             "condition not met within 1 second"
+        );
+        // This polls an observable condition, rather than sleeping to coordinate.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+// Call at a quiescence point. Workers return their credits before their
+// threads finish exiting, and macOS reclaims a joined thread asynchronously,
+// so equality is awaited within the bound; a leak never converges.
+async fn settled(fds: usize, threads: usize) {
+    let deadline = Instant::now() + allowance(1000);
+    loop {
+        let observed = (fd_count(), thread_count());
+        if observed == (fds, threads) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fds and threads {observed:?}, expected {:?}",
+            (fds, threads)
         );
         // This polls an observable condition, rather than sleeping to coordinate.
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -835,16 +882,18 @@ fn mixed_runs_leave_stable_fds_threads_slots_and_no_zombies() {
             mixed(index).await;
         }
         let fds = fd_count();
-        #[cfg(target_os = "linux")]
-        let threads = fs::read_dir("/proc/self/task").unwrap().count();
+        let threads = thread_count();
+        let counters = debug_counters();
+        assert_eq!(counters.slots_in_use, 0);
+        assert_eq!(counters.service_pending, 0);
+        assert_eq!(counters.credits_in_use, 1); // Only the process-wide service.
         for _ in 0..5 {
             for index in 0..100 {
                 mixed(index).await;
             }
             quiescent().await;
-            assert_eq!(fd_count(), fds);
-            #[cfg(target_os = "linux")]
-            assert_eq!(fs::read_dir("/proc/self/task").unwrap().count(), threads);
+            settled(fds, threads).await;
+            assert_eq!(debug_counters(), counters);
             assert!(
                 !processes()
                     .iter()
@@ -1616,6 +1665,407 @@ fn capture_preserves_invalid_utf8_and_events_in_stream_order() {
     });
 }
 
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn force_exit_registry_primitive_does_not_wait_for_blocked_creation() {
+    run_test(async {
+        use cpforge::supervisor::{CreationGate, force_kill_active_for_test};
+
+        struct Release(Arc<CreationGate>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+
+        let baseline = debug_counters();
+        let before = children();
+        let active = spawn(&["hold"], false);
+        let active_pid = active.pid();
+        let gate = Release(Arc::new(CreationGate::default()));
+        let options = SpawnOptions {
+            creation_gate: Some(gate.0.clone()),
+            ..SpawnOptions::default()
+        };
+        let runtime = tokio::runtime::Handle::current();
+        let program = spec(&["exit:0"]);
+        let admission = admit().unwrap();
+        let (created, receive) = tokio::sync::oneshot::channel();
+        let creator = std::thread::spawn(move || {
+            let _entered = runtime.enter();
+            let result = spawn_root(program, admission, &options);
+            // A dropped receiver drops the owned root into cleanup.
+            let _ = created.send(result);
+        });
+        tokio::time::timeout(allowance(1000), gate.0.entered())
+            .await
+            .expect("creation did not reach the pre-commit gate");
+        let expected: BTreeSet<_> = before.iter().copied().chain([active_pid]).collect();
+        assert_eq!(children(), expected, "blocked creation started a child");
+
+        let (finished, forced) = tokio::sync::oneshot::channel();
+        let forcing = std::thread::spawn(move || {
+            force_kill_active_for_test();
+            let _ = finished.send(());
+        });
+        tokio::time::timeout(allowance(1000), forced)
+            .await
+            .expect("force exit waited for creation")
+            .unwrap();
+        forcing.join().unwrap();
+        // The registry kills its registered run while the other creation is
+        // still blocked. The unregistered Unix creation has the §11 caveat.
+        let outcome = wait_root(active).await;
+        assert!(matches!(
+            outcome.status,
+            Termination::Signalled { signal: 9, .. }
+        ));
+        assert!(process(active_pid).is_none());
+        assert_eq!(children(), before);
+        gate.0.release();
+        let root = tokio::time::timeout(allowance(1000), receive)
+            .await
+            .expect("released creation remained blocked")
+            .unwrap()
+            .unwrap();
+        creator.join().unwrap();
+        success(&wait_root(root).await, 0);
+        quiescent().await;
+        assert_eq!(children(), before);
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn pipe_creation_failures_release_partial_setup_without_starting_children() {
+    run_test(async {
+        use cpforge::supervisor::PipeTestGuard;
+
+        // Warm the runtime and service before checking the quiescent baseline.
+        success(&wait_root(spawn(&["exit:0"], false)).await, 0);
+        quiescent().await;
+        let baseline = debug_counters();
+        let before = children();
+        let fds = fd_count();
+        let threads = thread_count();
+        for forward_stdin in [false, true] {
+            // Forward stdin is prepared first, followed by stdout and stderr.
+            // Without stdin, failing stderr exercises cleanup of a started sink.
+            for k in 1..=if forward_stdin { 3 } else { 2 } {
+                let out = CapturePath::new();
+                let err = CapturePath::new();
+                let mut program = spec(&["hold"]);
+                if forward_stdin {
+                    program.stdin = StdinSpec::Forward;
+                }
+                program.stdout = capture(Sink::File(out.0.clone()), 4096, Exceed::Kill, false);
+                program.stderr = capture(Sink::File(err.0.clone()), 4096, Exceed::Kill, false);
+                let admission = admit().unwrap();
+                let ticket = admission.ticket();
+                let error = {
+                    let _failure = PipeTestGuard::fail_at(k);
+                    spawn_root(program, admission, &SpawnOptions::default()).unwrap_err()
+                };
+                assert!(
+                    matches!(error, NotStarted::Setup(ref e) if e.raw_os_error() == Some(libc::EMFILE)),
+                    "stdin={forward_stdin}, pipe={k}: {error:?}"
+                );
+                assert!(ticket.outcome().await.is_none());
+                quiescent().await; // One-second Linux / four-second macOS bound.
+                assert_eq!(children(), before);
+                settled(fds, threads).await;
+                assert_eq!(debug_counters(), baseline);
+            }
+        }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn session_pipe_creation_failures_release_cross_wiring_and_both_admissions() {
+    run_test(async {
+        use cpforge::supervisor::PipeTestGuard;
+        use cpforge::supervisor::session::{
+            RunRecord, SessionMode, SessionSpec, StartFailureKind, run_session,
+        };
+
+        success(&wait_root(spawn(&["exit:0"], false)).await, 0);
+        quiescent().await;
+        let baseline = debug_counters();
+        let before = children();
+        let fds = fd_count();
+        let threads = thread_count();
+        for (mode, pipes) in [(SessionMode::Direct, 4), (SessionMode::Relay, 6)] {
+            // Direct: two cross-wiring pipes, then the two stderr captures.
+            // Relay: two output + two input pipes, then the stderr captures.
+            for k in 1..=pipes {
+                let out = CapturePath::new();
+                let err = CapturePath::new();
+                let mut session =
+                    SessionSpec::new(spec(&["hold"]), spec(&["hold"]), Duration::from_secs(5));
+                session.mode = mode;
+                session.solution.stderr =
+                    capture(Sink::File(out.0.clone()), 4096, Exceed::Kill, false);
+                session.interactor.stderr =
+                    capture(Sink::File(err.0.clone()), 4096, Exceed::Kill, false);
+                let outcome = {
+                    // Setup runs on this runtime thread, before the first await.
+                    let _failure = PipeTestGuard::fail_at(k);
+                    tokio::time::timeout(allowance(1000), run_session(session))
+                        .await
+                        .expect("partial session setup exceeded its bound")
+                };
+                let mut emfile = false;
+                for run in [outcome.solution, outcome.interactor] {
+                    let RunRecord::NotStarted(reason) = run else {
+                        panic!("pipe failure started a session child");
+                    };
+                    assert_eq!(reason.kind, StartFailureKind::Setup);
+                    emfile |= reason.code == libc::EMFILE;
+                }
+                assert!(
+                    emfile,
+                    "{mode:?} pipe {k} did not reach the injected failure"
+                );
+                quiescent().await;
+                assert_eq!(children(), before);
+                settled(fds, threads).await;
+                assert_eq!(debug_counters(), baseline);
+            }
+        }
+    });
+}
+
+// A real filesystem failure complements the deterministic failing sink stub
+// below (which also runs on macOS). No mount privilege is required when
+// CI supplies CPF_TEST_TINY_FS or a small /dev/shm.
+#[cfg(target_os = "linux")]
+mod tiny_filesystem {
+    use super::*;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+    #[derive(Debug)]
+    pub(super) struct TinyFs {
+        pub directory: PathBuf,
+        mounted: bool,
+        sudo: bool,
+    }
+
+    fn bounded_command(command: &mut Command) -> std::io::Result<bool> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let failure = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break None,
+                // Polls the helper's exit; nothing else is coordinated here.
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(None) => {
+                    break Some(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "mount helper timed out",
+                    ));
+                }
+                Err(error) => break Some(error),
+            }
+        };
+        if failure.is_some() {
+            let _ = child.kill();
+        }
+        // Every path reaps here; after a successful try_wait std returns the
+        // cached status.
+        let status = child.wait();
+        match failure {
+            Some(error) => Err(error),
+            None => status.map(|status| status.success()),
+        }
+    }
+
+    fn small_tmpfs(path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: path is NUL-terminated; stat has space for the full reply.
+        if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        // SAFETY: statfs initialized the complete structure on success.
+        let stat = unsafe { stat.assume_init() };
+        stat.f_type == libc::TMPFS_MAGIC
+            && stat.f_bsize > 0
+            && stat.f_blocks.saturating_mul(stat.f_bsize as u64) <= MAX_BYTES
+            && stat.f_bavail.saturating_mul(stat.f_bsize as u64) >= 128 * 1024
+    }
+
+    impl TinyFs {
+        pub fn acquire() -> Option<Self> {
+            let name = format!("cpf-enospc-{}", std::process::id());
+            let candidates = std::env::var_os("CPF_TEST_TINY_FS")
+                .map(PathBuf::from)
+                .into_iter()
+                .chain([PathBuf::from("/dev/shm")]);
+            for base in candidates {
+                if small_tmpfs(&base) {
+                    let directory = base.join(&name);
+                    if fs::create_dir(&directory).is_ok() {
+                        return Some(Self {
+                            directory,
+                            mounted: false,
+                            sudo: false,
+                        });
+                    }
+                }
+            }
+            let directory = std::env::current_dir().unwrap().join("target").join(name);
+            fs::create_dir_all(directory.parent().unwrap()).unwrap();
+            fs::create_dir(&directory).unwrap();
+            // SAFETY: these identity queries have no pointer arguments or side effects.
+            let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+            let sudo = uid != 0;
+            let mut command = if sudo {
+                let mut command = Command::new("sudo");
+                command.args(["-n", "mount"]);
+                command
+            } else {
+                Command::new("mount")
+            };
+            command
+                .args(["-t", "tmpfs", "-o"])
+                .arg(format!("size=1m,mode=0700,uid={uid},gid={gid}"))
+                .arg("tmpfs")
+                .arg(&directory);
+            let result = bounded_command(&mut command);
+            if matches!(result, Ok(true)) {
+                Some(Self {
+                    directory,
+                    mounted: true,
+                    sudo,
+                })
+            } else {
+                fs::remove_dir(&directory).unwrap();
+                eprintln!(
+                    "SKIP real ENOSPC: no writable tmpfs <=64 MiB in CPF_TEST_TINY_FS or /dev/shm; root/sudo -n tmpfs mount unavailable: {result:?}"
+                );
+                None
+            }
+        }
+
+        pub fn fill(&self) {
+            let path = self.directory.join("filler");
+            let mut file = fs::File::create(path).unwrap();
+            let bytes = [0_u8; 64 * 1024];
+            let mut written = 0;
+            loop {
+                match file.write(&bytes) {
+                    Ok(0) => panic!("tmpfs filler made no progress"),
+                    Ok(n) => {
+                        written += n as u64;
+                        assert!(written <= MAX_BYTES, "tmpfs grew beyond the test's bound");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+                        // Leave enough room for file setup and a stored prefix;
+                        // even the smaller capture budget exceeds this headroom.
+                        assert!(written >= 64 * 1024);
+                        file.set_len(written - 64 * 1024).unwrap();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for TinyFs {
+        fn drop(&mut self) {
+            for name in ["stdout", "filler"] {
+                let _ = fs::remove_file(self.directory.join(name));
+            }
+            if self.mounted {
+                let mut command = if self.sudo {
+                    let mut command = Command::new("sudo");
+                    command.args(["-n", "umount"]);
+                    command
+                } else {
+                    Command::new("umount")
+                };
+                let result = bounded_command(command.arg(&self.directory));
+                if !matches!(result, Ok(true)) {
+                    // Never panic while unwinding from a failed assertion.
+                    eprintln!("tmpfs cleanup failed: {result:?}");
+                    assert!(std::thread::panicking(), "tmpfs cleanup failed");
+                    return;
+                }
+            }
+            let removed = fs::remove_dir(&self.directory);
+            assert!(removed.is_ok() || std::thread::panicking(), "{removed:?}");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_enospc_reports_write_loss_without_blocking_or_conflating_budget_loss() {
+    run_test(async {
+        let Some(filesystem) = tiny_filesystem::TinyFs::acquire() else {
+            return;
+        };
+        let baseline = debug_counters();
+        let fds = fd_count();
+        let threads = thread_count();
+        for budget in [1024 * 1024, 512 * 1024] {
+            filesystem.fill();
+            let path = filesystem.directory.join("stdout");
+            let mut program = spec(&["write:stdout:1048576", "exit:0"]);
+            program.stdout = capture(Sink::File(path.clone()), budget, Exceed::Discard, false);
+            let outcome = tokio::time::timeout(
+                allowance(3000),
+                wait_root(spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap()),
+            )
+            .await
+            .expect("ENOSPC blocked the run past three seconds");
+            success(&outcome, 0);
+            assert_eq!(outcome.stop_trigger, None);
+            assert!(outcome.violations.is_empty());
+            let record = outcome.stdout.unwrap();
+            assert!(record.eof);
+            assert_eq!(record.observed, 1024 * 1024);
+            assert_eq!(record.stored, fs::metadata(&path).unwrap().len());
+            assert!(record.stored < budget);
+            assert!(!record.complete());
+            assert!(record.has_infrastructure_loss());
+            assert!(
+                record
+                    .losses
+                    .contains(&CaptureLoss::WriteError(libc::ENOSPC)),
+                "{record:?}"
+            );
+            let exceeded = budget < record.observed;
+            assert_eq!(record.exceeded_at, exceeded.then_some(budget + 1));
+            assert_eq!(
+                record.losses.contains(&CaptureLoss::BudgetDiscard),
+                exceeded
+            );
+            quiescent().await;
+            assert_eq!(debug_counters(), baseline);
+            settled(fds, threads).await;
+            fs::remove_file(path).unwrap();
+        }
+    });
+}
+
 #[test]
 fn sink_partial_writes_and_eintr_are_retried_and_failures_never_block_the_child() {
     run_test(async {
@@ -2202,16 +2652,13 @@ fn captured_runs_release_descriptors_threads_and_credits() {
         run().await;
         quiescent().await;
         let fds = fd_count();
-        #[cfg(target_os = "linux")]
-        let threads = fs::read_dir("/proc/self/task").unwrap().count();
+        let threads = thread_count();
         let counters = debug_counters();
         for _ in 0..64 {
             run().await;
         }
         quiescent().await;
-        assert_eq!(fd_count(), fds);
-        #[cfg(target_os = "linux")]
-        assert_eq!(fs::read_dir("/proc/self/task").unwrap().count(), threads);
+        settled(fds, threads).await;
         assert_eq!(debug_counters(), counters);
         fs::remove_file(path.0.with_extension("err")).unwrap();
     });

@@ -25,6 +25,11 @@ pub(in crate::supervisor) fn reset_sigchld() -> io::Result<()> {
 }
 
 pub(in crate::supervisor) fn pipe() -> io::Result<(Reader, Writer)> {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    crate::supervisor::test_hooks::before_pipe()?;
     #[cfg(target_os = "macos")]
     let _creation = super::macos::creation_lock();
     let mut fds = [-1; 2];
@@ -79,6 +84,8 @@ pub(in crate::supervisor) type InputEnd = OwnedFd;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) fn input_pipe() -> io::Result<(InputEnd, tokio::net::unix::pipe::Sender)>
 {
+    #[cfg(feature = "storage-test-hooks")]
+    crate::supervisor::test_hooks::before_pipe()?;
     let mut fds = [-1; 2];
     #[cfg(target_os = "macos")]
     let _creation = super::macos::creation_lock();
@@ -113,6 +120,8 @@ pub(in crate::supervisor) fn input_pipe() -> io::Result<(InputEnd, tokio::net::u
 /// Both dialogue ends belong to children; neither end is nonblocking.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) fn direct_pipe() -> io::Result<(InputEnd, Writer)> {
+    #[cfg(feature = "storage-test-hooks")]
+    crate::supervisor::test_hooks::before_pipe()?;
     #[cfg(target_os = "macos")]
     let _creation = super::macos::creation_lock();
     let mut fds = [-1; 2];

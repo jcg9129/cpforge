@@ -218,3 +218,39 @@ mod linux {
         });
     }
 }
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+#[test]
+fn injected_emfile_fails_only_the_kth_pipe_and_scope_restores_creation() {
+    run_test(async {
+        use cpforge::supervisor::PipeTestGuard;
+        #[cfg(target_os = "linux")]
+        let directory = "/proc/self/fd";
+        #[cfg(target_os = "macos")]
+        let directory = "/dev/fd";
+        let count = || std::fs::read_dir(directory).unwrap().count();
+        // Register the reactor before counting, then fail every partial prefix.
+        drop(stdout_pipe().unwrap());
+        let before = count();
+        for k in 1..=3 {
+            {
+                let _failure = PipeTestGuard::fail_at(k);
+                let mut pipes = Vec::new();
+                for _ in 1..k {
+                    pipes.push(stdout_pipe().unwrap());
+                }
+                assert_eq!(
+                    stdout_pipe().unwrap_err().raw_os_error(),
+                    Some(libc::EMFILE)
+                );
+                drop(pipes);
+            }
+            assert_eq!(count(), before);
+            drop(stdout_pipe().unwrap());
+            assert_eq!(count(), before);
+        }
+    });
+}

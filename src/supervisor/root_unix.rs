@@ -372,6 +372,10 @@ pub(in crate::supervisor) fn spawn_prepared(
         notes.push(Note::LimitLowered);
     }
     let errors = Vec::with_capacity(16);
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = &opts.creation_gate {
+        gate.wait();
+    }
     let (pid, create_end) = sys::spawn(spec, &limits, opts.fail_limit_install)?;
     let admission = captures.take_admission();
     captures.start_readers();

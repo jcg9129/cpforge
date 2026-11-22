@@ -226,6 +226,11 @@ pub struct RootOutcome {
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub creation_gate: Option<Arc<super::CreationGate>>,
     pub stdout_sink: SinkTestOptions,
     pub stderr_sink: SinkTestOptions,
     pub force_polling_observer: bool,

@@ -24,11 +24,22 @@ pub use accounting::*;
 mod root;
 pub mod session;
 mod sys;
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+mod test_hooks;
 pub use cleanup::{
     Admission, Counters, Credits, GlobalBounds, ThreadCredits, TransferTicket, admit, admit_pair,
     debug_counters, global_bounds,
 };
 pub use root::*;
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+#[doc(hidden)]
+pub use test_hooks::{CreationGate, PipeTestGuard, force_kill_active_for_test};
 
 /// Persistence shares the process-wide credit bound without changing signal
 /// setup. A stalled worker retains this credit until its syscall returns.
