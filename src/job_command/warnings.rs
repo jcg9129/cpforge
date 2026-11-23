@@ -27,6 +27,7 @@ pub(super) fn line(warning: &WireWarning) -> String {
                 PersistError::Timeout => "timed out".into(),
                 PersistError::QueueFull => "persistence queue full".into(),
                 PersistError::WorkerUnavailable => "persistence worker unavailable".into(),
+                PersistError::Cancelled => "cancelled while waiting for the queue".into(),
                 PersistError::Io {
                     os_error: Some(code),
                 } => format!("I/O error (OS error {code})"),
@@ -161,6 +162,10 @@ mod tests {
                 "I/O error (OS error 28)",
             ),
             (PersistError::Io { os_error: None }, "I/O error"),
+            (
+                PersistError::Cancelled,
+                "cancelled while waiting for the queue",
+            ),
         ] {
             check(
                 WarningKind::Persist {
