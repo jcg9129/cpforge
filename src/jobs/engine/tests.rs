@@ -2781,7 +2781,16 @@ fn scripted_persistence_publishes_three_thousand_complete_executions_then_report
             let stored_spec = crate::report::wire::read::read_json(&files[spec_path]).unwrap();
             assert_eq!(stored_spec["document"], "execution_spec");
             let stored_record = crate::report::wire::read::read_json(&files[record_path]).unwrap();
-            assert_eq!(stored_record["spec"]["path"].as_str(), spec_path.to_str());
+            // Stored records name the spec with `/` on every platform.
+            let wire_spec_path = spec_path
+                .iter()
+                .map(|part| part.to_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("/");
+            assert_eq!(
+                stored_record["spec"]["path"].as_str(),
+                Some(&*wire_spec_path)
+            );
             assert!(
                 files[&record_path.with_file_name("cleanup.log")].starts_with(b"record finalized")
             );
