@@ -733,14 +733,23 @@ fn fixture_18_fifty_warmup_then_five_hundred_sessions_release_all_resources() {
         std::fs::create_dir_all(&directory.0).unwrap();
         let paths = [directory.0.join("s"), directory.0.join("i")];
         let mut identities = Vec::with_capacity(1100);
-        async fn once(paths: &[std::path::PathBuf; 2], identities: &mut Vec<(u32, u64)>) {
+        async fn once(
+            paths: &[std::path::PathBuf; 2],
+            identities: &mut Vec<(u32, u64)>,
+            index: usize,
+        ) {
             // No dialogue, descendants, or barrier round trips: publish each
             // root's identity solely so an unreaped zombie cannot be missed.
-            let outcome = run_session(spec(
+            let mut session = spec(
                 &[&format!("identity-file:{}", paths[0].display()), "exit:0"],
                 &[&format!("identity-file:{}", paths[1].display()), "exit:0"],
-            ))
-            .await;
+            );
+            session.mode = if index % 2 == 0 {
+                SessionMode::Relay
+            } else {
+                SessionMode::Direct
+            };
+            let outcome = run_session(session).await;
             trace(&outcome);
             for run in [&outcome.solution, &outcome.interactor] {
                 assert_eq!(root(run).status, Termination::Exited { code: 0 });
@@ -759,8 +768,8 @@ fn fixture_18_fifty_warmup_then_five_hundred_sessions_release_all_resources() {
             }
             (fd_count(), thread_count(), debug_counters(), zombies)
         }
-        for _ in 0..50 {
-            once(&paths, &mut identities).await;
+        for index in 0..50 {
+            once(&paths, &mut identities, index).await;
         }
         quiescent().await;
         let baseline = counts(&identities);
@@ -768,14 +777,18 @@ fn fixture_18_fifty_warmup_then_five_hundred_sessions_release_all_resources() {
         assert_eq!(baseline.2.service_pending, 0);
         assert_eq!(baseline.2.credits_in_use, 1); // the process cleanup service
         assert_eq!(baseline.3, 0);
+        #[cfg(feature = "storage-test-hooks")]
+        assert_eq!(baseline.2.owned_resources, 0);
         for batch in 1..=5 {
-            for _ in 0..100 {
-                once(&paths, &mut identities).await;
+            for index in 0..100 {
+                once(&paths, &mut identities, index).await;
             }
             quiescent().await;
             // OS thread disappearance can trail the last credit release.
             until(|| counts(&identities) == baseline).await;
             assert_eq!(counts(&identities), baseline, "session batch {batch}");
+            #[cfg(feature = "storage-test-hooks")]
+            assert_eq!(debug_counters().owned_resources, 0);
         }
     });
 }
@@ -851,18 +864,26 @@ fn pair_admission_failure_releases_every_reservation() {
 #[test]
 fn connected_plain_runs_are_unsupported() {
     test(async {
-        let mut plain = program(&["exit:0"]);
-        plain.stdin = StdinSpec::Connected;
-        assert!(matches!(
-            spawn_root(plain, admit().unwrap(), &SpawnOptions::default()),
-            Err(NotStarted::Unsupported)
-        ));
-        let mut plain = program(&["exit:0"]);
-        plain.stdout = OutputSpec::Connected;
-        assert!(matches!(
-            spawn_root(plain, admit().unwrap(), &SpawnOptions::default()),
-            Err(NotStarted::Unsupported)
-        ));
+        let baseline = debug_counters();
+        let fds = fd_count();
+        for endpoint in 0..3 {
+            let mut plain = program(&["hold"]);
+            match endpoint {
+                0 => plain.stdin = StdinSpec::Connected,
+                1 => plain.stdout = OutputSpec::Connected,
+                2 => plain.stderr = OutputSpec::Connected,
+                _ => unreachable!(),
+            }
+            let admission = admit().unwrap();
+            let ticket = admission.ticket();
+            assert!(matches!(
+                spawn_root(plain, admission, &SpawnOptions::default()),
+                Err(NotStarted::Unsupported)
+            ));
+            assert!(ticket.outcome().await.is_none());
+            assert_eq!(debug_counters(), baseline);
+            assert_eq!(fd_count(), fds);
+        }
     });
 }
 #[test]

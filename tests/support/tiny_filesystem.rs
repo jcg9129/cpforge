@@ -128,6 +128,10 @@ impl TinyFs {
             })
         } else {
             fs::remove_dir(&directory).unwrap();
+            assert!(
+                std::env::var_os("CPF_REQUIRE_TMPFS").as_deref() != Some(std::ffi::OsStr::new("1")),
+                "required real ENOSPC fixture: 1 MiB tmpfs mount unavailable: {result:?}"
+            );
             eprintln!(
                 "SKIP real ENOSPC: 1 MiB tmpfs mount via root/sudo -n unavailable: {result:?}"
             );

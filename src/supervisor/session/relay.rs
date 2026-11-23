@@ -58,6 +58,11 @@ impl Counters {
 
 /// Each instance owns all its endpoints and state. No cross-direction locks.
 pub(super) struct Relay {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    _owned: crate::supervisor::test_hooks::OwnedResource,
     pub counters: Arc<Counters>,
     pub transcript: Option<super::transcript::Direction>,
     pub origin: Instant,
@@ -84,6 +89,11 @@ impl Relay {
         records: usize,
     ) -> Self {
         Self {
+            #[cfg(all(
+                feature = "storage-test-hooks",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            _owned: crate::supervisor::test_hooks::OwnedResource::new(),
             counters: Arc::new(Counters::default()),
             transcript: None,
             origin: Instant::now(),

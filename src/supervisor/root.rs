@@ -236,9 +236,28 @@ pub struct SpawnOptions {
         any(target_os = "linux", target_os = "macos")
     ))]
     pub milestones: Option<Arc<super::Milestones>>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    /// Pause after capture freezes, before record finalization.
+    pub frozen_gate: Option<CancelToken>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    /// Pause with a finalized outcome and no remaining capture ownership.
+    pub finalized_gate: Option<CancelToken>,
+    #[cfg(all(feature = "storage-test-hooks", target_os = "macos"))]
+    /// Replace the receipt returned by this run's live kqueue registration.
+    pub kqueue_receipt_error: Option<i32>,
     #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
     pub pidfd_open_error: Option<i32>,
     #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+    /// Pause after creation returns and before pidfd_open.
+    pub pidfd_open_gate: Option<Arc<super::CreationGate>>,
+    #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+    /// Pause after pidfd_open succeeds and before AsyncFd/epoll registration.
     pub registration_gate: Option<Arc<super::CreationGate>>,
     #[cfg(all(
         feature = "storage-test-hooks",

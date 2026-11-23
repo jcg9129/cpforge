@@ -247,7 +247,7 @@ impl CleanupScan {
                 self.window = self
                     .window
                     .checked_mul(2)
-                    .filter(|size| *size <= PID_CAP)
+                    .filter(|size| *size <= self.buffer.len())
                     .ok_or(UnverifiedReason::Truncated)?;
                 return Ok(false);
             }
@@ -427,6 +427,37 @@ mod tests {
             scan.poll(deadline, None),
             Some(Cleanup::Unverified {
                 reason: UnverifiedReason::Truncated
+            })
+        );
+    }
+
+    #[test]
+    fn live_enumeration_with_a_one_pid_buffer_reports_truncation() {
+        let mut scan = scan();
+        // SAFETY: getpgrp has no arguments and only reads the caller's group.
+        scan.pgid = unsafe { libc::getpgrp() } as u32;
+        scan.buffer.truncate(1);
+        scan.window = 1;
+        // Our own process pins at least one member in this group. Supplying
+        // exactly one slot exercises real libproc saturation at a small cap.
+        assert_eq!(
+            scan.poll(Instant::now() + Duration::from_secs(1), None),
+            Some(Cleanup::Unverified {
+                reason: UnverifiedReason::Truncated
+            })
+        );
+    }
+
+    #[test]
+    fn short_pidinfo_reply_during_a_scan_never_confirms_cleanup() {
+        let mut scan = scan();
+        scan.list_reply = Some((size_of::<libc::pid_t>() as i32, 0));
+        scan.buffer[0] = 124; // inspect a member other than the excluded root
+        scan.inject_short_info();
+        assert_eq!(
+            scan.poll(Instant::now() + Duration::from_secs(1), None),
+            Some(Cleanup::Unverified {
+                reason: UnverifiedReason::InfoFailed
             })
         );
     }

@@ -14,7 +14,14 @@ pub(super) fn register_observer(root: &mut Root, pid: i32, opts: &SpawnOptions) 
         root.outcome().notes.push(Note::ObserverFallback);
         return;
     }
-    install_observer(root, macos::observer(pid));
+    #[cfg(feature = "storage-test-hooks")]
+    let result = opts.kqueue_receipt_error.map_or_else(
+        || macos::observer(pid),
+        |errno| macos::observer_with_receipt_error(pid, errno),
+    );
+    #[cfg(not(feature = "storage-test-hooks"))]
+    let result = macos::observer(pid);
+    install_observer(root, result);
 }
 
 // Separate result handling allows deterministic receipt-error injection without

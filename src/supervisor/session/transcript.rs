@@ -163,6 +163,11 @@ impl Drop for Handle {
     }
 }
 struct Worker {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    _owned: crate::supervisor::test_hooks::OwnedResource,
     file: sys::TranscriptFile,
     receiver: mpsc::Receiver<Message>,
     final_record: Arc<OnceLock<Final>>,
@@ -308,6 +313,11 @@ impl Writer {
             let failure = Arc::new(OnceLock::new());
             let final_record = Arc::new(OnceLock::new());
             let worker = Worker {
+                #[cfg(all(
+                    feature = "storage-test-hooks",
+                    any(target_os = "linux", target_os = "macos")
+                ))]
+                _owned: crate::supervisor::test_hooks::OwnedResource::new(),
                 file,
                 receiver,
                 final_record: final_record.clone(),

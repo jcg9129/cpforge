@@ -25,7 +25,7 @@ pub(super) fn register_observer(root: &mut Root, pid: i32, opts: &SpawnOptions) 
     } else {
         #[cfg(feature = "storage-test-hooks")]
         let result = opts.pidfd_open_error.map_or_else(
-            || sys::observer(pid),
+            || sys::observer(pid, opts.registration_gate.as_deref()),
             |errno| Err(io::Error::from_raw_os_error(errno)),
         );
         #[cfg(not(feature = "storage-test-hooks"))]

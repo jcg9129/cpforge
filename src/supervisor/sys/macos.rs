@@ -166,7 +166,11 @@ fn receipt(pid: i32, count: i32, receipt: &libc::kevent) -> io::Result<bool> {
     }
 }
 
-fn register(fd: &OwnedFd, pid: i32) -> io::Result<bool> {
+fn register(
+    fd: &OwnedFd,
+    pid: i32,
+    #[cfg(feature = "storage-test-hooks")] receipt_error: Option<i32>,
+) -> io::Result<bool> {
     let change = event(pid);
     let timeout = libc::timespec {
         tv_sec: 0,
@@ -190,6 +194,16 @@ fn register(fd: &OwnedFd, pid: i32) -> io::Result<bool> {
                 Err(error)
             };
         }
+        // Exercise the live queue's receipt handling, scoped to this registration.
+        #[cfg(feature = "storage-test-hooks")]
+        let count = if let Some(errno) = receipt_error {
+            output = event(pid);
+            output.flags = libc::EV_ERROR;
+            output.data = errno as libc::intptr_t;
+            1
+        } else {
+            count
+        };
         match receipt(pid, count, &output) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => return result,
@@ -198,8 +212,32 @@ fn register(fd: &OwnedFd, pid: i32) -> io::Result<bool> {
 }
 
 pub(in crate::supervisor) fn observer(pid: i32) -> io::Result<Observer> {
+    observer_inner(
+        pid,
+        #[cfg(feature = "storage-test-hooks")]
+        None,
+    )
+}
+
+#[cfg(feature = "storage-test-hooks")]
+pub(in crate::supervisor) fn observer_with_receipt_error(
+    pid: i32,
+    errno: i32,
+) -> io::Result<Observer> {
+    observer_inner(pid, Some(errno))
+}
+
+fn observer_inner(
+    pid: i32,
+    #[cfg(feature = "storage-test-hooks")] receipt_error: Option<i32>,
+) -> io::Result<Observer> {
     let fd = queue()?;
-    let exited = register(&fd, pid)?;
+    let exited = register(
+        &fd,
+        pid,
+        #[cfg(feature = "storage-test-hooks")]
+        receipt_error,
+    )?;
     #[cfg(test)]
     let registration_exited = exited;
     // Registration attaches to subsequent edges. Probe after attaching so an

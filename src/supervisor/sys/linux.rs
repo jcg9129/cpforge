@@ -90,7 +90,10 @@ pub(in crate::supervisor) fn spawn(
     Ok((pid, create_end))
 }
 
-pub(in crate::supervisor) fn observer(pid: i32) -> io::Result<Observer> {
+pub(in crate::supervisor) fn observer(
+    pid: i32,
+    #[cfg(feature = "storage-test-hooks")] gate: Option<&crate::supervisor::CreationGate>,
+) -> io::Result<Observer> {
     // SAFETY: pid is our owned, unreaped root; pidfd_open takes integer arguments
     // and returns a new CLOEXEC fd on success. It does not consume child status.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
@@ -99,6 +102,10 @@ pub(in crate::supervisor) fn observer(pid: i32) -> io::Result<Observer> {
     }
     // SAFETY: successful pidfd_open returned a uniquely owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = gate {
+        gate.before_registration(pid);
+    }
     // SAFETY: OwnedFd keeps this descriptor valid and unchanged until the
     // AsyncFd drops; it is never extracted, replaced, or closed behind its back.
     Ok(unsafe { AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE) }?)

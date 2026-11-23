@@ -77,6 +77,11 @@ pub(in crate::supervisor) const REAP_DEADLINE: Duration = Duration::from_secs(2)
 /// The admission key distinguishes reused numeric PIDs.
 #[derive(Debug)]
 struct Lease {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    _owned: crate::supervisor::test_hooks::OwnedResource,
     pid: i32,
     key: u64,
     capable: Arc<Mutex<bool>>,
@@ -129,6 +134,9 @@ pub(in crate::supervisor) struct Root {
     controls: Option<RunControls>,
     scan: Option<sys::CleanupScan>,
     cleanup_started: bool,
+    // A normal return can still transfer a stalled writer. Only a public
+    // drop before finalization adds cancellation to that transferred outcome.
+    finalized: bool,
     captures: Option<Captures>,
 }
 
@@ -167,7 +175,8 @@ fn wait_failed(outcome: &mut RootOutcome, error: io::Error) {
 
 impl Drop for Root {
     fn drop(&mut self) {
-        let transfer_cutoff = Instant::now() + capture::DRAIN;
+        let transfer_at = Instant::now();
+        let transfer_cutoff = transfer_at + capture::DRAIN;
         if let Some(captures) = &mut self.captures {
             captures.start_drain(Some(transfer_cutoff));
         }
@@ -215,6 +224,10 @@ impl Drop for Root {
             }
             request_kill(&lease, &mut outcome);
             push_note(&mut outcome, Note::Transferred);
+            #[cfg(feature = "storage-test-hooks")]
+            if let Some(stamps) = &outcome.milestones {
+                stamps.mark_at(Milestone::Transferred, transfer_at);
+            }
             self.admission
                 .take()
                 .expect("reserved transfer entry")
@@ -244,7 +257,7 @@ impl Drop for Root {
                     stamps.mark(Milestone::ResourcesReleased);
                 }
             }
-            if let (Some(captures), Some(outcome), Some(admission)) = (
+            if let (Some(captures), Some(mut outcome), Some(admission)) = (
                 self.captures.take(),
                 self.outcome.take(),
                 self.admission.take(),
@@ -253,6 +266,16 @@ impl Drop for Root {
                     return;
                 }
                 let key = admission.key();
+                if !self.finalized {
+                    if outcome.stop_trigger != Some(StopTrigger::Cancelled) {
+                        push_note(&mut outcome, Note::LateTrigger(StopTrigger::Cancelled));
+                    }
+                    push_note(&mut outcome, Note::Transferred);
+                }
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(stamps) = &outcome.milestones {
+                    stamps.mark_at(Milestone::Transferred, transfer_at);
+                }
                 admission.transfer(Transfer {
                     key,
                     lease: None,
@@ -443,6 +466,11 @@ pub(in crate::supervisor) fn spawn_prepared(
     }
     let admission = captures.take_admission();
     let lease = Lease {
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        _owned: crate::supervisor::test_hooks::OwnedResource::new(),
         pid,
         key: admission.key(),
         capable,
@@ -460,6 +488,7 @@ pub(in crate::supervisor) fn spawn_prepared(
         controls: None,
         scan: None,
         cleanup_started: false,
+        finalized: false,
         captures: Some(captures),
         outcome: Some(RootOutcome {
             #[cfg(feature = "storage-test-hooks")]
@@ -504,7 +533,7 @@ pub(in crate::supervisor) fn spawn_prepared(
         Err(reason) => root.outcome().termination.cleanup = Cleanup::Unverified { reason },
     }
     #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
-    if let Some(gate) = &opts.registration_gate {
+    if let Some(gate) = &opts.pidfd_open_gate {
         gate.before_registration(pid);
     }
     sys::register_observer(&mut root, pid, opts);
@@ -652,6 +681,10 @@ async fn finish_observed(
         };
         match result {
             Ok(Some((status, usage))) => {
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(stamps) = &root.outcome().milestones {
+                    stamps.mark(Milestone::RootReaped);
+                }
                 root.outcome().status = status;
                 crate::supervisor::accounting::record_usage(root.outcome(), usage);
                 root.lease.take();
@@ -686,11 +719,20 @@ async fn finish_capture(root: &mut Root, transferred: bool) -> RootOutcome {
         captures
             .finish(root.outcome.as_mut().unwrap(), transferred)
             .await;
+        #[cfg(feature = "storage-test-hooks")]
+        if let Some(gate) = &root.opts.frozen_gate {
+            gate.cancelled().await;
+        }
         if captures.resources_released() {
             root.captures.take();
+            root.finalized = true;
             #[cfg(feature = "storage-test-hooks")]
             if let Some(stamps) = &root.outcome().milestones {
                 stamps.mark(Milestone::RecordFinalized);
+            }
+            #[cfg(feature = "storage-test-hooks")]
+            if let Some(gate) = &root.opts.finalized_gate {
+                gate.cancelled().await;
             }
             return root.outcome.take().expect("final outcome");
         }
@@ -700,6 +742,7 @@ async fn finish_capture(root: &mut Root, transferred: bool) -> RootOutcome {
             push_note(root.outcome.as_mut().unwrap(), Note::Transferred);
         }
     }
+    root.finalized = true;
     root.outcome.as_ref().expect("final outcome").clone()
 }
 
@@ -787,6 +830,10 @@ impl Transfer {
             .is_none_or(|captures| captures.poll_freeze(&mut self.outcome));
         if frozen && (self.physical_done || Instant::now() >= self.transfer_cutoff) {
             self.logical_published = true;
+            #[cfg(feature = "storage-test-hooks")]
+            if let Some(stamps) = &self.outcome.milestones {
+                stamps.mark(Milestone::RecordFinalized);
+            }
             return Some(self.outcome.clone());
         }
         None
@@ -842,6 +889,10 @@ impl Transfer {
         lease.revoke();
         match sys::reap(lease.pid) {
             Ok(Some((status, usage))) => {
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(stamps) = &self.outcome.milestones {
+                    stamps.mark(Milestone::RootReaped);
+                }
                 self.outcome.status = status;
                 crate::supervisor::accounting::record_usage(&mut self.outcome, usage);
                 true

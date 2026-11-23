@@ -27,6 +27,11 @@ use std::time::{Duration, Instant};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_test(test: impl Future<Output = ()>) {
+    run_test_with_watchdog(10_000, test);
+}
+
+// The watchdog only stops a hang; it is never an acceptance bound.
+fn run_test_with_watchdog(milliseconds: u64, test: impl Future<Output = ()>) {
     let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     init_process().unwrap();
     tokio::runtime::Builder::new_current_thread()
@@ -34,7 +39,7 @@ fn run_test(test: impl Future<Output = ()>) {
         .build()
         .unwrap()
         .block_on(async {
-            tokio::time::timeout(allowance(10_000), async {
+            tokio::time::timeout(allowance(milliseconds), async {
                 test.await;
                 quiescent().await;
             })
@@ -614,7 +619,9 @@ fn wait4_reports_resident_memory_in_bytes() {
 #[test]
 fn busy_fixture_reports_cpu_microseconds() {
     run_test(async {
-        let outcome = wait_root(spawn(&["spin:150"], false)).await;
+        // A serial idle prefix keeps setup CPU inside the measured wall
+        // interval without adding an assertion allowance or coordinating a race.
+        let outcome = wait_root(spawn(&["sleep:20", "spin:150"], false)).await;
         success(&outcome, 0);
         let measurement = metric(&outcome, MetricKind::CpuTime);
         assert_eq!(measurement.unit, Unit::Microseconds);
@@ -623,8 +630,7 @@ fn busy_fixture_reports_cpu_microseconds() {
         let value = measurement.value.unwrap();
         assert!(value > 0);
         assert!(
-            u128::from(value)
-                <= (outcome.timing.wall.unwrap() + Duration::from_millis(100)).as_micros(),
+            u128::from(value) <= outcome.timing.wall.unwrap().as_micros(),
             "{outcome:?}"
         );
     });
@@ -903,6 +909,13 @@ fn mixed_runs_leave_stable_fds_threads_slots_and_no_zombies() {
         assert_eq!(counters.slots_in_use, 0);
         assert_eq!(counters.service_pending, 0);
         assert_eq!(counters.credits_in_use, 1); // Only the process-wide service.
+        #[cfg(feature = "storage-test-hooks")]
+        assert_eq!(counters.owned_resources, 0);
+        assert!(
+            !processes()
+                .iter()
+                .any(|p| p.ppid == std::process::id() && p.state == 'Z')
+        );
         for _ in 0..5 {
             for index in 0..100 {
                 mixed(index).await;
@@ -910,6 +923,8 @@ fn mixed_runs_leave_stable_fds_threads_slots_and_no_zombies() {
             quiescent().await;
             settled(fds, threads).await;
             assert_eq!(debug_counters(), counters);
+            #[cfg(feature = "storage-test-hooks")]
+            assert_eq!(debug_counters().owned_resources, 0);
             assert!(
                 !processes()
                     .iter()
@@ -2289,7 +2304,11 @@ fn stalled_sink_freezes_at_five_seconds_and_keeps_its_slot_and_credit() {
         let path = CapturePath::new();
         let mut program = spec(&["write:stdout:4096", "exit:0"]);
         program.stdout = capture(Sink::File(path.0.clone()), 4096, Exceed::Kill, false);
+        #[cfg(feature = "storage-test-hooks")]
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
         let opts = SpawnOptions {
+            #[cfg(feature = "storage-test-hooks")]
+            milestones: Some(stamps.clone()),
             stdout_sink: SinkTestOptions {
                 gate: Some(gate.clone()),
                 ..SinkTestOptions::default()
@@ -2304,19 +2323,41 @@ fn stalled_sink_freezes_at_five_seconds_and_keeps_its_slot_and_credit() {
         let record = outcome.stdout.as_ref().unwrap();
         assert!(record.losses.contains(&CaptureLoss::WriteStalled));
         assert_eq!(record.stored, 0);
-        let since_exit = outcome.timing.exit_observed.unwrap().elapsed();
-        assert!(
-            (Duration::from_secs(5)..Duration::from_secs(5) + allowance(500)).contains(&since_exit),
-            "{since_exit:?}"
-        );
+        #[cfg(feature = "storage-test-hooks")]
+        {
+            use cpforge::supervisor::Milestone as M;
+            let elapsed = stamps
+                .get(M::CaptureFrozen)
+                .unwrap()
+                .duration_since(stamps.get(M::DrainStart).unwrap());
+            assert!(
+                (Duration::from_secs(5)..=Duration::from_secs(5) + allowance(100))
+                    .contains(&elapsed),
+                "drain → frozen: {elapsed:?}"
+            );
+        }
         assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
         assert_eq!(debug_counters().credits_in_use, baseline.credits_in_use + 1);
         // The ticket has a logical record even while the worker is still owned.
-        let frozen = ticket.outcome().await.unwrap();
+        let frozen = ticket.clone().outcome().await.unwrap();
         assert_eq!(frozen.stdout, outcome.stdout);
-        gate.release();
-        quiescent().await;
-        assert_eq!(debug_counters(), baseline);
+        // Keep the writer permanently blocked throughout logical acceptance.
+        // An independent run must finish while this final outcome retains its
+        // slot/credit, and reading the ticket again cannot release them.
+        success(&wait_root(spawn(&["exit:0"], false)).await, 0);
+        assert_eq!(ticket.outcome().await.unwrap().stdout, frozen.stdout);
+        assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
+        assert_eq!(debug_counters().credits_in_use, baseline.credits_in_use + 1);
+        // Teardown is the only release. Returning from the blocked write must
+        // release physical ownership within the contract's 100 ms allowance.
+        let returned = Instant::now();
+        drop(gate);
+        tokio::time::timeout(allowance(100), async {
+            until(|| debug_counters() == baseline).await;
+        })
+        .await
+        .expect("stalled writer resources were not released within 100 ms");
+        assert!(returned.elapsed() <= allowance(100));
         assert_eq!(record.stored, 0); // immutable after the late write completes
         assert_eq!(fs::metadata(&path.0).unwrap().len(), 4096);
     });
@@ -2583,7 +2624,15 @@ fn capture_drain_deadline_stops_an_escaped_pipe_holder() {
         let gate = CapturePath::new();
         let mut program = spec(&["spawn:1:escape,hold", &gate.step(), "exit:0"]);
         program.stdout = capture(Sink::Discard, 4096, Exceed::Kill, false);
-        let root = spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap();
+        #[cfg(feature = "storage-test-hooks")]
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
+        #[allow(clippy::needless_update)]
+        let opts = SpawnOptions {
+            #[cfg(feature = "storage-test-hooks")]
+            milestones: Some(stamps.clone()),
+            ..SpawnOptions::default()
+        };
+        let root = spawn_root(program, admit().unwrap(), &opts).unwrap();
         let pid = root.pid();
         let (outcome, escaped) = tokio::join!(wait_root(root), async {
             let escaped = escaped_child(pid).await;
@@ -2591,12 +2640,19 @@ fn capture_drain_deadline_stops_an_escaped_pipe_holder() {
             escaped
         });
         success(&outcome, 0);
-        let elapsed = outcome.timing.exit_observed.unwrap().elapsed();
-        assert!(
-            (Duration::from_millis(500)..Duration::from_millis(500) + allowance(400))
-                .contains(&elapsed),
-            "{elapsed:?}"
-        );
+        #[cfg(feature = "storage-test-hooks")]
+        {
+            use cpforge::supervisor::Milestone as M;
+            let elapsed = stamps
+                .get(M::ReadersStopped)
+                .unwrap()
+                .duration_since(stamps.get(M::DrainStart).unwrap());
+            assert!(
+                (Duration::from_millis(500)..=Duration::from_millis(500) + allowance(100))
+                    .contains(&elapsed),
+                "drain → readers stopped: {elapsed:?}"
+            );
+        }
         let record = outcome.stdout.unwrap();
         assert_eq!(record.losses, [CaptureLoss::NoEofBeforeDrainDeadline]);
         assert!(!record.eof && !record.complete());
@@ -2613,7 +2669,11 @@ fn dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_
         let path = CapturePath::new();
         let mut program = spec(&["write:stdout:67108864", "hold"]);
         program.stdout = capture(Sink::File(path.0.clone()), 67108864, Exceed::Kill, false);
+        #[cfg(feature = "storage-test-hooks")]
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
         let opts = SpawnOptions {
+            #[cfg(feature = "storage-test-hooks")]
+            milestones: Some(stamps.clone()),
             stdout_sink: SinkTestOptions {
                 gate: Some(gate.clone()),
                 ..SinkTestOptions::default()
@@ -2630,7 +2690,9 @@ fn dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_
         let start = Instant::now();
         drop(waiting);
         let outcome = ticket.outcome().await.unwrap();
-        assert!(start.elapsed() < Duration::from_millis(500) + allowance(400));
+        #[cfg(feature = "storage-test-hooks")]
+        assert_transfer_record_bound(&stamps);
+        assert!(start.elapsed() < Duration::from_millis(500) + allowance(100));
         killed(&outcome, StopTrigger::Cancelled);
         let record = outcome.stdout.unwrap();
         assert!(record.losses.contains(&CaptureLoss::WriteStalled));
@@ -2650,10 +2712,14 @@ fn transferred_finished_capture_waits_for_root_facts_or_cutoff() {
             let root_gate = CancelOnDrop(CancelToken::new());
             let mut program = spec(&["write:stdout:4096", "exit:0"]);
             program.stdout = capture(Sink::Discard, 4096, Exceed::Kill, false);
+            #[cfg(feature = "storage-test-hooks")]
+            let stamps = Arc::new(cpforge::supervisor::Milestones::default());
             let root = spawn_root(
                 program,
                 admit().unwrap(),
                 &SpawnOptions {
+                    #[cfg(feature = "storage-test-hooks")]
+                    milestones: Some(stamps.clone()),
                     transfer_root_gate: Some(root_gate.clone()),
                     ..SpawnOptions::default()
                 },
@@ -2675,6 +2741,8 @@ fn transferred_finished_capture_waits_for_root_facts_or_cutoff() {
                 root_gate.cancel();
             }
             let outcome = outcome.await.unwrap();
+            #[cfg(feature = "storage-test-hooks")]
+            assert_transfer_record_bound(&stamps);
             let elapsed = start.elapsed();
             assert!(outcome.stdout.as_ref().unwrap().complete(), "{outcome:?}");
             if finish_root {
@@ -2682,11 +2750,13 @@ fn transferred_finished_capture_waits_for_root_facts_or_cutoff() {
                 assert!(elapsed < Duration::from_millis(450), "{elapsed:?}");
             } else {
                 assert!(
-                    (Duration::from_millis(500)..Duration::from_millis(500) + allowance(400))
+                    (Duration::from_millis(500)..Duration::from_millis(500) + allowance(100))
                         .contains(&elapsed),
                     "{elapsed:?}"
                 );
                 assert_eq!(outcome.status, Termination::Unknown);
+                assert!(process(pid).is_some_and(|p| p.state == 'Z'));
+                assert_eq!(debug_counters().service_pending, 1);
                 root_gate.cancel();
             }
             quiescent().await;
@@ -2701,10 +2771,14 @@ fn transferred_run_without_captures_publishes_at_cutoff() {
     run_test(async {
         let baseline = debug_counters();
         let root_gate = CancelOnDrop(CancelToken::new());
+        #[cfg(feature = "storage-test-hooks")]
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
         let root = spawn_root(
             spec(&["hold"]),
             admit().unwrap(),
             &SpawnOptions {
+                #[cfg(feature = "storage-test-hooks")]
+                milestones: Some(stamps.clone()),
                 transfer_root_gate: Some(root_gate.clone()),
                 ..SpawnOptions::default()
             },
@@ -2716,12 +2790,14 @@ fn transferred_run_without_captures_publishes_at_cutoff() {
         let start = Instant::now();
         drop(root);
         let outcome = tokio::time::timeout(
-            Duration::from_millis(500) + allowance(400),
+            Duration::from_millis(500) + allowance(100),
             ticket.outcome(),
         )
         .await
         .expect("logical record exceeded the transfer cutoff")
         .unwrap();
+        #[cfg(feature = "storage-test-hooks")]
+        assert_transfer_record_bound(&stamps);
         assert!(start.elapsed() >= Duration::from_millis(500));
         assert_eq!(outcome.status, Termination::Unknown);
         assert_eq!(
@@ -2730,7 +2806,12 @@ fn transferred_run_without_captures_publishes_at_cutoff() {
                 reason: UnverifiedReason::RootNotObserved
             }
         );
+        until(|| process(pid).is_some_and(|p| p.state == 'Z')).await;
         assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
+        assert_eq!(
+            debug_counters().service_pending,
+            baseline.service_pending + 1
+        );
         root_gate.cancel();
         quiescent().await;
         assert!(process(pid).is_none());
@@ -2790,7 +2871,8 @@ fn transfer_cutoff_starts_at_transfer_after_an_earlier_drain() {
 
 #[test]
 fn captured_runs_release_descriptors_threads_and_credits() {
-    run_test(async {
+    // 550 captured runs (§10.2 protocol) need more than the default watchdog.
+    run_test_with_watchdog(60_000, async {
         let path = CapturePath::new();
         let run = || async {
             let mut program = spec(&["flood:65536"]);
@@ -2807,17 +2889,38 @@ fn captured_runs_release_descriptors_threads_and_credits() {
             assert!(outcome.stdout.unwrap().complete());
             assert!(outcome.stderr.unwrap().complete());
         };
-        run().await;
+        for _ in 0..50 {
+            run().await;
+        }
         quiescent().await;
         let fds = fd_count();
         let threads = thread_count();
         let counters = debug_counters();
-        for _ in 0..64 {
-            run().await;
+        assert_eq!(counters.slots_in_use, 0);
+        assert_eq!(counters.service_pending, 0);
+        assert_eq!(counters.credits_in_use, 1);
+        #[cfg(feature = "storage-test-hooks")]
+        assert_eq!(counters.owned_resources, 0);
+        assert!(
+            !processes()
+                .iter()
+                .any(|p| p.ppid == std::process::id() && p.state == 'Z')
+        );
+        for _ in 0..5 {
+            for _ in 0..100 {
+                run().await;
+            }
+            quiescent().await;
+            settled(fds, threads).await;
+            assert_eq!(debug_counters(), counters);
+            #[cfg(feature = "storage-test-hooks")]
+            assert_eq!(debug_counters().owned_resources, 0);
+            assert!(
+                !processes()
+                    .iter()
+                    .any(|p| p.ppid == std::process::id() && p.state == 'Z')
+            );
         }
-        quiescent().await;
-        settled(fds, threads).await;
-        assert_eq!(debug_counters(), counters);
         fs::remove_file(path.0.with_extension("err")).unwrap();
     });
 }
@@ -3339,50 +3442,66 @@ fn macos_rejects_both_limit_kinds_before_workers_files_or_spawn() {
 fn exit_during_pidfd_registration_is_observed_and_reaped_once() {
     run_test(async {
         use cpforge::supervisor::{Creator, create_root};
-        let (baseline, before, fds, threads) = creation_baseline().await;
-        let creator = Creator::start().unwrap();
-        let gate = CreationRelease::new(false);
-        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
-        let options = SpawnOptions {
-            milestones: Some(stamps.clone()),
-            registration_gate: Some(gate.0.clone()),
-            ..SpawnOptions::default()
-        };
-        let cancel = CancelToken::new();
-        let mut future = Box::pin(create_root(
-            &creator,
-            spec(&["exit:23"]),
-            admit().unwrap(),
-            &options,
-            &cancel,
-        ));
-        at_creation_gate(&mut future, &gate).await;
-        let pid = gate.0.pid().unwrap();
-        until(|| process(pid).is_some_and(|p| p.state == 'Z')).await;
-        assert_creation_pending(&mut future).await;
-        gate.0.release();
-        let root = tokio::time::timeout(allowance(1000), future.as_mut())
-            .await
-            .unwrap()
-            .unwrap();
-        let ticket = root.ticket();
-        drop(future);
-        let outcome = wait_root(root).await;
-        success(&outcome, 23);
-        assert_eq!(outcome.kill_attempts, 1);
-        assert_eq!(stamps.exit_observations(), 1);
-        assert_eq!(
-            outcome.timing.method,
-            cpforge::supervisor::WallMethod::Observed
-        );
-        assert!(process(pid).is_none());
-        assert!(ticket.clone().outcome().await.is_none());
-        assert!(ticket.outcome().await.is_none());
-        drop(creator);
-        quiescent().await;
-        assert_eq!(children(), before);
-        settled(fds, threads).await;
-        assert_eq!(debug_counters(), baseline);
+        // Pause before pidfd_open, then between pidfd_open and AsyncFd/epoll
+        // registration; the child exits while each point is held.
+        for after_open in [false, true] {
+            let (baseline, before, fds, threads) = creation_baseline().await;
+            let creator = Creator::start().unwrap();
+            let gate = CreationRelease::new(false);
+            let stamps = Arc::new(cpforge::supervisor::Milestones::default());
+            let options = if after_open {
+                SpawnOptions {
+                    milestones: Some(stamps.clone()),
+                    registration_gate: Some(gate.0.clone()),
+                    ..SpawnOptions::default()
+                }
+            } else {
+                SpawnOptions {
+                    milestones: Some(stamps.clone()),
+                    pidfd_open_gate: Some(gate.0.clone()),
+                    ..SpawnOptions::default()
+                }
+            };
+            let exit_gate = CapturePath::new();
+            let cancel = CancelToken::new();
+            let mut future = Box::pin(create_root(
+                &creator,
+                spec(&[&exit_gate.step(), "exit:23"]),
+                admit().unwrap(),
+                &options,
+                &cancel,
+            ));
+            at_creation_gate(&mut future, &gate).await;
+            let pid = gate.0.pid().unwrap();
+            assert!(process(pid).is_some_and(|p| !matches!(p.state, 'Z' | 'X')));
+            exit_gate.open();
+            until(|| process(pid).is_some_and(|p| p.state == 'Z')).await;
+            assert_creation_pending(&mut future).await;
+            gate.0.release();
+            let root = tokio::time::timeout(allowance(1000), future.as_mut())
+                .await
+                .unwrap()
+                .unwrap();
+            let ticket = root.ticket();
+            drop(future);
+            let outcome = wait_root(root).await;
+            success(&outcome, 23);
+            assert_eq!(outcome.timing.observer, ObserverKind::Pidfd, "{after_open}");
+            assert_eq!(outcome.kill_attempts, 1);
+            assert_eq!(stamps.exit_observations(), 1);
+            assert_eq!(
+                outcome.timing.method,
+                cpforge::supervisor::WallMethod::Observed
+            );
+            assert!(process(pid).is_none());
+            assert!(ticket.clone().outcome().await.is_none());
+            assert!(ticket.outcome().await.is_none());
+            drop(creator);
+            quiescent().await;
+            assert_eq!(children(), before);
+            settled(fds, threads).await;
+            assert_eq!(debug_counters(), baseline);
+        }
     });
 }
 
@@ -3566,4 +3685,226 @@ fn session_cancel_inside_os_creation_returns_then_cleanup_reaps_both() {
         settled(fds, threads).await;
         assert_eq!(debug_counters(), baseline);
     });
+}
+
+#[test]
+fn busy_waited_descendant_reports_cpu_microseconds_within_wall() {
+    run_test(async {
+        let mut program = spec(&[]);
+        program.program = "/bin/sh".into();
+        // The shell waits for its single busy descendant, so wait4 must include
+        // that descendant's CPU. Serial work makes CPU ≤ wall meaningful.
+        program.args = vec![
+            "-c".into(),
+            "\"$1\" sleep:20 spin:150 & wait".into(),
+            "cpu-tree".into(),
+            fixture_path().into_os_string(),
+        ];
+        let outcome =
+            wait_root(spawn_root(program, admit().unwrap(), &SpawnOptions::default()).unwrap())
+                .await;
+        success(&outcome, 0);
+        let cpu = metric(&outcome, MetricKind::CpuTime);
+        assert_eq!(cpu.unit, Unit::Microseconds);
+        assert_eq!(cpu.scope, Scope::RootAndWaitedDescendants);
+        assert_eq!(cpu.aggregation, Aggregation::Sum);
+        assert!(cpu.value.unwrap() > 0);
+        assert!(
+            u128::from(cpu.value.unwrap()) <= outcome.timing.wall.unwrap().as_micros(),
+            "{outcome:?}"
+        );
+    });
+}
+
+#[cfg(all(feature = "storage-test-hooks", target_os = "macos"))]
+#[test]
+fn live_kqueue_error_receipt_falls_back_to_polling_and_preserves_exit_status() {
+    run_test(async {
+        let exit_gate = CapturePath::new();
+        let stamps = Arc::new(cpforge::supervisor::Milestones::default());
+        let root = spawn_root(
+            spec(&[&exit_gate.step(), "exit:17"]),
+            admit().unwrap(),
+            &SpawnOptions {
+                milestones: Some(stamps.clone()),
+                kqueue_receipt_error: Some(libc::EIO),
+                ..SpawnOptions::default()
+            },
+        )
+        .unwrap();
+        let pid = root.pid();
+        exit_gate.open();
+        let outcome = wait_root(root).await;
+        assert_eq!(outcome.status, Termination::Exited { code: 17 });
+        assert_eq!(outcome.timing.observer, ObserverKind::Polling);
+        assert_eq!(outcome.errors, [SupervisorError::Register(libc::EIO)]);
+        assert!(!outcome.notes.contains(&Note::ObserverFallback));
+        assert!(
+            outcome
+                .measurements
+                .iter()
+                .all(|measurement| measurement.value.is_some())
+        );
+        assert_eq!(outcome.stop_trigger, None);
+        assert_eq!(outcome.enforced_at, None);
+        assert_eq!(stamps.exit_observations(), 1);
+        assert!(process(pid).is_none());
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+async fn drop_at_capture_state(finalized: bool) {
+    use cpforge::supervisor::{Milestone as M, Milestones};
+    let baseline = debug_counters();
+    let stamps = Arc::new(Milestones::default());
+    let gate = CancelOnDrop(CancelToken::new());
+    let mut program = spec(&["write:stdout:4096", "exit:19"]);
+    program.stdout = capture(Sink::Discard, 4096, Exceed::Kill, false);
+    let root = spawn_root(
+        program,
+        admit().unwrap(),
+        &SpawnOptions {
+            milestones: Some(stamps.clone()),
+            frozen_gate: (!finalized).then(|| gate.clone()),
+            finalized_gate: finalized.then(|| gate.clone()),
+            ..SpawnOptions::default()
+        },
+    )
+    .unwrap();
+    let pid = root.pid();
+    let ticket = root.ticket();
+    let mut future = Box::pin(wait_root(root));
+    let state = if finalized {
+        M::RecordFinalized
+    } else {
+        M::CaptureFrozen
+    };
+    tokio::select! {
+        outcome = &mut future => panic!("state gate failed: {outcome:?}"),
+        _ = until(|| stamps.get(state).is_some()) => {}
+    }
+    assert!(
+        process(pid).is_none(),
+        "capture states must have reaped the root"
+    );
+    assert!(stamps.get(M::Transferred).is_none());
+    if !finalized {
+        assert!(stamps.get(M::RecordFinalized).is_none());
+    }
+    drop(future);
+    let outcome = tokio::time::timeout(allowance(100), ticket.outcome())
+        .await
+        .unwrap();
+    if finalized {
+        assert!(
+            outcome.is_none(),
+            "a finalized future must not transfer again"
+        );
+        assert!(stamps.get(M::Transferred).is_none());
+    } else {
+        let outcome = outcome.unwrap();
+        success(&outcome, 19);
+        assert!(outcome.stdout.as_ref().unwrap().complete());
+        assert_eq!(outcome.stdout.as_ref().unwrap().observed, 4096);
+        assert_eq!(outcome.stop_trigger, None);
+        assert!(
+            outcome
+                .notes
+                .contains(&Note::LateTrigger(StopTrigger::Cancelled))
+        );
+        assert!(outcome.notes.contains(&Note::Transferred));
+        assert!(stamps.get(M::Transferred).is_some());
+        let elapsed = stamps
+            .get(M::RecordFinalized)
+            .unwrap()
+            .duration_since(stamps.get(M::CaptureFrozen).unwrap());
+        assert!(elapsed <= allowance(100), "frozen → finalized: {elapsed:?}");
+    }
+    quiescent().await;
+    assert_eq!(debug_counters(), baseline);
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn dropping_frozen_future_transfers_the_fixed_capture_and_records_cancellation() {
+    run_test(drop_at_capture_state(false));
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn dropping_finalized_future_does_not_transfer_or_change_the_outcome() {
+    run_test(drop_at_capture_state(true));
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn reap_timeout_logical_record_is_bounded_while_the_root_remains_unreaped() {
+    run_test(async {
+        use cpforge::supervisor::{Milestone as M, Milestones};
+        let baseline = debug_counters();
+        let stamps = Arc::new(Milestones::default());
+        let reap_gate = CancelOnDrop(CancelToken::new());
+        let root = spawn_root(
+            spec(&["hold"]),
+            admit().unwrap(),
+            &SpawnOptions {
+                milestones: Some(stamps.clone()),
+                reap_never_ready: true,
+                transfer_root_gate: Some(reap_gate.clone()),
+                ..SpawnOptions::default()
+            },
+        )
+        .unwrap();
+        let pid = root.pid();
+        let identity = process(pid).unwrap().start;
+        let ticket = root.ticket();
+        let initial = wait_root_controlled(root, controls(Duration::ZERO)).await;
+        assert!(initial.errors.contains(&SupervisorError::ReapTimeout));
+        let transfer = stamps.get(M::Transferred).unwrap();
+        let requested = initial.termination.requested_at.unwrap();
+        assert!(transfer.duration_since(requested) <= Duration::from_secs(2) + allowance(100));
+        let logical = tokio::time::timeout(
+            Duration::from_millis(500) + allowance(100),
+            ticket.clone().outcome(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let finalized = stamps.get(M::RecordFinalized).unwrap();
+        assert!(
+            (Duration::from_millis(500)..=Duration::from_millis(500) + allowance(100))
+                .contains(&finalized.duration_since(transfer))
+        );
+        assert_eq!(logical.status, Termination::Unknown);
+        assert!(logical.errors.contains(&SupervisorError::ReapTimeout));
+        let unreaped = process(pid).expect("root released before logical finalization");
+        assert_eq!((unreaped.start, unreaped.state), (identity, 'Z'));
+        assert!(stamps.get(M::RootReaped).is_none());
+        assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
+        assert_eq!(
+            debug_counters().service_pending,
+            baseline.service_pending + 1
+        );
+        // Only teardown permits the physical consuming wait.
+        reap_gate.cancel();
+        until(|| stamps.get(M::ResourcesReleased).is_some()).await;
+        assert!(stamps.get(M::RootReaped).unwrap() > finalized);
+        assert!(stamps.get(M::ResourcesReleased).unwrap() >= stamps.get(M::RootReaped).unwrap());
+        assert!(process(pid).is_none());
+        assert_eq!(ticket.outcome().await.unwrap().status, Termination::Unknown);
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+fn assert_transfer_record_bound(stamps: &cpforge::supervisor::Milestones) {
+    use cpforge::supervisor::Milestone as M;
+    let elapsed = stamps
+        .get(M::RecordFinalized)
+        .unwrap()
+        .duration_since(stamps.get(M::Transferred).unwrap());
+    assert!(
+        elapsed <= Duration::from_millis(500) + allowance(100),
+        "transfer → logical record: {elapsed:?}"
+    );
 }

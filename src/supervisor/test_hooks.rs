@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
@@ -152,6 +152,8 @@ pub(super) fn before_pipe() -> io::Result<()> {
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
 pub enum Milestone {
+    Transferred,
+    RootReaped,
     CleanupResult,
     DrainStart,
     ReadersStopped,
@@ -163,7 +165,7 @@ pub enum Milestone {
 
 #[derive(Debug, Default)]
 pub struct Milestones {
-    times: Mutex<[Option<Instant>; 7]>,
+    times: Mutex<[Option<Instant>; 9]>,
     exit_observations: AtomicU32,
 }
 impl Milestones {
@@ -182,4 +184,25 @@ impl Milestones {
     pub(in crate::supervisor) fn mark_at(&self, milestone: Milestone, at: Instant) {
         self.times.lock().unwrap_or_else(|e| e.into_inner())[milestone as usize].get_or_insert(at);
     }
+}
+
+// Independent of admission/credit accounting: track the owning bundles for
+// process identities, capture state, relays, stdin pumps and transcript files.
+static OWNED_RESOURCES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug)]
+pub(in crate::supervisor) struct OwnedResource;
+impl OwnedResource {
+    pub(in crate::supervisor) fn new() -> Self {
+        OWNED_RESOURCES.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+impl Drop for OwnedResource {
+    fn drop(&mut self) {
+        OWNED_RESOURCES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+pub(in crate::supervisor) fn owned_resources() -> usize {
+    OWNED_RESOURCES.load(Ordering::Acquire)
 }

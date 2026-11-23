@@ -10,6 +10,11 @@ use tokio::sync::mpsc;
 
 #[derive(Debug)]
 pub(super) struct InputForward {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    _owned: crate::supervisor::test_hooks::OwnedResource,
     helper: Option<JoinHandle<()>>,
     start: Option<std::sync::mpsc::Sender<()>>,
     pump: tokio::task::JoinHandle<()>,
@@ -64,6 +69,11 @@ impl InputForward {
         });
         *stdin = StdinSpec::Pipe(input);
         Ok(Self {
+            #[cfg(all(
+                feature = "storage-test-hooks",
+                any(target_os = "linux", target_os = "macos")
+            ))]
+            _owned: crate::supervisor::test_hooks::OwnedResource::new(),
             helper: Some(helper),
             start: Some(start),
             pump,

@@ -18,6 +18,11 @@ const FINALISE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 struct State {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    _owned: crate::supervisor::test_hooks::OwnedResource,
     record: StreamCapture,
     #[cfg(all(
         feature = "storage-test-hooks",
@@ -176,6 +181,11 @@ impl Captures {
             creation.check()?;
             let pipe = supervisor::stdout_pipe().map_err(NotStarted::Setup)?;
             let state = Arc::new(Mutex::new(State {
+                #[cfg(all(
+                    feature = "storage-test-hooks",
+                    any(target_os = "linux", target_os = "macos")
+                ))]
+                _owned: crate::supervisor::test_hooks::OwnedResource::new(),
                 record: StreamCapture {
                     observed: 0,
                     retained: Vec::new(),

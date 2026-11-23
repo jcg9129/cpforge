@@ -110,7 +110,7 @@ impl CleanupScan {
         {
             self.scans_started += 1;
         }
-        let entries = fs::read_dir(&self.proc).map_err(|_| UnverifiedReason::ScanFailed)?;
+        let entries = fs::read_dir(&self.proc).map_err(|_| UnverifiedReason::Io)?;
         let mut survivors = 0_u32;
         for entry in entries {
             if !self.entry_delay.is_zero() {
@@ -122,7 +122,7 @@ impl CleanupScan {
             if Instant::now() >= deadline {
                 return Err(cutoff);
             }
-            let entry = entry.map_err(|_| UnverifiedReason::ScanFailed)?;
+            let entry = entry.map_err(|_| UnverifiedReason::Io)?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
@@ -143,7 +143,7 @@ impl CleanupScan {
                 Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                     return Err(UnverifiedReason::Malformed);
                 }
-                Err(_) => return Err(UnverifiedReason::ScanFailed),
+                Err(_) => return Err(UnverifiedReason::Io),
             };
             let (state, pgrp) = parse_stat(record, pid)?;
             if pgrp == self.pgid && pid != self.pgid && !matches!(state, b'Z' | b'X') {
@@ -371,6 +371,30 @@ mod tests {
     }
 
     #[test]
+    fn directory_enumeration_failure_never_confirms_cleanup() {
+        bounded(|| {
+            let tree = Tree::new();
+            let mut scan = tree.scanner();
+            // Preserve a completed live count: enumeration failure must still
+            // be Unverified, rather than reusing that count or confirming.
+            tree.stat(101, 'S', 100);
+            assert_eq!(
+                scan.poll(Instant::now() + Duration::from_secs(1), None),
+                None
+            );
+            let directory = tree.0.join("unavailable-proc");
+            fs::write(&directory, b"not a directory").unwrap();
+            scan.proc = directory;
+            assert_eq!(
+                scan.poll(Instant::now() + Duration::from_secs(1), None),
+                Some(Cleanup::Unverified {
+                    reason: UnverifiedReason::Io
+                })
+            );
+        });
+    }
+
+    #[test]
     fn prerequisites_never_confirm_an_unsupported_view() {
         bounded(|| {
             let tree = Tree::new();
@@ -592,7 +616,7 @@ mod tests {
                 tree.scanner()
                     .poll(Instant::now() + Duration::from_secs(1), None),
                 Some(Cleanup::Unverified {
-                    reason: UnverifiedReason::ScanFailed
+                    reason: UnverifiedReason::Io
                 })
             );
         });

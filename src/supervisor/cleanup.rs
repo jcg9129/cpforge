@@ -337,6 +337,11 @@ impl TransferTicket {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub owned_resources: usize,
     pub slots_in_use: usize,
     pub credits_in_use: usize,
     pub service_pending: usize,
@@ -345,6 +350,11 @@ pub struct Counters {
 #[doc(hidden)]
 pub fn debug_counters() -> Counters {
     global_bounds().map_or_else(Counters::default, |bounds| Counters {
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        owned_resources: super::test_hooks::owned_resources(),
         slots_in_use: bounds.slots_in_use.load(Ordering::Acquire),
         credits_in_use: bounds.thread_credits.used.load(Ordering::Acquire),
         service_pending: bounds.pending.load(Ordering::Acquire),
@@ -458,8 +468,22 @@ impl GlobalBounds {
                             Some(record.outcome)
                         }
                     };
+                    #[cfg(all(
+                        feature = "storage-test-hooks",
+                        any(target_os = "linux", target_os = "macos")
+                    ))]
+                    let stamps = outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.milestones.clone());
                     self.pending.fetch_sub(1, Ordering::AcqRel);
                     self.release(index, &cell, outcome);
+                    #[cfg(all(
+                        feature = "storage-test-hooks",
+                        any(target_os = "linux", target_os = "macos")
+                    ))]
+                    if let Some(stamps) = stamps {
+                        stamps.mark(super::Milestone::ResourcesReleased);
+                    }
                 }
             }
             let pending = self.pending.load(Ordering::Acquire) != 0;

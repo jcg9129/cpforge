@@ -678,6 +678,20 @@ fn healthy_run_milestones_meet_each_bound_over_five_runs() {
                     .path
                     .is_some()
             );
+            let observed = root.timing.exit_observed.unwrap();
+            let cleanup_interval = stamps
+                .get(M::CleanupResult)
+                .unwrap()
+                .duration_since(observed);
+            let frozen_interval = stamps
+                .get(M::CaptureFrozen)
+                .unwrap()
+                .duration_since(observed);
+            assert!(
+                frozen_interval
+                    <= cleanup_interval + Duration::from_millis(250 * allowance_scale()),
+                "root exit → frozen: {frozen_interval:?}; cleanup interval: {cleanup_interval:?}"
+            );
             for (index, (from, to)) in [
                 (M::CleanupResult, M::DrainStart),
                 (M::DrainStart, M::ReadersStopped),
