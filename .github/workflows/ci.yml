@@ -75,6 +75,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --no-fail-fast --locked
       - run: cargo test --workspace --all-targets --all-features --no-fail-fast --locked
+      - name: Record the full session latency benchmark
+        if: matrix.os != 'windows-latest'
+        timeout-minutes: 5
+        run: cargo test --locked --test session_linux fixture_17_tiny_exchange_latency_benchmark -- --ignored --exact
       # --all-targets excludes doctests, which hold the compile_fail API checks.
       - run: cargo test --workspace --doc --locked
       - name: Verify bind-mount storage boundaries

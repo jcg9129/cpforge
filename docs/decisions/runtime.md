@@ -420,17 +420,15 @@ returns `Unsupported` before admission (`src/supervisor/session.rs`).
 | 14: peer allowance, both directions | `fixture_14_peer_allowance_in_both_directions` | V | V | pending |
 | 15: cancellation during blocked forward | `fixture_15_cancel_during_blocked_forward` | V | V | pending |
 | 16: same-wakeup selection | `selection_rechecks_prerequisites_and_coalesces_stops`, `exit_precedes_timer_and_cleanup_becomes_eligible_immediately` | E (record logic) | E (record logic) | E (record logic) |
-| 17: exchange latency | `fixture_17_ten_thousand_exchange_latency_ci` | P (10 000; 30 s total ceiling per mode) | P (same) | pending |
+| 17: exchange latency | `fixture_17_tiny_exchange_latency_benchmark` (100 000 per mode, numbers in the CI log), `fixture_17_ten_thousand_exchange_latency_ci` (30 s ceiling per mode) | V | V | pending |
 | 18: 50 warm-up + 5 × 100 sessions | `fixture_18_fifty_warmup_then_five_hundred_sessions_release_all_resources` | V (alternating relay/direct; owned counter †) | V (same) | pending |
 
 Fixture 17 prints timing measurements; it does not assert a 35 µs target.
 `tests/session_linux.rs::fixture_17_tiny_exchange_latency_benchmark` uses
-100 000 exchanges per mode on Linux and macOS, is runnable with `--ignored`,
-and prints the same measurements. CI deliberately runs 10 000 exchanges per
-mode; the full benchmark is excluded from the checked-in CI commands.
-Both test passes run on every OS, and the only measurements (Linux: relay
-31–79 µs, direct 14–27 µs per round trip) give no basis for a hosted macOS
-figure, so 100 000 exchanges could add well over 30 s per OS. No particular hosted-runner latency is a guarantee.
+100 000 exchanges per mode on Linux and macOS and prints the same
+measurements. CI runs it once per Unix OS as a separate step (`--ignored`,
+without the test-hooks feature); the 10 000-exchange test with its ceiling runs
+in both test passes. No particular hosted-runner latency is a guarantee.
 
 Additional evidence in `tests/session_linux.rs`:
 
