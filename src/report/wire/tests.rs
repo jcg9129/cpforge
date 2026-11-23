@@ -700,6 +700,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
     for error in [
         e::PersistError::Timeout,
         e::PersistError::QueueFull,
+        e::PersistError::Cancelled,
         e::PersistError::WorkerUnavailable,
         e::PersistError::Io {
             os_error: Some(i32::MIN),
@@ -898,4 +899,33 @@ fn transferred_creation_record_and_summary_golden_bytes() {
     assert_eq!(counts.primary.admitted, 0);
     assert_eq!(counts.primary.invalid, 0);
     assert_eq!(counts.by_class.cancelled, 1);
+}
+
+#[test]
+fn persistence_errors_match_golden_decoder_and_report_lane_schema() {
+    let errors = [
+        e::PersistError::Timeout,
+        e::PersistError::QueueFull,
+        e::PersistError::Cancelled,
+        e::PersistError::WorkerUnavailable,
+        e::PersistError::Io { os_error: None },
+    ];
+    let actual = value::encode(&Value::Array(
+        errors
+            .iter()
+            .map(|error| run::persist(error, "publication failed"))
+            .collect(),
+    ));
+    assert_eq!(actual, include_bytes!("fixtures/persist_errors.json"));
+    let decoded = read::read_json(&actual).unwrap();
+    assert_eq!(decoded[2], serde_json::json!({"kind": "cancelled"}));
+    for error in [e::PersistError::QueueFull, e::PersistError::Cancelled] {
+        assert!(
+            schema::persistence(&ReportPersistence::Failed {
+                error,
+                message: String::new()
+            })
+            .is_err()
+        );
+    }
 }

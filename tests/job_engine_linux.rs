@@ -710,6 +710,17 @@ fn healthy_run_milestones_meet_each_bound_over_five_runs() {
                     assert!(later >= earlier, "{from:?} → {to:?}");
                 }
                 let elapsed = later.saturating_duration_since(earlier);
+                if index == 4 && persistence.stats().record_idle_at_enqueue != [true] {
+                    // E §10.1: a record behind its admission-time spec has the
+                    // call-origin publication bound, not the idle-queue target.
+                    assert!(
+                        elapsed
+                            <= Duration::from_secs(5)
+                                + Duration::from_millis(100 * allowance_scale()),
+                        "backlogged record publication: {elapsed:?}"
+                    );
+                    continue;
+                }
                 maxima[index] = maxima[index].max(elapsed);
             }
         }

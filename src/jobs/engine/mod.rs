@@ -507,6 +507,7 @@ impl<'probe> Engine<'probe> {
         let report_reservation = ready.budget.reserve(report_bytes).ok();
         let report_refused = report_reservation.is_none();
         let planned_count = (plan.len() + after_test.len()) as u32;
+        persistence.configure(planned_count, cancel.token());
         let generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
@@ -1367,18 +1368,21 @@ impl Context<'_> {
         // Specs enter the queue at admission, before process creation. Split
         // the fixed allowance so queued requests own independent reservations.
         let spec_metadata = metadata.as_mut().and_then(|r| r.split(512 * 1024));
-        let enqueued = catch_unwind(AssertUnwindSafe(|| {
-            persistence.enqueue(PendingArtifacts {
-                finalized: false,
-                run: run.clone(),
-                execution: plan.index,
-                spec: spec.clone(),
-                record: None,
-                metadata: spec_metadata,
-                writable,
-                owner: self.owner.clone(),
-            })
-        }));
+        let enqueued = caught(async {
+            persistence
+                .enqueue(PendingArtifacts {
+                    finalized: false,
+                    run: run.clone(),
+                    execution: plan.index,
+                    spec: spec.clone(),
+                    record: None,
+                    metadata: spec_metadata,
+                    writable,
+                    owner: self.owner.clone(),
+                })
+                .await
+        })
+        .await;
         if enqueued.is_err() {
             record_internal(
                 self.cancel,
@@ -1430,18 +1434,21 @@ impl Context<'_> {
         #[cfg(feature = "storage-test-hooks")]
         self.point(Point::BeforeRecordEnqueue(plan.index));
         // Enqueue finalized evidence before deriving anything or comparing.
-        let enqueued = catch_unwind(AssertUnwindSafe(|| {
-            persistence.enqueue(PendingArtifacts {
-                finalized: true,
-                run: run.clone(),
-                execution: plan.index,
-                spec: spec.clone(),
-                record: record.clone(),
-                metadata,
-                writable,
-                owner: self.owner.clone(),
-            })
-        }));
+        let enqueued = caught(async {
+            persistence
+                .enqueue(PendingArtifacts {
+                    finalized: true,
+                    run: run.clone(),
+                    execution: plan.index,
+                    spec: spec.clone(),
+                    record: record.clone(),
+                    metadata,
+                    writable,
+                    owner: self.owner.clone(),
+                })
+                .await
+        })
+        .await;
         if enqueued.is_err() {
             record_internal(
                 self.cancel,

@@ -60,6 +60,9 @@
 //! `CPF_STORAGE_STDERR_QUEUED=<path>` and `CPF_STORAGE_CONSOLE_DRAIN=<path>`
 //! receive the wall-clock nanoseconds of the final stderr batch enqueue (t_q)
 //! and of the raw console drain milestone, for subprocess timing fixtures.
+//! `CPF_STORAGE_PERSISTENCE_STATS=<path>` records queue credit wait, service
+//! cycle samples and W-to-finished timing after the engine returns.
+//! `persist.write` pauses the persistence worker before a write.
 //! `CPF_STORAGE_CREATION_SOCKET=<Unix socket path>` holds OS creation in
 //! pre_exec: the child writes its native-endian i32 pid, then awaits one byte
 //! from the harness; EOF instead fails pre_exec, so the child exits without exec.

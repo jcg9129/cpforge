@@ -8,7 +8,7 @@ use crate::storage::job::JobOwner;
 
 pub type JobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-/// Nonblocking enqueue and bounded settlement are separate operations. Enqueue
+/// Asynchronous credit acquisition and bounded settlement are separate operations. Enqueue
 /// specs at admission and records immediately at record finalization. The service
 /// owns metadata
 /// reservations and owner clones until its last write returns, including after
@@ -17,7 +17,8 @@ pub type JobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// evidence or results. Report publication is a separate operation after F;
 /// it includes encoding within the same enqueue deadline.
 pub trait Persistence {
-    fn enqueue(&mut self, artifact: PendingArtifacts);
+    fn configure(&mut self, _planned: u32, _cancel: crate::supervisor::CancelToken) {}
+    fn enqueue(&mut self, artifact: PendingArtifacts) -> JobFuture<'_, ()>;
     fn publish_report(
         &mut self,
         _report: Arc<super::ReportData>,
@@ -58,8 +59,10 @@ pub struct MemoryPersistence {
     pub pending: Vec<PendingArtifacts>,
 }
 impl Persistence for MemoryPersistence {
-    fn enqueue(&mut self, artifact: PendingArtifacts) {
-        self.pending.push(artifact);
+    fn enqueue(&mut self, artifact: PendingArtifacts) -> JobFuture<'_, ()> {
+        Box::pin(async move {
+            self.pending.push(artifact);
+        })
     }
     fn settle<'a>(
         &'a mut self,

@@ -1358,7 +1358,25 @@ fn execute(
 ) -> Result<Arc<FinalizedReport>, Error> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        Ok(runtime.block_on(Box::pin(engine.run(executor, persistence, hooks))))
+        let report = runtime.block_on(Box::pin(engine.run(executor, persistence, hooks)));
+        #[cfg(feature = "storage-test-hooks")]
+        if let Some(path) = std::env::var_os("CPF_STORAGE_PERSISTENCE_STATS") {
+            let stats = persistence.stats();
+            let samples: Vec<_> = stats
+                .service_cycles
+                .iter()
+                .map(|d| d.as_micros().to_string())
+                .collect();
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "peak_credits": stats.peak_credits,
+                "credit_wait_us": stats.credit_wait.as_micros().to_string(),
+                "service_cycles_us": samples,
+                "last_write": stats.last_write,
+                "settlement_to_finished_us": stats.settlement_elapsed.map(|d| d.as_micros().to_string()),
+            })).expect("test statistics encode");
+            std::fs::write(path, bytes).expect("test statistics publish");
+        }
+        Ok(report)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

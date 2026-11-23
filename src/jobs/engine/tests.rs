@@ -4,6 +4,7 @@ use crate::storage::inputs::CapturedSource;
 use crate::storage::prune::PrunePolicy;
 use crate::supervisor::{self, CancelToken, Stream};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Barrier;
 use std::time::Instant;
 use tokio::sync::oneshot;
@@ -1119,8 +1120,8 @@ fn settlement_waits_outside_verdict_lock_and_keeps_reservations() {
         resume: Option<oneshot::Receiver<()>>,
     }
     impl Persistence for PersistenceGate {
-        fn enqueue(&mut self, artifact: PendingArtifacts) {
-            self.memory.enqueue(artifact);
+        fn enqueue(&mut self, artifact: PendingArtifacts) -> JobFuture<'_, ()> {
+            self.memory.enqueue(artifact)
         }
         fn settle<'a>(
             &'a mut self,
@@ -1494,7 +1495,10 @@ fn record_budget_refusal_warns_without_changing_verdict() {
         blocker: Option<Reservation>,
     }
     impl Persistence for RefuseRecord {
-        fn enqueue(&mut self, mut artifact: PendingArtifacts) {
+        fn configure(&mut self, planned: u32, cancel: crate::supervisor::CancelToken) {
+            self.persistence.configure(planned, cancel);
+        }
+        fn enqueue(&mut self, mut artifact: PendingArtifacts) -> JobFuture<'_, ()> {
             if artifact.finalized {
                 artifact.metadata = None;
                 let usage = self.budget.usage();
@@ -1506,7 +1510,7 @@ fn record_budget_refusal_warns_without_changing_verdict() {
                 artifact.metadata = self.budget.reserve(METADATA).ok();
                 assert!(artifact.metadata.is_none());
             }
-            self.persistence.enqueue(artifact);
+            self.persistence.enqueue(artifact)
         }
         fn settle<'a>(
             &'a mut self,
@@ -2662,7 +2666,9 @@ fn ten_thousand_execution_flood_keeps_ten_ordered_test_aggregates() {
     // until W as MemoryPersistence intentionally does.
     struct ImmediatePersistence;
     impl Persistence for ImmediatePersistence {
-        fn enqueue(&mut self, _: PendingArtifacts) {}
+        fn enqueue(&mut self, _: PendingArtifacts) -> JobFuture<'_, ()> {
+            Box::pin(async {})
+        }
         fn settle<'a>(
             &'a mut self,
             executions: &'a mut [ExecutionReport],
@@ -2706,4 +2712,440 @@ fn ten_thousand_execution_flood_keeps_ten_ordered_test_aggregates() {
         &["warning: 10000 progress lines dropped", "OK"]
     );
     assert_eq!(queue.close(), 10_000);
+}
+
+struct ReleasePersistenceGate(Arc<tokio::sync::Notify>);
+impl Drop for ReleasePersistenceGate {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+// Match the CLI's stack for fixtures that drive the complete engine. The
+// injected executor keeps these persistence fixtures portable to Windows.
+fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, move || {
+                runtime(async {
+                    tokio::time::timeout(Duration::from_secs(120), future())
+                        .await
+                        .expect("engine fixture timed out");
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+}
+
+#[test]
+fn scripted_persistence_publishes_three_thousand_complete_executions_then_report() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 3000, &Tools);
+        let (mut persistence, driver, writer) = JobPersistence::scripted(&ready);
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), driver);
+        assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Published { .. }
+        ));
+        assert!(
+            !report
+                .data()
+                .warnings
+                .iter()
+                .any(|w| matches!(w, Warning::Persistence { .. }))
+        );
+        let files = writer.files.lock().unwrap();
+        assert_eq!(files.len(), 9001);
+        for execution in &report.data().executions {
+            let spec = execution.spec.as_ref().unwrap();
+            let record = execution.record.as_ref().unwrap();
+            assert!(spec.error.is_none() && record.error.is_none());
+            let spec_path = spec.path.as_ref().unwrap();
+            let record_path = record.path.as_ref().unwrap();
+            let stored_spec = crate::report::wire::read::read_json(&files[spec_path]).unwrap();
+            assert_eq!(stored_spec["document"], "execution_spec");
+            let stored_record = crate::report::wire::read::read_json(&files[record_path]).unwrap();
+            assert_eq!(stored_record["spec"]["path"].as_str(), spec_path.to_str());
+            assert!(
+                files[&record_path.with_file_name("cleanup.log")].starts_with(b"record finalized")
+            );
+        }
+        let mut delivered: serde_json::Value =
+            serde_json::from_slice(&crate::report::wire::encode_stdout_report(&report).unwrap())
+                .unwrap();
+        delivered.as_object_mut().unwrap().remove("persistence");
+        let saved =
+            crate::report::wire::read::read_json(&files[std::path::Path::new("report.json")])
+                .unwrap();
+        assert_eq!(saved, delivered);
+        let stats = persistence.stats();
+        assert_eq!(stats.last_write, Some(PathBuf::from("report.json")));
+        assert!(stats.peak_credits <= 2 * 1024 * 1024);
+        assert!(stats.credit_wait <= Duration::from_secs(46));
+    });
+}
+
+#[test]
+fn empty_accepted_set_skips_w_and_publishes_its_report() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let (mut persistence, driver, writer) = JobPersistence::scripted(&ready);
+        let engine = Engine::new(ready, JobRequest::Build).unwrap();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), driver);
+        assert!(report.data().executions.is_empty());
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Published { .. }
+        ));
+        assert_eq!(writer.files.lock().unwrap().len(), 1);
+        assert_eq!(persistence.stats().credit_wait, Duration::ZERO);
+        assert_eq!(persistence.stats().peak_credits, 0);
+    });
+}
+
+#[test]
+fn saturated_persistence_waits_500ms_then_publishes_everything_and_report() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 100, &Tools);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let _release = ReleasePersistenceGate(gate.clone());
+        let mut persistence = JobPersistence::controlled(&ready, gate.clone());
+        let (writer, mut writes) = crate::jobs::persist::scripted::ScriptedWriter::new(false);
+        *persistence.script.lock().unwrap() = Some(writer);
+        let pool = persistence.pool.clone();
+        let clock = persistence.clock.clone();
+        let directory = ready.dir.clone();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), async {
+                pool.waiting.notified().await;
+                clock.advance(Duration::from_millis(500));
+                gate.notify_one();
+                while let Some(write) = writes.recv().await {
+                    clock.advance(Duration::from_millis(4));
+                    let report = write.path == std::path::Path::new("report.json");
+                    let _ = write.release.send(());
+                    if report {
+                        break;
+                    }
+                }
+            });
+        assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+        assert!(
+            !report
+                .data()
+                .warnings
+                .iter()
+                .any(|w| matches!(w, Warning::Persistence { .. }))
+        );
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Published { .. }
+        ));
+        for execution in &report.data().executions {
+            for reference in [&execution.spec, &execution.record] {
+                assert!(
+                    directory
+                        .join(reference.as_ref().unwrap().path.as_ref().unwrap())
+                        .is_file()
+                );
+            }
+        }
+        assert!(
+            crate::report::wire::read::read_json(&fs::read(directory.join("report.json")).unwrap())
+                .is_ok()
+        );
+        assert!(persistence.stats().credit_wait >= Duration::from_millis(500));
+        assert!(persistence.stats().credit_wait <= Duration::from_millis(11_200));
+        assert_eq!(
+            persistence.stats().last_write,
+            Some(PathBuf::from("report.json"))
+        );
+    });
+}
+
+#[test]
+fn cancellation_in_credit_wait_preserves_accepted_evidence_and_report() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 100, &Tools);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let _release = ReleasePersistenceGate(gate.clone());
+        let mut persistence = JobPersistence::controlled(&ready, gate.clone());
+        let (writer, mut writes) = crate::jobs::persist::scripted::ScriptedWriter::new(false);
+        *persistence.script.lock().unwrap() = Some(writer);
+        let pool = persistence.pool.clone();
+        let clock = persistence.clock.clone();
+        let directory = ready.dir.clone();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let cancel = engine.cancellation();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), async {
+                pool.waiting.notified().await;
+                clock.advance(Duration::from_millis(500));
+                cancel.request_cancel(CancelSource::Api);
+                gate.notify_one();
+                while let Some(write) = writes.recv().await {
+                    clock.advance(Duration::from_millis(4));
+                    let report = write.path == std::path::Path::new("report.json");
+                    let _ = write.release.send(());
+                    if report {
+                        break;
+                    }
+                }
+            });
+        assert_eq!(report.data().details.pre_delivery_exit.code, 6);
+        assert!(report.data().result.cancellation.is_some());
+        let references: Vec<_> = report
+            .data()
+            .executions
+            .iter()
+            .flat_map(|e| [&e.spec, &e.record])
+            .flatten()
+            .collect();
+        // The waiting artefact may be a spec, a record or a `cleanup.log`;
+        // every refusal of a run's artefact is a `persist` warning, and only
+        // specs and records also carry a `Ref`.
+        assert!(report.data().warnings.iter().any(|w| matches!(
+            w,
+            Warning::Persistence {
+                error: PersistError::Cancelled,
+                ..
+            }
+        )));
+        for reference in &references {
+            assert!(
+                reference.path.is_some() || reference.error == Some(PersistError::Cancelled),
+                "{reference:?}"
+            );
+        }
+        assert!(references.iter().any(|r| r.path.is_some()));
+        for reference in references.into_iter().filter(|r| r.path.is_some()) {
+            assert!(directory.join(reference.path.as_ref().unwrap()).is_file());
+        }
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Published { .. }
+        ));
+        let document: serde_json::Value =
+            serde_json::from_slice(&crate::report::wire::encode_stdout_report(&report).unwrap())
+                .unwrap();
+        assert!(
+            document["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["kind"] == "persist" && w["error"]["kind"] == "cancelled")
+        );
+    });
+}
+
+#[test]
+fn controlled_stalled_worker_has_honest_errors_and_bounded_w_without_cancelling_deadlines() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 100, &Tools);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let _release = ReleasePersistenceGate(gate.clone());
+        let mut persistence = JobPersistence::controlled(&ready, gate.clone());
+        let pool = persistence.pool.clone();
+        let clock = persistence.clock.clone();
+        let call = clock.now();
+        let budget = ready.budget.clone();
+        let settlement = Arc::new(tokio::sync::Notify::new());
+        let reached = settlement.clone();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap()
+        .observe(move |point| {
+            if point == Point::Settlement {
+                reached.notify_one();
+            }
+        });
+        let mut receiver = engine.events().subscribe().unwrap();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), async {
+                pool.waiting.notified().await;
+                clock.advance(Duration::from_secs(1));
+                settlement.notified().await;
+                assert_eq!(clock.now(), call + Duration::from_secs(1));
+                clock.advance(Duration::from_secs(4));
+            });
+        assert_eq!(clock.now(), call + Duration::from_secs(5));
+        assert_eq!(persistence.stats().credit_wait, Duration::from_secs(1));
+        assert_eq!(
+            persistence.stats().settlement_elapsed,
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+        let references: Vec<_> = report
+            .data()
+            .executions
+            .iter()
+            .flat_map(|e| [&e.spec, &e.record])
+            .flatten()
+            .collect();
+        assert!(
+            references
+                .iter()
+                .any(|r| r.error == Some(PersistError::Timeout))
+        );
+        for reference in references {
+            assert!(reference.path.is_none());
+            assert!(matches!(
+                reference.error,
+                Some(
+                    PersistError::Timeout
+                        | PersistError::QueueFull
+                        | PersistError::WorkerUnavailable
+                )
+            ));
+        }
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Failed {
+                error: PersistError::WorkerUnavailable,
+                ..
+            }
+        ));
+        while receiver.recv().await.is_some() {}
+        assert!(receiver.terminal().await.report_id.is_none());
+        assert!(budget.usage().reserved > 0);
+        drop(persistence);
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while budget.usage().reserved > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn reserved_report_lane_ignores_saturated_record_credits_and_intent() {
+    run_test(move || async move {
+        use crate::jobs::persist::JobPersistence;
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let (mut persistence, driver, writer) = JobPersistence::scripted(&ready);
+        let pool = persistence.pool.clone();
+        let clock = persistence.clock.clone();
+        let mut credits = Vec::new();
+        let token = CancelToken::new();
+        for _ in 0..28 {
+            credits.push(pool.acquire(72 * 1024, clock.now(), &token).await.unwrap());
+        }
+        credits.push(pool.acquire(32 * 1024, clock.now(), &token).await.unwrap());
+        let engine = Engine::new(ready, JobRequest::Build).unwrap();
+        engine.cancellation().request_cancel(CancelSource::Api);
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), driver);
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Published { .. }
+        ));
+        assert!(
+            writer
+                .files
+                .lock()
+                .unwrap()
+                .contains_key(std::path::Path::new("report.json"))
+        );
+        assert_eq!(persistence.stats().peak_credits, 2 * 1024 * 1024);
+        assert_eq!(persistence.stats().credit_wait, Duration::ZERO);
+        drop(credits);
+    });
+}
+
+#[test]
+fn report_deadline_has_its_own_five_second_origin_after_empty_w() {
+    run_test(move || async move {
+        use crate::jobs::persist::{JobPersistence, scripted::ScriptedWriter};
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        gate.notify_one();
+        let mut persistence = JobPersistence::controlled(&ready, gate);
+        let clock = persistence.clock.clone();
+        let (writer, mut events) = ScriptedWriter::new(true);
+        *persistence.script.lock().unwrap() = Some(writer);
+        let engine = Engine::new(ready, JobRequest::Build).unwrap();
+        let mut receiver = engine.events().subscribe().unwrap();
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let origin = clock.now();
+        let (report, ()) =
+            tokio::join!(engine.run(&mut fake, &mut persistence, &mut hooks), async {
+                let write = events.recv().await.unwrap();
+                assert_eq!(write.path, PathBuf::from("report.json"));
+                clock.advance(Duration::from_secs(5));
+                let _ = write.release.send(());
+            });
+        assert_eq!(clock.now(), origin + Duration::from_secs(5));
+        assert!(report.data().executions.is_empty());
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Failed {
+                error: PersistError::Timeout,
+                ..
+            }
+        ));
+        assert_eq!(
+            persistence.stats().settlement_elapsed,
+            Some(Duration::from_secs(5))
+        );
+        while receiver.recv().await.is_some() {}
+        assert!(receiver.terminal().await.report_id.is_none());
+    });
 }

@@ -471,6 +471,7 @@ pub(super) fn persist(v: &e::PersistError, message: &str) -> Value {
     match v {
         e::PersistError::Timeout => kind("timeout"),
         e::PersistError::QueueFull => kind("queue_full"),
+        e::PersistError::Cancelled => kind("cancelled"),
         e::PersistError::WorkerUnavailable => kind("worker_unavailable"),
         e::PersistError::Io { os_error } => obj([
             ("kind", s("io")),

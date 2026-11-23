@@ -188,6 +188,7 @@ pub struct RunSummary {
 pub enum PersistError {
     Timeout,
     QueueFull,
+    Cancelled,
     WorkerUnavailable,
     Io { os_error: Option<i32> },
 }

@@ -117,6 +117,7 @@ mod execution {
                 .env_remove("CPF_STORAGE_CRASH_AT")
                 .env_remove("CPF_STORAGE_PANIC_AT")
                 .env_remove("CPF_STORAGE_PAUSE_AT")
+                .env_remove("CPF_STORAGE_PERSISTENCE_STATS")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -263,6 +264,10 @@ mod execution {
                 .command(args)
                 .env("CPF_STORAGE_PAUSE_AT", point)
                 .env("CPF_STORAGE_STDERR_QUEUED", w.path("stderr-queued"))
+                .env(
+                    "CPF_STORAGE_PERSISTENCE_STATS",
+                    w.path("persistence-stats.json"),
+                )
                 .env("CPF_STORAGE_SIGNAL_READY", w.path("signal-ready"))
                 .stdin(Stdio::piped())
                 .spawn()
@@ -339,6 +344,296 @@ mod execution {
                 let _ = reader.join();
             }
         }
+    }
+
+    // Reconstruct E §2's independent binary digest from the published spec,
+    // including native bytes, rather than hashing its JSON representation.
+    #[cfg(feature = "storage-test-hooks")]
+    fn published_spec_digest(spec: &Value) -> String {
+        fn bytes(hash: &mut Sha256, value: &[u8]) {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value);
+        }
+        fn native(hash: &mut Sha256, value: &Value) {
+            let value = wire::decode_native(&serde_json::to_vec(value).unwrap()).unwrap();
+            bytes(hash, &wire::native_bytes(&value));
+        }
+        let mut hash = Sha256::new();
+        bytes(&mut hash, spec["stage"].as_str().unwrap().as_bytes());
+        native(&mut hash, &spec["program"]);
+        let args = spec["args"].as_array().unwrap();
+        hash.update((args.len() as u64).to_le_bytes());
+        for arg in args {
+            native(&mut hash, arg);
+        }
+        native(&mut hash, &spec["cwd"]);
+        let environment = spec["env"].as_array().unwrap();
+        hash.update((environment.len() as u64).to_le_bytes());
+        for pair in environment {
+            native(&mut hash, &pair["name"]);
+            native(&mut hash, &pair["value"]);
+        }
+        let stdin = &spec["stdin"];
+        let kind = stdin["kind"].as_str().unwrap();
+        bytes(&mut hash, kind.as_bytes());
+        if kind == "file" {
+            native(&mut hash, &stdin["path"]);
+        }
+        for name in ["stdout", "stderr"] {
+            let stream = &spec[name];
+            let sink = &stream["sink"];
+            let kind = sink["kind"].as_str().unwrap();
+            bytes(&mut hash, kind.as_bytes());
+            match kind {
+                "file" => native(&mut hash, &sink["path"]),
+                "forward" => bytes(&mut hash, sink["stream"].as_str().unwrap().as_bytes()),
+                "discard" => {}
+                other => panic!("invalid persisted sink {other}"),
+            }
+            hash.update(
+                wire::read::read_u64(&stream["budget"])
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+            bytes(&mut hash, stream["on_exceed"].as_str().unwrap().as_bytes());
+            hash.update([u8::from(stream["events"].as_bool().unwrap())]);
+        }
+        hash.update(
+            wire::read::read_u64(&spec["wall_deadline_us"])
+                .unwrap()
+                .to_le_bytes(),
+        );
+        assert!(spec["deadline_group"].is_null());
+        bytes(&mut hash, b"none");
+        let limits = spec["limits"].as_array().unwrap();
+        hash.update((limits.len() as u64).to_le_bytes());
+        for limit in limits {
+            bytes(&mut hash, limit["kind"].as_str().unwrap().as_bytes());
+            hash.update(wire::read::read_u64(&limit["bytes"]).unwrap().to_le_bytes());
+        }
+        let measures = spec["measure"].as_array().unwrap();
+        hash.update((measures.len() as u64).to_le_bytes());
+        for metric in measures {
+            bytes(&mut hash, metric.as_str().unwrap().as_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    fn assert_all_published(w: &Workspace, report: &Value, count: usize) {
+        let (directory, saved) = w.report();
+        let mut delivered = report.clone();
+        delivered.as_object_mut().unwrap().remove("persistence");
+        assert_eq!(saved, delivered);
+        assert_eq!(report["persistence"]["report"]["kind"], "published");
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| w["kind"] != "persist")
+        );
+        assert_eq!(report["executions"].as_array().unwrap().len(), count);
+        for execution in report["executions"].as_array().unwrap() {
+            let spec_ref = &execution["spec"];
+            let record_ref = &execution["record"];
+            assert!(spec_ref["error"].is_null() && record_ref["error"].is_null());
+            let spec_path = directory.join(spec_ref["path"].as_str().unwrap());
+            let record_path = directory.join(record_ref["path"].as_str().unwrap());
+            let spec = wire::read::read_json(&fs::read(spec_path).unwrap()).unwrap();
+            assert_eq!(
+                published_spec_digest(&spec),
+                spec_ref["digest"].as_str().unwrap()
+            );
+            let record = wire::read::read_json(&fs::read(&record_path).unwrap()).unwrap();
+            assert_eq!(record["spec"]["digest"], spec_ref["digest"]);
+            assert_eq!(record["spec"]["path"], spec_ref["path"]);
+            assert!(
+                fs::read(record_path.with_file_name("cleanup.log"))
+                    .unwrap()
+                    .starts_with(b"record finalized")
+            );
+        }
+        for name in ["spec.json", "record.json", "cleanup.log"] {
+            let actual = fs::read_dir(&directory)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|e| {
+                    e.file_type().unwrap().is_dir()
+                        && e.file_name().to_string_lossy().starts_with('r')
+                })
+                .filter(|e| e.path().join(name).is_file())
+                .count();
+            assert_eq!(actual, count, "{name}");
+        }
+    }
+
+    // Real-host outcome of E §6.2 without the platform evidence claim: the
+    // report is published, every published spec and record is readable and
+    // linked, and every refusal is credit backpressure (`queue_full`), never
+    // a timeout, an unavailable worker or an I/O error.
+    #[cfg(feature = "storage-test-hooks")]
+    fn assert_published_or_queue_full(w: &Workspace, report: &Value, count: usize) {
+        let (directory, saved) = w.report();
+        let mut delivered = report.clone();
+        delivered.as_object_mut().unwrap().remove("persistence");
+        assert_eq!(saved, delivered);
+        assert_eq!(report["persistence"]["report"]["kind"], "published");
+        for warning in report["warnings"].as_array().unwrap() {
+            if warning["kind"] == "persist" {
+                assert_eq!(warning["error"]["kind"], "queue_full", "{warning}");
+            }
+        }
+        let executions = report["executions"].as_array().unwrap();
+        assert_eq!(executions.len(), count);
+        for execution in executions {
+            let spec_ref = &execution["spec"];
+            let record_ref = &execution["record"];
+            for reference in [spec_ref, record_ref] {
+                assert!(
+                    reference["path"].is_string() || reference["error"]["kind"] == "queue_full",
+                    "{reference}"
+                );
+            }
+            if let Some(path) = spec_ref["path"].as_str() {
+                let spec = wire::read::read_json(&fs::read(directory.join(path)).unwrap()).unwrap();
+                assert_eq!(
+                    published_spec_digest(&spec),
+                    spec_ref["digest"].as_str().unwrap()
+                );
+            }
+            if let Some(path) = record_ref["path"].as_str() {
+                let record_path = directory.join(path);
+                let record = wire::read::read_json(&fs::read(&record_path).unwrap()).unwrap();
+                assert_eq!(record["spec"]["digest"], spec_ref["digest"]);
+                assert_eq!(record["spec"]["path"], spec_ref["path"]);
+                if let Ok(log) = fs::read(record_path.with_file_name("cleanup.log")) {
+                    assert!(log.starts_with(b"record finalized"));
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn persistence_throughput_three_thousand_tests_platform_evidence() {
+        let w = Workspace::new(Some("fixture"));
+        let program = serde_json::to_string(&cpf_fixture::harness::fixture_path()).unwrap();
+        w.write("cpforge.toml", &format!("schema = 1\n[languages.fixture]\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = [{program}, 'exit:0']\n"));
+        w.write("problems/A/main.sh", "fixture\n");
+        let ids: Vec<_> = (0..3000).map(|n| format!("case{n:04}")).collect();
+        let entries: Vec<_> = ids
+            .iter()
+            .map(|id| (id.as_str(), "", Some(""), true))
+            .collect();
+        w.cases(&entries);
+        let output = wait(
+            w.command(&["test", "--json"])
+                .env(
+                    "CPF_STORAGE_PERSISTENCE_STATS",
+                    w.path("persistence-stats.json"),
+                )
+                .spawn()
+                .unwrap(),
+        );
+        status(&output, 0);
+        let report = document(&output);
+        assert_eq!(report["result"]["verdict"], "passed");
+        let stats: Value =
+            serde_json::from_slice(&fs::read(w.path("persistence-stats.json")).unwrap()).unwrap();
+        let waited = wire::read::read_u64(&stats["credit_wait_us"]).unwrap();
+        let mut cycles: Vec<_> = stats["service_cycles_us"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| wire::read::read_u64(v).unwrap())
+            .collect();
+        cycles.sort_unstable();
+        let max = cycles.last().copied().unwrap_or(0);
+        let p99 = if cycles.is_empty() {
+            0
+        } else {
+            cycles[(cycles.len() - 1) * 99 / 100]
+        };
+        let evidence = format!(
+            "persistence platform evidence: max cycle {max} us, p99 {p99} us, total credit wait {waited} us ({} samples)",
+            cycles.len()
+        );
+        eprintln!("{evidence}");
+        // Report contract §9.2: a failure here blocks CI until it is
+        // classified as a defect or as a recorded platform finding; the
+        // evidence above is what that classification needs.
+        let refused: Vec<_> = report["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|e| [&e["spec"]["error"]["kind"], &e["record"]["error"]["kind"]])
+            .filter(|kind| !kind.is_null())
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "{} spec/record refusals, first {:?}; {evidence}; classify as a defect or a platform finding",
+            refused.len(),
+            refused.first()
+        );
+        assert_all_published(&w, &report, 3000);
+        assert_eq!(stats["last_write"], "report.json", "{evidence}");
+        assert!(stats["peak_credits"].as_u64().unwrap() <= 2 * 1024 * 1024);
+        assert!(waited <= 46_000_000, "{evidence}");
+        let elapsed = wire::read::read_u64(&stats["settlement_to_finished_us"]).unwrap();
+        assert!(
+            elapsed <= 10_000_000 + 300_000 * stderr_allowance_scale(),
+            "start of W to job_finished {elapsed} us; {evidence}"
+        );
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn permanently_stalled_persistence_honestly_settles_one_hundred_real_tests() {
+        let w = Workspace::new(Some("fixture"));
+        let program = serde_json::to_string(&cpf_fixture::harness::fixture_path()).unwrap();
+        w.write("cpforge.toml", &format!("schema = 1\n[languages.fixture]\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = [{program}, 'exit:0']\n"));
+        w.write("problems/A/main.sh", "fixture\n");
+        let ids: Vec<_> = (0..100).map(|n| format!("case{n:03}")).collect();
+        let entries: Vec<_> = ids
+            .iter()
+            .map(|id| (id.as_str(), "", Some(""), true))
+            .collect();
+        w.cases(&entries);
+        let paused = PausedJob::start(&w, "persist.write");
+        let delivered = paused.line();
+        let report: Value = serde_json::from_slice(&delivered).unwrap();
+        assert_eq!(report["result"]["verdict"], "passed");
+        let executions = report["executions"].as_array().unwrap();
+        assert_eq!(executions.len(), 100);
+        let mut timeouts = 0;
+        for execution in executions {
+            for name in ["spec", "record"] {
+                let reference = &execution[name];
+                assert!(reference["path"].is_null());
+                let kind = reference["error"]["kind"].as_str().unwrap();
+                assert!(
+                    matches!(kind, "timeout" | "queue_full" | "worker_unavailable"),
+                    "{reference}"
+                );
+                timeouts += usize::from(kind == "timeout");
+            }
+        }
+        assert!(timeouts > 0);
+        assert_eq!(
+            report["persistence"]["report"]["error"]["kind"],
+            "worker_unavailable"
+        );
+        assert!(!w.jobs()[0].join("report.json").exists());
+        let stats: Value =
+            serde_json::from_slice(&fs::read(w.path("persistence-stats.json")).unwrap()).unwrap();
+        let waited = wire::read::read_u64(&stats["credit_wait_us"]).unwrap();
+        assert!(waited <= 1_000_000 + 100_000 * stderr_allowance_scale());
+        let elapsed = wire::read::read_u64(&stats["settlement_to_finished_us"]).unwrap();
+        assert!(elapsed <= 5_000_000 + 300_000 * stderr_allowance_scale());
+        // Never release persist.write. Process exit must remain bounded while
+        // cleanup owns the syscall, its lease and outstanding reservations.
+        status(&paused.finish(delivered), 0);
     }
 
     #[test]
@@ -581,8 +876,9 @@ mod execution {
             assert!(line.len() < cpforge::progress::LINE_BYTES);
             if line.starts_with("cpf: warning:") {
                 warnings = true;
-                // Bounded persistence may also report a full queue (report
-                // contract PersistError `queue_full`) on slower runners.
+                // Real hosts give no service bound (E §6.2): backpressure can
+                // end in `queue_full`, which the platform evidence run, not
+                // this stderr fixture, classifies.
                 assert!(
                     line.contains("progress lines dropped")
                         || line.contains("artefact publication failed")
@@ -602,6 +898,7 @@ mod execution {
             }
         }
         assert_eq!(progress, 3000);
+        assert_published_or_queue_full(&w, &report, 3000);
     }
 
     #[cfg(feature = "storage-test-hooks")]
@@ -744,10 +1041,11 @@ mod execution {
         assert_eq!(report["executions"].as_array().unwrap().len(), 10_000);
         assert_eq!(report["tests"].as_array().unwrap().len(), 10);
         let warnings = report["warnings"].as_array().unwrap();
-        // The writer took one execution-progress line before blocking; all
-        // other progress is budget-dropped or detached at E. Persistence
-        // warnings precede it in the list, so on a runner whose persistence
-        // queue overflows it may be among the counted, unlisted warnings.
+        // The writer took exactly one progress line before blocking. All
+        // result lines survive, and E finalizes the other progress as dropped.
+        // Persistence warnings precede it in the list; on a host slower than
+        // the E §6.2 service assumption, `queue_full` refusals can push it
+        // among the counted, unlisted warnings.
         if let Some(warning) = warnings
             .iter()
             .find(|warning| warning["kind"] == "progress_dropped")
@@ -785,6 +1083,7 @@ mod execution {
             1
         );
         assert_eq!(w.report().1["warnings"], report["warnings"]);
+        assert_published_or_queue_full(&w, &report, 10_000);
     }
 
     #[test]

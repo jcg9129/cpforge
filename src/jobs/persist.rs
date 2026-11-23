@@ -3,6 +3,14 @@
 //! until the syscall returns and never starts another queued write. Dropping the
 //! service hands a worker that may still be in a write to process-wide cleanup,
 //! without taking a run slot; an idle worker simply exits as before.
+mod clock;
+mod queue;
+#[cfg(test)]
+pub(crate) mod scripted;
+
+use clock::Clock;
+use queue::{Credit, Pool, Publication};
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +27,21 @@ use crate::storage::job::JobOwner;
 use crate::storage::{self, Cleanup, Durability, Published, WorkspaceGuard};
 
 const DEADLINE: Duration = Duration::from_secs(5);
-const QUEUE: usize = 16;
+// Even zero-length artefacts cost 8 KiB. This channel includes one slot
+// reserved exclusively for the report; memory is bounded by the credit pool.
+const QUEUE_SLOTS: usize = queue::CAPACITY / queue::OVERHEAD + 1;
+
+#[cfg(any(test, feature = "storage-test-hooks"))]
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct PersistenceStats {
+    pub peak_credits: usize,
+    pub credit_wait: Duration,
+    pub service_cycles: Vec<Duration>,
+    pub last_write: Option<PathBuf>,
+    pub settlement_elapsed: Option<Duration>,
+    pub record_idle_at_enqueue: Vec<bool>,
+}
 
 #[derive(Clone, Debug)]
 struct Outcome {
@@ -98,6 +120,8 @@ struct Write {
     path: PathBuf,
     content: Content,
     reservation: Reservation,
+    credit: Option<Credit>,
+    publication: Publication,
     deadline: Instant,
     sender: oneshot::Sender<Outcome>,
     digest: Option<[u8; 32]>,
@@ -165,17 +189,68 @@ pub struct JobPersistence {
     sender: Option<mpsc::SyncSender<Write>>,
     worker: Option<PersistenceWorker>,
     unavailable: Arc<AtomicBool>,
+    pub(crate) pool: Arc<Pool>,
+    pub(crate) clock: Clock,
+    cancel: crate::supervisor::CancelToken,
     pending: Vec<Pending>,
     active: Vec<usize>,
     specs: BTreeMap<u32, Arc<Mutex<Option<ArtifactRef>>>>,
     bound: Duration,
     report_attempted: bool,
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    settlement_start: Option<Instant>,
     #[cfg(test)]
     report_gate: Option<Arc<Notify>>,
+    #[cfg(test)]
+    pub(crate) script: Arc<Mutex<Option<Arc<scripted::ScriptedWriter>>>>,
     #[cfg(feature = "storage-test-hooks")]
     rename_gate: Option<Arc<RenameGate>>,
 }
 impl JobPersistence {
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    #[doc(hidden)]
+    pub fn stats(&self) -> PersistenceStats {
+        let mut stats = self.pool.stats();
+        stats.settlement_elapsed = self
+            .settlement_start
+            .map(|start| self.clock.now().saturating_duration_since(start));
+        stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn controlled(ready: &super::ReadyJob<'_>, gate: Arc<Notify>) -> Self {
+        Self::start_clock(
+            ready.owner.clone(),
+            DEADLINE,
+            Some(gate),
+            None,
+            Clock::controlled(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scripted(
+        ready: &super::ReadyJob<'_>,
+    ) -> (Self, JobFuture<'static, ()>, Arc<scripted::ScriptedWriter>) {
+        let clock = Clock::controlled();
+        let service =
+            Self::start_clock(ready.owner.clone(), DEADLINE, None, None, clock.clone()).unwrap();
+        let (writer, mut events) = scripted::ScriptedWriter::new(true);
+        *service.script.lock().unwrap() = Some(writer.clone());
+        let driver = async move {
+            while let Some(write) = events.recv().await {
+                clock.advance(Duration::from_millis(4));
+                let report = write.path == std::path::Path::new("report.json");
+                let _ = write.release.send(());
+                if report {
+                    break;
+                }
+            }
+        };
+        (service, Box::pin(driver), writer)
+    }
+
     /// Reserves the worker's thread credit and creates the worker. Failure
     /// returns the credit; the job must not start (execution contract §3.3).
     pub fn new(ready: &super::ReadyJob<'_>) -> std::io::Result<Self> {
@@ -226,8 +301,25 @@ impl JobPersistence {
         gate: Option<Arc<Notify>>,
         credit: Option<crate::supervisor::Credits>,
     ) -> std::io::Result<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<Write>(QUEUE);
-        let unavailable = Arc::new(AtomicBool::new(false));
+        Self::start_clock(owner, bound, gate, credit, Clock::default())
+    }
+
+    fn start_clock(
+        owner: JobOwner,
+        bound: Duration,
+        gate: Option<Arc<Notify>>,
+        credit: Option<crate::supervisor::Credits>,
+        clock: Clock,
+    ) -> std::io::Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel::<Write>(QUEUE_SLOTS);
+        let pool = Pool::new(clock.clone());
+        let unavailable = pool.unavailable.clone();
+        let worker_pool = pool.clone();
+        let worker_clock = clock.clone();
+        #[cfg(test)]
+        let script: Arc<Mutex<Option<Arc<scripted::ScriptedWriter>>>> = Arc::default();
+        #[cfg(test)]
+        let worker_script = script.clone();
         let stopped = unavailable.clone();
         let credit = match credit {
             Some(credit) => credit,
@@ -242,6 +334,7 @@ impl JobPersistence {
         let thread = std::thread::Builder::new()
             .name("cpf-persistence".into())
             .spawn(move || {
+                let _close = queue::CloseOnExit(worker_pool.clone());
                 // A blocking test gate models an uninterruptible writer. It is
                 // released by the test; production never installs one.
                 if let Some(gate) = gate {
@@ -253,6 +346,8 @@ impl JobPersistence {
                 }
                 while let Ok(mut write) = resources.receiver.recv() {
                     #[cfg(test)]
+                    let script = worker_script.lock().unwrap().clone();
+                    #[cfg(test)]
                     if let Some(gate) = write.gate.take() {
                         let runtime = tokio::runtime::Builder::new_current_thread()
                             .enable_time()
@@ -260,8 +355,12 @@ impl JobPersistence {
                             .unwrap();
                         runtime.block_on(gate.notified());
                     }
-                    if stopped.load(Ordering::Acquire) || Instant::now() >= write.deadline {
-                        stopped.store(true, Ordering::Release);
+                    if stopped.load(Ordering::Acquire) || worker_clock.now() >= write.deadline {
+                        if worker_clock.now() >= write.deadline {
+                            worker_pool.timeout();
+                        } else {
+                            worker_pool.close();
+                        }
                         resources.late = Some((write.reservation, 0));
                         break;
                     }
@@ -276,6 +375,7 @@ impl JobPersistence {
                         },
                         _ => None,
                     };
+                    crate::storage::crash::barrier("persist.write");
                     let bytes = match write.content {
                         Content::Bytes(bytes) => Ok(bytes),
                         Content::Report(report) => wire::encode_report_data(&report),
@@ -327,6 +427,14 @@ impl JobPersistence {
                                 }
                                 guard
                             };
+                            #[cfg(test)]
+                            let published =
+                                if let Some(script) = script.as_ref().filter(|s| s.virtual_files) {
+                                    Ok(script.publish(&write.path, &bytes))
+                                } else {
+                                    storage::publish_file_noclobber(&guard, &write.path, &bytes)
+                                };
+                            #[cfg(not(test))]
                             let published =
                                 storage::publish_file_noclobber(&guard, &write.path, &bytes);
                             #[cfg(feature = "storage-test-hooks")]
@@ -336,7 +444,7 @@ impl JobPersistence {
                                 Ok(published) => Outcome {
                                     reference: ArtifactRef {
                                         digest: write.digest,
-                                        path: Some(write.path),
+                                        path: Some(write.path.clone()),
                                         error: None,
                                     },
                                     uncertain: matches!(
@@ -353,9 +461,18 @@ impl JobPersistence {
                         }
                         _ => Outcome::failed(PersistError::Io { os_error: None }, write.digest),
                     };
+                    #[cfg(test)]
+                    if let Some(script) = script {
+                        script.returning(&write.path);
+                    }
+                    #[cfg(any(test, feature = "storage-test-hooks"))]
+                    Pool::written(&worker_pool, &write.path);
                     // A completion after its deadline is never a publication observation.
-                    if Instant::now() >= write.deadline || stopped.load(Ordering::Acquire) {
-                        stopped.store(true, Ordering::Release);
+                    let late = write.publication.returned();
+                    // Queue headroom returns at write return, before any disk
+                    // reservation settlement, including a late completion.
+                    drop(write.credit.take());
+                    if late {
                         resources.late = Some((write.reservation, retained));
                         #[cfg(feature = "storage-test-hooks")]
                         if let Some(gate) = &write.rename_gate {
@@ -389,21 +506,29 @@ impl JobPersistence {
                 thread: Some(thread),
             }),
             unavailable,
+            pool,
+            clock,
+            cancel: crate::supervisor::CancelToken::new(),
             pending: Vec::new(),
             active: Vec::new(),
             specs: BTreeMap::new(),
             bound,
             report_attempted: false,
+            #[cfg(any(test, feature = "storage-test-hooks"))]
+            settlement_start: None,
             #[cfg(test)]
             report_gate: None,
+            #[cfg(test)]
+            script,
             #[cfg(feature = "storage-test-hooks")]
             rename_gate: None,
         })
     }
 
     fn expire(&mut self) {
-        let now = Instant::now();
-        let mut timeout = false;
+        let now = self.clock.now();
+        let mut timeout = self.pool.timed_out.load(Ordering::Acquire);
+        let mut exited = self.unavailable.load(Ordering::Acquire);
         for index in std::mem::take(&mut self.active) {
             let pending = &mut self.pending[index];
             if pending.result.is_some() {
@@ -413,31 +538,43 @@ impl JobPersistence {
                 Ok(result) => pending.result = Some(result),
                 Err(oneshot::error::TryRecvError::Empty) => timeout |= now >= pending.deadline,
                 Err(oneshot::error::TryRecvError::Closed) => {
-                    timeout |= self.unavailable.load(Ordering::Acquire) || now >= pending.deadline;
-                    if !timeout {
-                        pending.result = Some(Outcome::failed(
-                            PersistError::WorkerUnavailable,
-                            pending.digest,
-                        ));
-                    }
+                    timeout |=
+                        self.pool.timed_out.load(Ordering::Acquire) || now >= pending.deadline;
+                    exited = true;
                 }
             }
             if pending.result.is_none() {
                 self.active.push(index);
             }
         }
-        if timeout {
-            self.unavailable.store(true, Ordering::Release);
+        if timeout || exited {
+            let error = if timeout {
+                self.pool.timeout();
+                PersistError::Timeout
+            } else {
+                self.pool.close();
+                PersistError::WorkerUnavailable
+            };
             self.sender.take();
             for pending in &mut self.pending {
                 if pending.result.is_none() {
-                    pending.result = Some(Outcome::failed(PersistError::Timeout, pending.digest));
+                    pending.result = Some(Outcome::failed(error.clone(), pending.digest));
                 }
             }
+            self.active.clear();
         }
     }
 
-    fn enqueue_write(&mut self, request: Request) {
+    fn enqueue_write(&mut self, request: Request) -> impl std::future::Future<Output = ()> + '_ {
+        let call = self.clock.now();
+        #[cfg(any(test, feature = "storage-test-hooks"))]
+        if request.artefact == "record" {
+            self.pool.record_enqueue();
+        }
+        self.enqueue_at(request, call)
+    }
+
+    async fn enqueue_at(&mut self, request: Request, call: Instant) {
         let Request {
             execution,
             run,
@@ -449,16 +586,54 @@ impl JobPersistence {
             spec_result,
         } = request;
         self.expire();
-        let deadline = Instant::now() + self.bound;
+        let deadline = call + self.bound;
         let (sender, receiver) = oneshot::channel();
         let spec_cell = spec_result.clone();
-        let result = if self.unavailable.load(Ordering::Acquire) {
+        let charge = match &content {
+            Content::Report(_) => 0,
+            Content::Bytes(bytes) => queue::OVERHEAD + bytes.len(),
+            Content::Record { .. } => queue::OVERHEAD + 64 * 1024,
+        };
+        // Keep a sender while waiting: a grant is acceptance, even if the
+        // producer resumes only after another publication has timed out. Its
+        // unwritten reservation must then travel with the worker through join.
+        let queue_sender = self.sender.clone();
+        let credit = if queue_sender.is_none() || self.unavailable.load(Ordering::Acquire) {
+            Err(PersistError::WorkerUnavailable)
+        } else if charge == 0 || reservation.is_none() {
+            Ok(None)
+        } else {
+            self.pool
+                .acquire(charge, call, &self.cancel)
+                .await
+                .map(Some)
+        };
+        self.expire();
+        let result = if let Err(error) = &credit {
+            // A refusal is already settled; later unavailability cannot change it.
+            Some(Outcome::failed(error.clone(), digest))
+        } else if charge == 0 && self.unavailable.load(Ordering::Acquire) {
             Some(Outcome::failed(PersistError::WorkerUnavailable, digest))
         } else if let Some(reservation) = reservation {
+            if self.clock.now() >= deadline {
+                self.pool.timeout();
+            }
+            let settled = self.unavailable.load(Ordering::Acquire).then(|| {
+                Outcome::failed(
+                    if self.pool.timed_out.load(Ordering::Acquire) {
+                        PersistError::Timeout
+                    } else {
+                        PersistError::WorkerUnavailable
+                    },
+                    digest,
+                )
+            });
             let write = Write {
                 path,
                 content,
                 reservation,
+                credit: credit.expect("credit granted"),
+                publication: self.pool.publication(deadline),
                 deadline,
                 sender,
                 digest,
@@ -472,13 +647,19 @@ impl JobPersistence {
                 #[cfg(feature = "storage-test-hooks")]
                 rename_gate: self.rename_gate.take(),
             };
-            match &self.sender {
+            match &queue_sender {
                 Some(sender) => match sender.try_send(write) {
-                    Ok(()) => None,
+                    Ok(()) => settled,
                     Err(mpsc::TrySendError::Full(_)) => {
-                        Some(Outcome::failed(PersistError::QueueFull, digest))
+                        // Credits bound the ordinary queue and the extra slot
+                        // is report-only, so Full indicates a broken worker.
+                        self.pool.close();
+                        Some(Outcome::failed(PersistError::WorkerUnavailable, digest))
                     }
-                    Err(_) => Some(Outcome::failed(PersistError::WorkerUnavailable, digest)),
+                    Err(_) => {
+                        self.pool.close();
+                        Some(Outcome::failed(PersistError::WorkerUnavailable, digest))
+                    }
                 },
                 None => Some(Outcome::failed(PersistError::WorkerUnavailable, digest)),
             }
@@ -507,7 +688,13 @@ impl JobPersistence {
     }
 
     async fn wait(&mut self) {
+        let pool = self.pool.clone();
         loop {
+            // Register before inspecting state: a worker exit or timeout
+            // signalled between the inspection and the select is not lost.
+            let changed = pool.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             self.expire();
             let Some(pending) = self
                 .pending
@@ -517,43 +704,32 @@ impl JobPersistence {
             else {
                 break;
             };
-            let deadline = tokio::time::Instant::from_std(pending.deadline);
-            // Bind first: the timer future must not borrow `pending` in the arms.
-            let received = tokio::time::timeout_at(deadline, &mut pending.receiver).await;
-            match received {
-                Ok(Ok(result)) => pending.result = Some(result),
-                Ok(Err(_)) if !self.unavailable.load(Ordering::Acquire) => {
-                    pending.result = Some(Outcome::failed(
-                        PersistError::WorkerUnavailable,
-                        pending.digest,
-                    ))
-                }
-                _ => {
-                    self.unavailable.store(true, Ordering::Release);
-                    self.sender.take();
-                    for pending in &mut self.pending {
-                        if pending.result.is_none() {
-                            pending.result =
-                                Some(Outcome::failed(PersistError::Timeout, pending.digest));
-                        }
-                    }
-                }
+            let deadline = pending.deadline;
+            tokio::select! {
+                biased;
+                result = &mut pending.receiver => match result {
+                    Ok(result) => pending.result = Some(result),
+                    Err(_) => self.pool.close(),
+                },
+                _ = self.clock.until(deadline) => self.pool.timeout(),
+                _ = changed => {},
             }
         }
     }
 }
 impl Drop for JobPersistence {
     fn drop(&mut self) {
-        // Close the queue first; this never waits for the worker.
+        // Snapshot idleness before closing: the healthy thread may exit and
+        // close its pool as soon as the last sender is dropped.
+        let idle = !self.unavailable.load(Ordering::Acquire)
+            && self.pending.iter().all(|pending| pending.result.is_some());
         self.sender.take();
         let Some(mut worker) = self.worker.take() else {
             return;
         };
         // Healthy and idle: every accepted write has delivered its result, so
-        // the closed queue ends the thread without further I/O. Detach it as
-        // before; its join result (credit, lease clone) drops on its own exit.
-        let idle = !self.unavailable.load(Ordering::Acquire)
-            && self.pending.iter().all(|pending| pending.result.is_some());
+        // the closed queue ends the thread without further I/O. Its join result
+        // (credit, lease clone) drops on its own exit.
         if idle || worker.resources_released() {
             return;
         }
@@ -563,84 +739,107 @@ impl Drop for JobPersistence {
     }
 }
 impl Persistence for JobPersistence {
-    fn enqueue(&mut self, mut artifact: PendingArtifacts) {
-        artifact.writable &= Arc::ptr_eq(&artifact.owner, &self._owner);
-        let run = artifact.run.clone();
-        let prefix = PathBuf::from(run.as_str());
-        let digest = artifact.spec.as_ref().and_then(|spec| spec.digest);
-        if !artifact.finalized {
-            let cell = Arc::new(Mutex::new(None));
-            self.specs.insert(artifact.execution, cell.clone());
-            let Some(spec) = &artifact.spec else {
-                return;
-            };
-            let bytes = wire::encode_spec(&spec.wire_spec());
-            let allowance = if artifact.writable && bytes.is_ok() {
-                artifact.metadata.take()
-            } else {
-                None
-            };
-            self.enqueue_write(Request {
-                execution: Some(artifact.execution),
-                run: Some(run),
-                artefact: "spec",
-                path: prefix.join("spec.json"),
-                content: Content::Bytes(bytes.unwrap_or_default()),
-                reservation: allowance,
-                digest,
-                spec_result: Some(cell),
-            });
-        } else {
-            let Some(record) = artifact.record else {
-                return;
-            };
-            let cleanup = match record.as_ref() {
-                ExecutionRecord::Started(root) => format!(
-                    "record finalized\ncleanup: {:?}\nkill attempts: {}\n",
-                    root.termination.cleanup, root.kill_attempts
-                ),
-                ExecutionRecord::NotStarted(_) => "record finalized; process not started\n".into(),
-                ExecutionRecord::Transferred => {
-                    "record finalized; cancelled during creation; cleanup pending\n".into()
-                }
-            };
-            let mut metadata = if artifact.writable {
-                artifact.metadata.take()
-            } else {
-                None
-            };
-            let record_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
-            let cleanup_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
-            let cell = self
-                .specs
-                .get(&artifact.execution)
-                .cloned()
-                .unwrap_or_default();
-            self.enqueue_write(Request {
-                execution: Some(artifact.execution),
-                run: Some(run.clone()),
-                artefact: "record",
-                path: prefix.join("record.json"),
-                content: Content::Record {
-                    record,
-                    digest,
-                    spec: cell,
-                },
-                reservation: record_allowance,
-                digest: None,
-                spec_result: None,
-            });
-            self.enqueue_write(Request {
-                execution: Some(artifact.execution),
-                run: Some(run),
-                artefact: "cleanup_log",
-                path: prefix.join("cleanup.log"),
-                content: Content::Bytes(cleanup.into_bytes()),
-                reservation: cleanup_allowance,
-                digest: None,
-                spec_result: None,
-            });
+    fn configure(&mut self, planned: u32, cancel: crate::supervisor::CancelToken) {
+        self.pool.configure(planned);
+        self.cancel = cancel;
+    }
+
+    fn enqueue(&mut self, mut artifact: PendingArtifacts) -> JobFuture<'_, ()> {
+        let call = self.clock.now();
+        #[cfg(any(test, feature = "storage-test-hooks"))]
+        if artifact.finalized && artifact.record.is_some() {
+            self.pool.record_enqueue();
         }
+        Box::pin(async move {
+            artifact.writable &= Arc::ptr_eq(&artifact.owner, &self._owner);
+            let run = artifact.run.clone();
+            let prefix = PathBuf::from(run.as_str());
+            let digest = artifact.spec.as_ref().and_then(|spec| spec.digest);
+            if !artifact.finalized {
+                let cell = Arc::new(Mutex::new(None));
+                self.specs.insert(artifact.execution, cell.clone());
+                let Some(spec) = &artifact.spec else {
+                    return;
+                };
+                let bytes = wire::encode_spec(&spec.wire_spec());
+                let allowance = if artifact.writable && bytes.is_ok() {
+                    artifact.metadata.take()
+                } else {
+                    None
+                };
+                self.enqueue_at(
+                    Request {
+                        execution: Some(artifact.execution),
+                        run: Some(run),
+                        artefact: "spec",
+                        path: prefix.join("spec.json"),
+                        content: Content::Bytes(bytes.unwrap_or_default()),
+                        reservation: allowance,
+                        digest,
+                        spec_result: Some(cell),
+                    },
+                    call,
+                )
+                .await;
+            } else {
+                let Some(record) = artifact.record else {
+                    return;
+                };
+                let cleanup = match record.as_ref() {
+                    ExecutionRecord::Started(root) => format!(
+                        "record finalized\ncleanup: {:?}\nkill attempts: {}\n",
+                        root.termination.cleanup, root.kill_attempts
+                    ),
+                    ExecutionRecord::NotStarted(_) => {
+                        "record finalized; process not started\n".into()
+                    }
+                    ExecutionRecord::Transferred => {
+                        "record finalized; cancelled during creation; cleanup pending\n".into()
+                    }
+                };
+                let mut metadata = if artifact.writable {
+                    artifact.metadata.take()
+                } else {
+                    None
+                };
+                let record_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
+                let cleanup_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
+                let cell = self
+                    .specs
+                    .get(&artifact.execution)
+                    .cloned()
+                    .unwrap_or_default();
+                self.enqueue_at(
+                    Request {
+                        execution: Some(artifact.execution),
+                        run: Some(run.clone()),
+                        artefact: "record",
+                        path: prefix.join("record.json"),
+                        content: Content::Record {
+                            record,
+                            digest,
+                            spec: cell,
+                        },
+                        reservation: record_allowance,
+                        digest: None,
+                        spec_result: None,
+                    },
+                    call,
+                )
+                .await;
+                self.enqueue_write(Request {
+                    execution: Some(artifact.execution),
+                    run: Some(run),
+                    artefact: "cleanup_log",
+                    path: prefix.join("cleanup.log"),
+                    content: Content::Bytes(cleanup.into_bytes()),
+                    reservation: cleanup_allowance,
+                    digest: None,
+                    spec_result: None,
+                })
+                .await;
+            }
+        })
     }
 
     fn settle<'a>(
@@ -648,6 +847,10 @@ impl Persistence for JobPersistence {
         executions: &'a mut [ExecutionReport],
     ) -> JobFuture<'a, Vec<Warning>> {
         Box::pin(async move {
+            #[cfg(any(test, feature = "storage-test-hooks"))]
+            {
+                self.settlement_start = Some(self.clock.now());
+            }
             self.wait().await;
             let mut warnings = Vec::new();
             for pending in self.pending.drain(..) {
@@ -694,6 +897,7 @@ impl Persistence for JobPersistence {
         report: Arc<ReportData>,
         reservation: Option<Reservation>,
     ) -> JobFuture<'_, ReportPersistence> {
+        let call = self.clock.now();
         Box::pin(async move {
             if self.report_attempted {
                 return failed(PersistError::Io { os_error: None });
@@ -705,16 +909,20 @@ impl Persistence for JobPersistence {
             {
                 return failed(PersistError::Io { os_error: None });
             }
-            self.enqueue_write(Request {
-                execution: None,
-                run: None,
-                artefact: "report",
-                path: PathBuf::from("report.json"),
-                content: Content::Report(report.clone()),
-                reservation,
-                digest: None,
-                spec_result: None,
-            });
+            self.enqueue_at(
+                Request {
+                    execution: None,
+                    run: None,
+                    artefact: "report",
+                    path: PathBuf::from("report.json"),
+                    content: Content::Report(report.clone()),
+                    reservation,
+                    digest: None,
+                    spec_result: None,
+                },
+                call,
+            )
+            .await;
             self.wait().await;
             let outcome = self.pending.remove(index).result.expect("report settled");
             self.active.clear();
@@ -785,25 +993,29 @@ mod tests {
     use crate::storage::budget::JobBudget;
     use crate::storage::job::JobLease;
 
-    fn runtime<T>(future: impl std::future::Future<Output = T>) -> T {
+    pub(super) fn runtime<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(future)
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(15), future)
+                    .await
+                    .expect("persistence fixture timed out")
+            })
     }
-    fn wait_for_worker(owner: &std::sync::Weak<JobLease>) {
+    pub(super) fn wait_for_worker(owner: &std::sync::Weak<JobLease>) {
         runtime(async {
             tokio::time::timeout(Duration::from_secs(2), async {
                 while owner.upgrade().is_some() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    tokio::task::yield_now().await;
                 }
             })
             .await
             .expect("cleanup did not release the persistence worker");
         });
     }
-    fn fixture() -> (PathBuf, JobOwner, Arc<JobBudget>) {
+    pub(super) fn fixture() -> (PathBuf, JobOwner, Arc<JobBudget>) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!(
@@ -815,7 +1027,7 @@ mod tests {
         let owner = JobLease::create_and_lock_with_budget(&path, budget.clone()).unwrap();
         (path, owner, budget)
     }
-    fn request(index: usize, budget: &Arc<JobBudget>) -> Request {
+    pub(super) fn request(index: usize, budget: &Arc<JobBudget>) -> Request {
         Request {
             execution: None,
             run: None,
@@ -826,64 +1038,6 @@ mod tests {
             digest: None,
             spec_result: None,
         }
-    }
-
-    #[test]
-    fn full_queue_refuses_without_blocking_then_timeout_fails_all_at_once() {
-        let (path, owner, budget) = fixture();
-        let gate = Arc::new(Notify::new());
-        let mut service =
-            JobPersistence::start(owner, Duration::from_secs(1), Some(gate.clone()), None).unwrap();
-        for i in 0..=QUEUE {
-            service.enqueue_write(request(i, &budget));
-        }
-        assert_eq!(
-            service.pending[QUEUE]
-                .result
-                .as_ref()
-                .unwrap()
-                .reference
-                .error,
-            Some(PersistError::QueueFull)
-        );
-        assert_eq!(budget.usage().reserved, 2 * QUEUE as u64);
-        let start = Instant::now();
-        runtime(service.wait());
-        assert!(start.elapsed() < Duration::from_secs(3));
-        for pending in &service.pending[..QUEUE] {
-            assert_eq!(
-                pending.result.as_ref().unwrap().reference.error,
-                Some(PersistError::Timeout)
-            );
-            assert!(pending.result.as_ref().unwrap().reference.path.is_none());
-        }
-        service.enqueue_write(request(QUEUE + 1, &budget));
-        assert_eq!(
-            service
-                .pending
-                .last()
-                .unwrap()
-                .result
-                .as_ref()
-                .unwrap()
-                .reference
-                .error,
-            Some(PersistError::WorkerUnavailable)
-        );
-        // The stalled writer keeps all queued allowances until it returns.
-        assert_eq!(budget.usage().reserved, 2 * QUEUE as u64);
-        drop(service);
-        gate.notify_one();
-        runtime(async {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while budget.usage().reserved != 0 {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .unwrap();
-        });
-        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[cfg(feature = "storage-test-hooks")]
@@ -898,7 +1052,7 @@ mod tests {
         let mut write = request(0, &budget);
         write.spec_result = Some(cell.clone());
         let start = Instant::now();
-        service.enqueue_write(write);
+        runtime(service.enqueue_write(write));
         runtime(async {
             tokio::time::timeout(Duration::from_secs(4), async {
                 gate.reached.notified().await;
@@ -935,13 +1089,13 @@ mod tests {
         let mut service = JobPersistence::start(owner, DEADLINE, None, None).unwrap();
         let mut refused = request(0, &budget);
         refused.reservation = None;
-        service.enqueue_write(refused);
+        runtime(service.enqueue_write(refused));
         assert_eq!(
             service.pending[0].result.as_ref().unwrap().reference.error,
             Some(PersistError::Io { os_error: None })
         );
         service.sender.take();
-        service.enqueue_write(request(1, &budget));
+        runtime(service.enqueue_write(request(1, &budget)));
         assert_eq!(
             service.pending[1].result.as_ref().unwrap().reference.error,
             Some(PersistError::WorkerUnavailable)
@@ -964,7 +1118,7 @@ mod tests {
         let weak_owner = Arc::downgrade(&owner);
         let mut service = JobPersistence::start(owner, DEADLINE, None, None).unwrap();
         filesystem.fill_completely();
-        service.enqueue_write(request(0, &budget));
+        runtime(service.enqueue_write(request(0, &budget)));
         runtime(async {
             tokio::time::timeout(DEADLINE + Duration::from_millis(100), service.wait())
                 .await
@@ -986,7 +1140,7 @@ mod tests {
         assert!(!path.join("file0").exists());
         assert!(!service.unavailable.load(Ordering::Acquire));
         std::fs::remove_file(filesystem.directory.join("filler")).unwrap();
-        service.enqueue_write(request(1, &budget));
+        runtime(service.enqueue_write(request(1, &budget)));
         runtime(async {
             tokio::time::timeout(DEADLINE + Duration::from_millis(100), service.wait())
                 .await
@@ -1014,5 +1168,263 @@ mod tests {
             .await
             .expect("persistence worker did not exit");
         });
+    }
+}
+
+#[cfg(test)]
+mod controlled_tests {
+    use super::tests::{fixture, request, runtime, wait_for_worker};
+    use super::*;
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    #[test]
+    fn credit_wait_counts_toward_call_origin_publication_deadline() {
+        let (path, owner, budget) = fixture();
+        let weak = Arc::downgrade(&owner);
+        let clock = Clock::controlled();
+        let mut service =
+            JobPersistence::start_clock(owner, DEADLINE, None, None, clock.clone()).unwrap();
+        runtime(async {
+            let full = service
+                .pool
+                .acquire(queue::CAPACITY, clock.now(), &service.cancel)
+                .await
+                .unwrap();
+            let call = clock.now();
+            let mut enqueue = Box::pin(service.enqueue_write(request(0, &budget)));
+            clock.advance(Duration::from_millis(200));
+            poll_fn(|cx| {
+                assert!(enqueue.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            clock.advance(Duration::from_millis(500));
+            drop(full);
+            enqueue.await;
+            assert_eq!(service.pending[0].deadline, call + DEADLINE);
+            service.wait().await;
+            assert!(
+                service.pending[0]
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .reference
+                    .path
+                    .is_some()
+            );
+        });
+        drop(service);
+        wait_for_worker(&weak);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn delayed_credit_grant_stays_accepted_and_keeps_its_reservation_until_join() {
+        let (path, owner, budget) = fixture();
+        let weak = Arc::downgrade(&owner);
+        let clock = Clock::controlled();
+        let gate = Arc::new(Notify::new());
+        let mut service =
+            JobPersistence::start_clock(owner, DEADLINE, Some(gate.clone()), None, clock.clone())
+                .unwrap();
+        runtime(async {
+            let full = service
+                .pool
+                .acquire(queue::CAPACITY, clock.now(), &service.cancel)
+                .await
+                .unwrap();
+            let mut enqueue = Box::pin(service.enqueue_write(request(0, &budget)));
+            poll_fn(|cx| {
+                assert!(enqueue.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            clock.advance(Duration::from_millis(500));
+            drop(full); // accepted here, while its producer is descheduled
+            clock.advance(Duration::from_millis(4500));
+            enqueue.await;
+            assert_eq!(
+                service.pending[0].result.as_ref().unwrap().reference.error,
+                Some(PersistError::Timeout)
+            );
+            assert_eq!(budget.usage().reserved, 2);
+            assert!(!path.join("file0").exists());
+            drop(service);
+            assert_eq!(budget.usage().reserved, 2);
+            gate.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while budget.usage().reserved != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        wait_for_worker(&weak);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn refusal_before_a_publication_timeout_remains_queue_full_when_polled_late() {
+        let (path, owner, budget) = fixture();
+        let weak = Arc::downgrade(&owner);
+        let clock = Clock::controlled();
+        let gate = Arc::new(Notify::new());
+        let mut service =
+            JobPersistence::start_clock(owner, DEADLINE, Some(gate.clone()), None, clock.clone())
+                .unwrap();
+        runtime(async {
+            service.enqueue_write(request(0, &budget)).await;
+            let full = service
+                .pool
+                .acquire(
+                    queue::CAPACITY - queue::OVERHEAD - 1,
+                    clock.now(),
+                    &service.cancel,
+                )
+                .await
+                .unwrap();
+            let mut enqueue = Box::pin(service.enqueue_write(request(1, &budget)));
+            poll_fn(|cx| {
+                assert!(enqueue.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            clock.advance(Duration::from_secs(6));
+            enqueue.await;
+            assert_eq!(
+                service.pending[0].result.as_ref().unwrap().reference.error,
+                Some(PersistError::Timeout)
+            );
+            assert_eq!(
+                service.pending[1].result.as_ref().unwrap().reference.error,
+                Some(PersistError::QueueFull)
+            );
+            assert_eq!(service.stats().credit_wait, Duration::from_secs(1));
+            assert_eq!(budget.usage().reserved, 2);
+            drop(service);
+            drop(full);
+            gate.notify_one();
+        });
+        wait_for_worker(&weak);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn normal_return_commits_on_worker_and_releases_credits_at_return() {
+        let (path, owner, budget) = fixture();
+        let weak = Arc::downgrade(&owner);
+        let clock = Clock::controlled();
+        let mut service =
+            JobPersistence::start_clock(owner.clone(), DEADLINE, None, None, clock.clone())
+                .unwrap();
+        let (writer, mut events) = scripted::ScriptedWriter::new(false);
+        *service.script.lock().unwrap() = Some(writer);
+        runtime(async {
+            service.enqueue_write(request(0, &budget)).await;
+            let write = events.recv().await.unwrap();
+            assert_eq!(write.path, PathBuf::from("file0"));
+            assert_eq!(budget.usage().retained, 0);
+            assert_eq!(budget.usage().reserved, 2);
+            clock.advance(DEADLINE - Duration::from_millis(1));
+            write.release.send(()).unwrap();
+            service.wait().await;
+            assert_eq!(budget.usage().retained, 1);
+            assert_eq!(budget.usage().reserved, 0);
+            assert_eq!(service.pool.stats().peak_credits, queue::OVERHEAD + 1);
+            assert_eq!(std::fs::read(path.join("file0")).unwrap(), [42]);
+        });
+        drop(service);
+        assert_eq!(budget.usage().retained, 1);
+        drop(owner);
+        wait_for_worker(&weak);
+        assert_eq!(budget.usage().retained, 0);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn late_return(hand_over: bool) {
+        let (path, owner, budget) = fixture();
+        let weak = Arc::downgrade(&owner);
+        let clock = Clock::controlled();
+        let mut service =
+            JobPersistence::start_clock(owner.clone(), DEADLINE, None, None, clock.clone())
+                .unwrap();
+        let pool = service.pool.clone();
+        let (writer, mut events) = scripted::ScriptedWriter::new(false);
+        *service.script.lock().unwrap() = Some(writer);
+        runtime(async {
+            service.enqueue_write(request(0, &budget)).await;
+            let write = events.recv().await.unwrap();
+            service.enqueue_write(request(1, &budget)).await;
+            clock.advance(DEADLINE);
+            service.wait().await;
+            for pending in &service.pending {
+                assert_eq!(
+                    pending.result.as_ref().unwrap().reference.error,
+                    Some(PersistError::Timeout)
+                );
+            }
+            assert_eq!(budget.usage().reserved, 4);
+            assert_eq!(budget.usage().retained, 0);
+            if hand_over {
+                drop(service);
+                write.release.send(()).unwrap();
+                // Cleanup joins only after return, commits the late measured
+                // byte and releases the queued, unwritten reservation.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while budget.usage().reserved != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                let mut worker = service.worker.take().unwrap();
+                drop(service);
+                write.release.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !worker.thread.as_ref().unwrap().is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    budget.usage().retained,
+                    0,
+                    "worker must not commit a late return"
+                );
+                assert_eq!(budget.usage().reserved, 4);
+                assert!(worker.resources_released());
+                assert!(worker.resources_released(), "joining twice is harmless");
+            }
+            assert_eq!(budget.usage().retained, 1);
+            assert_eq!(budget.usage().reserved, 0);
+            assert!(pool.unavailable.load(Ordering::Acquire));
+            assert_eq!(std::fs::read(path.join("file0")).unwrap(), [42]);
+            assert!(!path.join("file1").exists());
+            assert_eq!(pool.stats().peak_credits, 2 * (queue::OVERHEAD + 1));
+            let error = pool
+                .acquire(
+                    queue::OVERHEAD,
+                    clock.now(),
+                    &crate::supervisor::CancelToken::new(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error, PersistError::WorkerUnavailable);
+        });
+        drop(owner);
+        wait_for_worker(&weak);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn late_return_is_committed_once_by_job_join_owner() {
+        late_return(false);
+    }
+    #[test]
+    fn late_handover_is_committed_once_by_cleanup_join_owner() {
+        late_return(true);
     }
 }

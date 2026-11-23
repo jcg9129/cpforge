@@ -1,0 +1,1 @@
+[{"kind":"timeout"},{"kind":"queue_full"},{"kind":"cancelled"},{"kind":"worker_unavailable"},{"kind":"io","os_error":null,"message":"publication failed"}]

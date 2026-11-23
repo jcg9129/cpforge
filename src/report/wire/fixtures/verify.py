@@ -164,6 +164,9 @@ def verify():
             actual = len(encode(value))
             assert actual <= total and actual <= bound, (name, binary, actual, total, bound)
             print(f"{'base64' if binary else 'utf8'} {name}: {actual} <= table {total} <= bound {bound}")
+    errors = json.loads((ROOT / "persist_errors.json").read_bytes())
+    assert errors == [dict(kind=kind) for kind in ["timeout", "queue_full", "cancelled", "worker_unavailable"]] + [dict(kind="io", os_error=None, message="publication failed")]
+    assert all(len(encode(error)) <= 337 for error in errors)
     # Exact length of a complete serialization, counting all list commas.
     actual = len(encode(header())) + 10_000 * sum(len(encode(v)) for v in [entry(), test(signal(), check()), aggregate()]) + 3 * 9999
     table = 53645 + 11946 * 10_000

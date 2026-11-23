@@ -816,6 +816,14 @@ pub(super) fn persistence(v: &ReportPersistence) -> Result<Value> {
             obj([("kind", s("published")), ("path", rel(path, 60)?)]),
             s(if *uncertain { "uncertain" } else { "ok" }),
         ),
+        ReportPersistence::Failed {
+            error:
+                crate::jobs::engine::PersistError::QueueFull
+                | crate::jobs::engine::PersistError::Cancelled,
+            ..
+        } => {
+            return Err(Error("report cannot fail for queue credits"));
+        }
         ReportPersistence::Failed { error, message } => (
             obj([("kind", s("failed")), ("error", persist(error, message))]),
             Value::Null,
