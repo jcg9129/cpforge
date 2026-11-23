@@ -529,8 +529,13 @@ contract §6, not a reservation ceiling):
 | Cleanup verification deadline, from root exit observed | 1 s (*fixed*) |
 | Drain deadline, from drain milestone | 500 ms (*fixed*) |
 | Sink finalisation deadline, from drain milestone | 5 s (*fixed*) |
-| Persistence deadline, from record finalized | 5 s (*fixed*) |
+| Persistence deadline, from the enqueue call (records: from record finalized; §6.2) | 5 s (*fixed*) |
+| Persistence queue credits Q (§6.2) | 2 MiB; charge 8 KiB + encoded length (record: 64 KiB bound) (*fixed*) |
+| Persistence credit wait limit, from the enqueue call | 1 s (*fixed*) |
+| Persistence credit budget B per job | 10 s + 4 ms × 3 × planned executions (*fixed* formula) |
+| Human stderr final-drain deadline, from the final-batch enqueue instant t_q (not from delivery; rendering and lock acquisition before t_q are not covered); absolute, covers every write call, partial write and retry (report contract §8) | 5 s (*fixed*) |
 | Console flush deadline (raw mode), from drain milestone | 2 s (*fixed*) |
+| Raw final-diagnostic wait (raw mode), from the enqueue instant of the summary line; separate from the console flush deadline (report contract §8) | 2 s (*fixed*) |
 | Event transport | 8 MiB total incl. backing buffers and terminal slot; `OutputChunk` ≤ 4 KiB (§9) |
 | Retained tool data | 1 GiB per job, 4 GiB per workspace `runs/` (storage contract enforces) |
 
@@ -603,42 +608,138 @@ empty captures.
 - Exactly one component finalizes each record: the supervisor, or the
   cleanup service for transferred resources. A §3.4 `Transferred` record is
   a finalized cancellation snapshot; the eventual ticket outcome is separate.
-- **Persistence**: each artefact (spec, record,
-  `cleanup.log`, report) is one temp file + rename (storage contract) on the job's
-  persistence thread, fed by a bounded queue (16 artefacts; a full queue is
-  `PersistError{QueueFull}` for that artefact, never blocking the job). Each
-  artefact's persistence deadline (5 s) runs from its **enqueue time**. A
-  record is enqueued **immediately at finalization** (so for records enqueue
-  = t_rec, matching §5.5 and §10.1); the report is enqueued when the job
-  finishes. When an artefact misses its
-  deadline the job records `PersistError{artefact, Timeout | Io(err)}`, marks
-  the persistence thread **unavailable** and fails every still-pending
-  artefact of that job at once with `PersistError{Timeout}`. Later artefacts
-  fail with `PersistError{WorkerUnavailable}` (no replacement thread); the
-  job still finishes and prints its in-memory report with `--json`; the
-  deadline does not cancel the syscall. The job never names a path it has not seen published (in
-  `JobFinished`, the report or a record). A late rename may still land; it is
-  harmless and is not appended to `cleanup.log` (above): it follows a missed
-  deadline, after which the job's queue is unavailable, and the cleanup
-  service owns no persistence path. When the job drops its persistence
-  service while the thread is unavailable or still owes a result, the thread
-  passes to the cleanup service with its thread credit, its job-owner clone
-  (lease and byte budget) and the metadata reservations of its current and
-  queued artefacts, without a cleanup slot. The service never waits for it:
-  each poll joins the thread only once it has finished (as for transferred
-  sink workers), then commits the late write's measured bytes and releases
-  the rest. A healthy idle thread is not transferred; closing its queue ends
-  it, and it returns its own credit. The in-memory report stays authoritative
-  for the invocation. Size bounds: spec
+- **Persistence**: each artefact (spec, record, `cleanup.log`, report) is
+  one temp file + rename (storage contract) on the job's single persistence
+  thread, fed by one queue in enqueue order. Specs are enqueued at
+  admission, before process creation; a record **immediately at
+  finalization** (t_rec), followed by its first `cleanup.log`; the report at
+  the start of report phase S (report contract §2.9). Size bounds: spec
   ≤ 256 KiB, record ≤ 64 KiB, `cleanup.log` ≤ 64 KiB (then a truncation
   marker), report ≤ 64 KiB + 12 KiB × planned executions (report contract
   §3.7; configuration contract caps runs per job).
+- **Queue credits**: the queue holds at most **Q = 2 MiB** of credits
+  (*fixed*). An artefact is charged 8 KiB (the cost of one write) plus its
+  encoded length, known at enqueue for specs and `cleanup.log`, or, for a
+  record, which the thread encodes, its 64 KiB bound. The largest charge,
+  264 KiB, fits Q, and ≤ 256 artefacts are ever queued. The report takes no
+  credits: one queue position is reserved for it at job start and never
+  used by another artefact. A charge returns to the pool when the thread's
+  write of that artefact returns, published or failed. Credits measure
+  in-memory queue capacity only and are distinct from the §5.4 metadata
+  reservation, which stands for possible disk bytes; credits never create
+  disk headroom and reservations never enter the credit pool. Credit
+  release happens at every write return and never waits for reservation
+  settlement. Once the thread is unavailable the pool is closed: credits
+  returned after that, and those of artefacts it will never write, are not
+  reissued.
+- **Reservation settlement**, exactly one owner per write (storage
+  contract §6.4 commit):
+  - *Normal completion*: the write returns before its deadline and before
+    the thread is marked unavailable. The persistence thread itself
+    commits that artefact's measured disk bytes to retained bytes and
+    releases the rest of its reservation at the return, then reports the
+    result.
+  - *Late completion*: the write returns at or after its deadline, or
+    after the thread was marked unavailable. The thread commits nothing
+    and reports no publication; it moves the reservation with the measured
+    bytes into its return value and exits. Whoever joins the finished
+    thread commits them once when it drops that value: the job's
+    persistence service if the thread has already finished when the job
+    drops it, otherwise the cleanup service after the handover (below).
+    Queued artefacts never written release their reservations at the same
+    point, uncommitted.
+
+  The thread decides normal or late once, at the return, against its
+  deadline and the unavailability flag, so no write is committed twice or
+  left uncommitted.
+- **Enqueue** takes the charge in call order (no overtaking). When credits
+  are short the calling task waits, never blocking a thread and never
+  holding the verdict lock, until the first of:
+  - credits granted: the artefact is **accepted**;
+  - the **credit wait limit**, 1 s after the call: `QueueFull`;
+  - the **credit budget** B exhausted: the wall time during which at least
+    one enqueue of the job waits reaches B = 10 s + 4 ms × 3 × planned
+    executions, fixed at admission (≤ 130 s): `QueueFull`;
+  - cancellation intent (§6.4): `Cancelled`;
+  - the thread becomes unavailable (a missed deadline, below, or the
+    thread has exited): `WorkerUnavailable`.
+
+  A `QueueFull` from either limit makes the queue **nonblocking** for the
+  rest of the job: every current wait ends with `QueueFull`, and a later
+  enqueue that finds credits short fails at once with `QueueFull`. After
+  cancellation intent a later enqueue that finds credits short fails at once
+  with `Cancelled`; one that finds credits is accepted, so evidence of
+  cancelled runs is persisted whenever it fits. With the thread unavailable
+  an enqueue fails at once with `WorkerUnavailable`. A refusal is the
+  artefact's settled result and changes only its reference and `persist`
+  warning, never the execution's evidence, result or course. The job's
+  total credit waiting is ≤ B; with a stalled thread it is ≤ 1 s, because
+  the first limit expiry makes the queue nonblocking.
+- **Correctness** is the state machine above and below with its *fixed*
+  values (Q, the charge, the 1 s limit, B, the 5 s deadlines), for any
+  write service times. It is tested with a controlled writer and a
+  controlled clock (report contract §9: scripted service times, an
+  injected monotonic clock), never with an assumed filesystem rate.
+- **Design point** (sizing rationale, not a guarantee). Service
+  assumption: while any artefact is queued, the persistence thread hands
+  back the credits of one artefact at least every 4 ms. Those 4 ms cover
+  the whole per-artefact cycle: encoding (records), the write and its
+  syncs, reservation settlement, result publication, credit release, and
+  any scheduling gap or lock wait before the next write starts. Under that
+  assumption no `QueueFull` and no `Timeout` occur. An enqueue waits only
+  while credits are short, so work is pending throughout every wait and
+  credits come back at least every 4 ms: total waiting ≤ 3 × planned
+  executions × 4 ms < B. Enqueues are served in call order and ≤ 5
+  producers enqueue concurrently (4 admitted runs and admission, §3.3), so
+  a wait ends once ≤ 5 × 264 KiB has been freed in charges of ≥ 8 KiB,
+  ≤ 165 cycles (660 ms) < 1 s. An accepted artefact waits ≤ 1 s for
+  credits and then behind ≤ 256 queued artefacts (≈ 1 s), inside its 5 s.
+  A bound on write calls alone is not enough: one slow cycle (a 1.2 s
+  write, or a 1.2 s pause between writes, while the queue is full) ends
+  waits with `QueueFull`, and aggregate throughput does not prevent it.
+  Real hosts give no such bound, so there the outcomes are those the state
+  machine yields from the actual service: backpressure (≤ B in total),
+  then `QueueFull`, or `Timeout` and `WorkerUnavailable`. A successful
+  real-filesystem run (report contract §9.2) shows only that that run
+  published everything, not that the host meets the service assumption.
+- **Publication deadline**: each accepted artefact's deadline is its
+  enqueue **call** + 5 s, the credit wait included (for records t_rec + 5 s,
+  matching §5.5 and §10.1); the report's is its enqueue at the start of S
+  + 5 s. A refused artefact has no deadline. When an artefact misses its
+  deadline the job records `PersistError{artefact, Timeout | Io(err)}`,
+  marks the persistence thread **unavailable**, fails every still-pending
+  artefact of that job at once with `PersistError{Timeout}` and ends every
+  current credit wait with `WorkerUnavailable`. Later artefacts fail with
+  `PersistError{WorkerUnavailable}` (no replacement thread); the job still
+  finishes and prints its in-memory report with `--json`; the deadline does
+  not cancel the syscall. The job never names a path it has not seen
+  published (in `JobFinished`, the report or a record). A late rename may
+  still land (late completion, above); it is harmless and is not appended
+  to `cleanup.log` (above):
+  it follows a missed deadline, after which the job's queue is unavailable,
+  and the cleanup service owns no persistence path. When the job drops its
+  persistence service while the thread is unavailable or still owes a
+  result, the thread passes to the cleanup service with its thread credit,
+  its job-owner clone (lease and byte budget) and the metadata reservations
+  of its current and queued artefacts, without a cleanup slot. The service
+  never waits for it: each poll joins the thread only once it has finished
+  (as for transferred sink workers), then settles the late write as above
+  (the one commit of its measured bytes) and releases the rest. A healthy idle thread is not transferred;
+  closing its queue ends it, and it returns its own credit. The in-memory
+  report stays authoritative for the invocation.
 - **Settlement**: a job settles its persistence before finalizing its
   report: it waits, outside the verdict lock, until every artefact it
   enqueued (specs, records, first `cleanup.log` publications) has a result,
-  published or `PersistError`; this ends by the last enqueue + 5 s. The
-  report then names a path for every published artefact and an error for
-  every other (report contract §2.9 W).
+  published or `PersistError`. A refused artefact settles at its refusal and
+  an accepted one by its deadline. Every enqueue call has returned when
+  settlement begins, so it ends at once with no accepted artefact (e.g. a
+  build-free `build`) and otherwise by the last accepted enqueue call
+  + 5 s, at most 5 s after it begins; it leaves the thread idle or
+  unavailable: the report never queues behind another artefact, and with
+  the thread unavailable it fails at once. Cancellation ends credit waits but no deadline. The report
+  then names a path for every published artefact and an error for every
+  other (report contract §2.9 W); the bound to `JobFinished` is report
+  contract §2.9 S.
 
 ### 6.3 Deadline semantics
 
@@ -916,7 +1017,7 @@ an assumption about hosted runners; policy deadlines are never scaled.
 | t_s → t_f, healthy sinks | [100 ms] |
 | t_drain_start → t_f, stalled sink | sink finalisation 5 s [+ 100 ms]; `WriteStalled` |
 | t_f → t_rec | [100 ms] |
-| t_rec → t_p | healthy [100 ms]; stalled disk: persistence 5 s [+ 100 ms], `PersistError` |
+| t_rec → t_p | healthy, **idle queue** (no artefact queued or being written at the enqueue call): [100 ms]; accepted behind a backlog or after a credit wait: by the persistence deadline, t_rec + 5 s (credit wait + queue residence + write) [+ 100 ms]; stalled disk: persistence 5 s [+ 100 ms], `PersistError` |
 | t_rec → t_rel | healthy [100 ms]; stalled writer: [100 ms] after it returns |
 | normal exit, **healthy path only** (no pre-exit kill, immediate reap, prompt EOF, healthy sinks; the post-exit containment kill still runs): t_r → t_f | (t_c − t_r) [+ 250 ms]. Escaped-pipe, retry and stalled-sink paths use their rows above |
 | reap-timeout path (Linux opt-in, uninterruptible fixture) | transfer at t_k + reap 2 s [+ 100 ms]; t_rec ≤ transfer + drain 500 ms [+ 100 ms] |
@@ -979,7 +1080,11 @@ continues; enumeration error, truncation (injected small buffer), short
 `proc_pidinfo` return and zombie members on Linux and macOS; `/proc`
 prerequisite failures and `hidepid` mounts (injected) → `Unverified`; Windows
 zero-byte read completion and `ERROR_BROKEN_PIPE` as EOF; late persistence
-rename after `PersistError`; budget breach plus an independent write error
+rename after `PersistError`; persistence credits with a controlled writer
+and clock, throughput on a real filesystem (platform evidence), queue
+saturation then report, permanently stalled persistence thread, normal and
+late completion settlement and cancellation in a credit wait (report
+contract §9.2); budget breach plus an independent write error
 (both reported); `ACTIVE_PROCESS_ZERO` never delivered
 (port not associated) still `Confirmed` by polling; Windows inside a
 compatible outer job and inside one forbidding nesting; address-space limit

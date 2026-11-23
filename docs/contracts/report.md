@@ -356,14 +356,31 @@ under the verdict lock, atomic with respect to cancellation intent.
 - **W Settlement barrier** (outside the verdict lock): the job waits until
   every artefact it enqueued for persistence (specs, records, first
   `cleanup.log` publications, E §6.2) has a result, published or
-  `PersistError`. Bounded: each artefact settles by its enqueue time + 5 s,
-  and a timeout fails every queued artefact at once (E §6.2), so W ends by
-  the last enqueue + 5 s. All `persist` and `durability` warnings are final
-  at W. Later physical-cleanup facts go to `cleanup.log` only (E §5.2),
+  `PersistError`. An artefact refused at enqueue (`queue_full`,
+  `cancelled`, `worker_unavailable`, E §6.2) settles at its refusal; an
+  accepted one by its enqueue call + 5 s (credit wait included), and a
+  timeout fails every queued artefact at once. Every enqueue call has
+  returned when W begins (t_W). **Bound**: with an empty accepted set (no
+  artefact accepted, e.g. a build-free `build` with no execution, or every
+  artefact refused) W ends at t_W; otherwise, with t_a the last accepted
+  enqueue call (t_a < t_W), W ends by max(t_W, t_a + 5 s), so W lasts
+  ≤ 5 s [+ 100 ms]. W leaves the persistence thread idle or unavailable.
+  Intent during W ends no deadline early. All `persist` and
+  `durability` warnings are final at W. Later physical-cleanup facts go to
+  `cleanup.log` only (E §5.2),
   never into the report.
 - **E Producer closure**: the event channel is closed and `dropped`
-  computed (E §9); the progress queue (§8) is closed and its drop counter
-  finalized.
+  computed (E §9). In one stderr queue critical section (§8) progress is
+  closed: every queued progress line is detached and counted as dropped,
+  and `progress_dropped` is read; it is final here, before any document
+  that carries it exists, and no later writer decision changes it (the
+  writer then holds only result lines and at most the one progress line it
+  had already taken, which counts as written). Result lines stay accepted
+  until the final output is queued. E performs no I/O; it waits only to
+  enter the event transport's enqueue-or-drop critical section (E §9) and
+  the stderr queue's (§8), whose holders do bounded work and never block
+  inside them. E has no policy deadline; fixtures observe E + F ≤
+  [100 ms].
 - **Cancellation phase** (total, every job kind): the phase recorded in
   `result.cancellation.phase` is the interval in which intent was **first**
   set, ending at the F lock:
@@ -382,13 +399,28 @@ under the verdict lock, atomic with respect to cancellation intent.
   selects the cancellation status (§5.2 row 5).
 - **F Finalization** *(lock)*: one critical section snapshots
   `result.cancellation` (first intent and its phase), computes
-  `result.pre_delivery_exit` (§5.2) and freezes the report. Intent after F
+  `result.pre_delivery_exit` (§5.2) and freezes the report. F performs no
+  I/O and waits only for the verdict lock, which no holder keeps across a
+  blocking call; its bound is E's observation bound above. Intent after F
   is not recorded; a later notification counts only towards force exit
   (E §8.2).
-- **S Persistence** of `report.json` (E §6.2, ≤ 5 s), then the terminal slot
+- **S Persistence** of `report.json` (E §6.2): it is enqueued at the start
+  of S into the queue position reserved for it at job start, takes no queue
+  credits, so it is never `queue_full` or `cancelled`, and has its own
+  deadline, that enqueue + 5 s. With the thread unavailable it fails at once
+  with `worker_unavailable`. Since W left the thread idle or unavailable,
+  the report never queues behind another artefact. Then the terminal slot
   receives `JobFinished` (report id iff the file was seen published).
-- **D Delivery** (§6, §7), then the final stderr summary (§8), then the
-  process status (§5).
+  **Bound**: S lasts ≤ 5 s [+ 100 ms] with the thread available at the
+  start of S, and [100 ms] with it unavailable. **Combined**: t_W →
+  `JobFinished` ≤ W + (E + F) + S ≤ 10 s [+ 300 ms], and ≤ 5 s [+ 300 ms]
+  with a stalled thread (unavailable by the end of W); a job with an empty
+  accepted set and an available thread reaches `JobFinished` ≤ 5 s
+  [+ 300 ms] after t_W. Allowances scale per E §10.1; the 5 s deadlines
+  never do.
+- **D Delivery** (§6, §7), then the final stderr summary (§8; the
+  stderr final-drain deadline ends the wait for it 5 s after its
+  enqueue instant t_q, not after D), then the process status (§5).
 
 ### 2.10 `hook` jobs (`on_switch`)
 
@@ -716,8 +748,13 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
   phase W exactly one of `path` (job-relative `<run>/spec.json`,
   `<run>/record.json`, seen published) and `error` is non-null.
 - `PersistError`: `{"kind":"timeout"}`, `{"kind":"queue_full"}`,
-  `{"kind":"worker_unavailable"}`, `{"kind":"io","os_error":i32?,
-  "message":text}`.
+  `{"kind":"cancelled"}`, `{"kind":"worker_unavailable"}`,
+  `{"kind":"io","os_error":i32?, "message":text}`. `queue_full`: no queue
+  credits within the credit wait limit or budget (E §6.2); `cancelled`: no
+  credits, and cancellation intent ended or forbade the wait (E §6.2). Both
+  occur only for specs, records and `cleanup.log`, never for the report
+  (§2.9 S, §4.11). `cancelled` leaves the §3.7 bounds unchanged (`io` is the
+  largest variant).
 - `NotStarted`: `{"kind": token}` with the E §6.1 reasons
   `cancelled_before_start`, `create_failed` (+ `api: token`, `os_error:
   i32`), `limit` (+ `os_error`), `unsupported_limit`, `unsupported`,
@@ -887,7 +924,8 @@ The stdout document and the final event envelope add, after phase S:
 `persistence`: `{report: Report, durability: token?}`; `Report`:
 `{"kind":"published","path":rel (≤ 60)}`, `{"kind":"failed","error":
 PersistError}`, `{"kind":"not_attempted","reason":"refusal"}`;
-`durability` (`ok`, `uncertain`) is `null` unless `published`.
+`durability` (`ok`, `uncertain`) is `null` unless `published`. A report
+`error` is never `queue_full` or `cancelled` (§2.9 S).
 `report.json` is the same document without `persistence`. A report
 persistence failure is a stderr warning and this member, never a status
 change (E §9 as amended).
@@ -1190,19 +1228,131 @@ at start: as §6.3.
 - Job commands write progress, per-test lines (label + qualifier, §2.8),
   the summary and warnings to **stderr** in every mode; stdout is reserved
   for machine output.
-- One stderr writer thread per invocation serializes all human output.
-  Progress and per-test lines are encoded first, each cut to ≤ 512 bytes
-  (ending with `…`), and offered to a 64 KiB non-blocking queue; a line that
-  does not fit is dropped and counted. The queue is closed and the counter
-  finalized in phase E (warning `progress_dropped`).
-- The final summary goes through the same writer after phase D (after
-  queued lines, never interleaved), blocking like any CLI; force exit stays
-  available. Stderr write errors are ignored (§5.2).
+- **One ordered stream.** One stderr writer thread per invocation writes
+  every human line of the invocation from one queue, in offer order. Each
+  line is rendered, sanitized (control characters become spaces) and cut to
+  ≤ 512 bytes including its line feed (ending with `…`) before it is
+  offered. Two classes share the queue:
+  - **Result lines**: per-test lines, the start-up configuration
+    diagnostics, the final warnings and summary, and the final aggregates of
+    a stress job. Each takes the next number of one sequence starting at 0
+    in the critical section that queues it; the writer writes them in that
+    order without gaps. The queue never drops a result line.
+  - **Progress lines**: every other line (execution counts, build progress,
+    stress iteration updates). Lossy.
+- **Result ceiling**, charged in encoded bytes and fixed when the plan is
+  final: 512 B × planned tests plus a **final allowance** of 128 KiB
+  (131 072 B) that every job has, including one with no planned execution
+  (a build-free `build`, §2.7). Planned tests ≤ planned executions ≤ 10 000
+  (C §8.2), so the per-test part is ≤ 10 000 × 512 B = 5 120 000 B and the
+  whole ceiling ≤ 5 251 072 B (≈ 5.01 MiB). Each planned test offers at
+  most one per-test line. The allowance holds ≤ 64 configuration
+  diagnostics (further ones are replaced by one line counting them), ≤ 29
+  warning lines (24 warnings, one `warnings_dropped` line, §4.10, and ≤ 4
+  report-persistence, durability or delivery lines), ≤ 16 summary lines and
+  ≤ 128 stress aggregate lines: 237 lines of ≤ 512 B = 121 344 B ≤
+  131 072 B. The ceiling is a proven bound, not an admission test: by this
+  composition it is never exceeded (debug builds assert it). Before the
+  plan is final only the allowance applies. The ceiling bounds memory; it
+  is not preallocated.
+- **Progress budget**: 64 KiB; each queued progress line is charged
+  max(encoded length, 64 B), so ≤ 1 024 are queued. Queued progress lines
+  are held apart from queued result lines, each tagged with the number of
+  result lines offered before it, so the writer can tell offer order and
+  phase E can detach all of them at once. Before E a progress line is
+  dropped and counted when its charge does not fit, and when the writer
+  reaches it while a result line offered after it is queued (skipped, never
+  written later). At E (§2.9) every still-queued progress line is detached
+  and counted, and the count becomes final; a progress line offered after E
+  is ignored without counting, and the writer meets no queued progress line
+  after E. A progress line the writer took before E counts as written,
+  whatever its write does. Progress therefore never delays or reorders a
+  result line. `progress_dropped` (§4.10) counts progress lines only and
+  is final at E.
+- **Queue lock**: a plain blocking lock (no try-lock path; contention never
+  drops a line). The contract bounds the **work inside** the lock, not the
+  time to acquire it: a holder only reads and sets flags and counters,
+  assigns one sequence number, and pushes one prepared line, pops one line,
+  or swaps in one prepared value (the final batch, or at E an empty
+  progress holding for the detached one). Rendering, sanitizing, cutting,
+  allocation, freeing lines, condition-variable notification and all I/O
+  happen outside it, and no holder blocks or waits while holding it; entry
+  storage for the maximum entry count (planned tests + 256 result entries,
+  two progress holdings of 1 024 entries) is allocated outside the lock
+  before the first offer that could need it. The lock has no fairness
+  rule, so acquisition time is not bounded by this contract: a holder that
+  the OS deschedules, or another thread that reacquires the lock first,
+  delays an acquirer, including the executor thread that also drives
+  supervision timers (runtime decision record), as any short critical
+  section does. Supervision deadlines are measured on the monotonic clock
+  (E §6.3), so such a delay shows up as observation lateness (E §6.3,
+  §10.1), never as a changed policy deadline; the bounded work inside the
+  lock keeps it short, but no fixed bound is claimed. **Force exit never takes this lock**: it sets an atomic
+  stop flag that the writer reads before every write call.
+- **Writer**: writes each line completely: a partial write continues with
+  the rest, `EINTR` is retried; before each write call (the first, each
+  continuation and each retry) it checks the stop flag and the final-drain
+  deadline below and begins no call once either is set or passed. It holds
+  no lock while writing.
+- **Final output**: after phase D the final warnings and summary are
+  rendered and queued as one batch; the writer writes them after every
+  earlier line, never interleaved. A complete stream ends with the job
+  summary line (§2.8 templates) and its line feed.
+- **Sink behaviour**:
+  - *During the job* there is no stderr deadline: a slow or blocked sink
+    delays only stderr; result lines wait in memory within the ceiling and
+    progress is dropped as above.
+  - *Final drain*: the origin is the **final-batch enqueue instant** t_q,
+    the end of the queue critical section that queues the final batch.
+    The **stderr final-drain deadline** is the absolute instant t_q + 5 s
+    (*fixed*). The work between the end of D and t_q, rendering the final
+    lines and acquiring the queue lock to queue them, is not covered: it
+    does no I/O, rendering is bounded by the line and allowance limits, and
+    lock acquisition has no bound (Queue lock above), so no policy deadline
+    runs from the end of D. Every write call, partial write and `EINTR`
+    retry made after t_q, and a call already in progress at t_q, counts
+    against the same instant; nothing restarts it. cpf
+    waits until the writer has written the last line, or has stopped on an
+    error, or the deadline passes, whichever is first. At the deadline cpf
+    stops waiting: the stop flag is set, so no further write call begins
+    (as §5.4 force exit), a call already blocked is abandoned with the
+    writer thread, and cpf exits with its status unchanged (§5.2), after
+    the §5.3 re-raise where it applies. **Bound**: t_q → exit ≤ 5 s
+    [+ 100 ms] plus the re-raise, for any sink; end of D → t_q is
+    observed in fixtures ([100 ms]) but carries no deadline.
+  - *Loss at the deadline*: a sink that is slow but not blocked can lose
+    the tail too. Lost: every result line from the first one not completely
+    written by the deadline on, the summary included; that first line may
+    be cut, without its line feed. Progress lines are not involved (none is
+    queued after E). The loss is not recorded in the report, the stdout
+    document or the event stream (all final before D) and does not change
+    the status. A reader tells it from stderr alone: the stream does not
+    end with the summary line and its line feed (a cut last line, or a
+    last line that is not the summary); the per-test lines present are
+    then a prefix, in plan order, of the per-test lines of the delivered
+    report's tests.
+  - *Write error* (`EPIPE` included; cpf does not die of `SIGPIPE`): the
+    writer stops at the first error; later lines are discarded without
+    counting; the status is unchanged (§5.2); cpf stops waiting as soon as
+    the writer has stopped.
+  - *Orderly cancellation*: no change; lines already offered are written,
+    the summary names the cancellation, and the §5.3 re-raise follows the
+    final drain.
+  - *Force exit* (E §8.2), independent of the final-drain deadline and
+    available at any point, including between two partial writes of one
+    line: the stop flag is set, no further write call begins, queued lines
+    are lost and the line in progress may be cut, unreported; status §5.3.
 - Non-job commands keep their defined stdout results (`cpf current`, `cpf
   switch`, `cpf test add`), diagnostics on stderr.
 - Raw `cpf run`: the child's streams are forwarded (E §8.1); on any outcome
   other than `exited_zero` one summary line follows on stderr after
-  forwarding finished, naming the child's actual termination (D2).
+  forwarding finished, naming the child's actual termination (D2). Two
+  separate clocks apply, each with its own origin: the **console flush
+  deadline** (2 s from the drain milestone, E §5.5) bounds the forwarding
+  flush, unchanged; the **raw final-diagnostic wait** (2 s from the enqueue
+  instant of the summary line, E §5.5) replaces the stderr final-drain
+  deadline for that line, with the same absolute-deadline and stop-flag
+  rules. Neither clock restarts or extends the other.
 
 ## 9. Conformance fixtures
 
@@ -1211,11 +1361,28 @@ failures are injected into the stdout or stderr writer at a chosen byte
 offset with a chosen error. Each fixture asserts the named members, stdout
 bytes where relevant, and the process status.
 
+**Platform scope.** A fixture that runs a job command end to end with real
+executions (`cpf test`, `cpf build`, `cpf cmd`, `cpf run`) runs on Linux and
+macOS only. On Windows the same command lines assert the platform refusal
+instead (class `infrastructure`, status 10, before admission, no job
+directory; runtime decision record §3). Queue, credit, deadline and error
+behaviour is also tested portably, on all three OSes, through the job engine
+with an **injected executor** (fake runs with scripted outcomes) and, where
+named, a **controlled writer** (each artefact write takes a scripted service
+time or blocks on a gate) and a **controlled clock** (persistence deadlines,
+credit waits and the budget B read an injected monotonic clock that only
+the fixture advances). Controlled-clock results are exact; §10.1 allowances
+apply only to real-clock observations.
+
 Injection points: `cancel.intent`, `check.admit` (before admission),
 `verdict.freeze` (before V), `fact.cutoff` (before the cutoff read),
 `fact.after_cutoff` (between cutoff and replace), `fact.after_replace`,
 `hook.before_start`, `settle.wait` (inside W), `finalize.snapshot` (before
-F), `persist.report`, `events.enqueue`, `delivery.write`, `stderr.write`,
+F), `persist.report`, `persist.write` (each artefact write on the
+persistence thread: the controlled writer's scripted service time or gate),
+`persist.credit` (inside a credit wait), `persist.clock` (the controlled
+clock), `events.enqueue`, `delivery.write`, `stderr.write`,
+`stderr.lock` (holds the stderr queue lock across a barrier),
 `manifest.publish`, `run_dir.create`.
 
 ### 9.1 Derivations (pure, table-driven)
@@ -1263,6 +1430,77 @@ F), `persist.report`, `events.enqueue`, `delivery.write`, `stderr.write`,
 - A record persistence blocked at `settle.wait` for 6 s → its `Ref.error`
   is `timeout`, warning `persist`, report finalized after W with no pending
   reference.
+- **Persistence credits, controlled writer and clock** (E §6.2; portable,
+  injected executor, 3 000 executions, 5 concurrent producers enqueueing as
+  early as the plan allows, so N = 3 000 and B = 46 s):
+  - the controlled writer scripts the whole per-artefact cycle (E §6.2
+    service assumption); work outside the scripted time takes no
+    controlled-clock time;
+  - service time 4 ms for every cycle → no `QueueFull`, no `Timeout`;
+    every spec, record and `cleanup.log` published and `report.json` the
+    last write; peak queued credits ≤ Q; every credit wait < 1 s; total
+    credit wait ≤ B; every accepted artefact published by its enqueue call
+    + 5 s;
+  - 4 ms writes with one write of 1.2 s while the queue is full → the
+    waits that reach 1 s end `QueueFull` at exactly call + 1 s, the queue is
+    nonblocking from then on (a later short enqueue fails at once), those
+    artefacts' refs are `queue_full`, every accepted artefact is published,
+    no `Timeout`, report published; the same with every write 4 ms but a
+    scripted 1.2 s pause after one credit release before the next write;
+  - service time 6 ms for every cycle → no single wait reaches 1 s, the
+    union of waits reaches B and the waits then in progress end `QueueFull`
+    at that clock instant; nonblocking afterwards; no `Timeout`;
+  - one write gated past its enqueue call + 5 s → `Timeout` at exactly
+    that instant, every other pending artefact `timeout`, every current
+    credit wait and later enqueue `worker_unavailable`.
+- **Persistence throughput, platform evidence** (Linux and macOS, real
+  filesystem, not a policy guarantee): `cpf test` on a build-free target
+  with 3 000 trivial passing tests, unpadded writes. Asserts: no
+  `QueueFull`; exactly 3 000 `spec.json`, 3 000 `record.json` and 3 000
+  `cleanup.log` files; each spec decodes and its digest equals its
+  `spec.digest`; each record decodes and names its spec's `Ref`; each
+  `cleanup.log` starts `record finalized`; every `spec` and `record` `Ref`
+  has a `path`; no `persist` warning; `report.json` is the last write,
+  published and decodes to the delivered document without `persistence`;
+  start of W → `job_finished` within the §2.9 combined bound. Q, the 1 s
+  limit, B and every 5 s deadline are unscaled; only the observation
+  allowances scale (E §10.1). The run records the maximum and 99th
+  percentile of the per-artefact service cycle (credit release to credit
+  release while work is pending) and the total credit wait, as data. A
+  pass shows only that this run published everything; it does not show
+  that the host meets the E §6.2 service assumption. A failure blocks CI
+  until classified as a defect or as a recorded platform finding.
+- **Saturation, then report** (portable, controlled writer): the first
+  write gated until an enqueue has waited at `persist.credit` for 500 ms on
+  the controlled clock, then released at 4 ms per write → no
+  `PersistError`, every artefact published, `report.json` published and
+  readable.
+- **Stalled thread** (portable, controlled writer and clock; and on Linux
+  and macOS with real executions): 100 trivial tests, `persist.write` gated
+  forever → every `spec` and `record` `Ref` error is `timeout`,
+  `queue_full` or `worker_unavailable`, with ≥ 1 `timeout`; every accepted
+  artefact ends `timeout`; `persistence.report` is
+  `failed{worker_unavailable}` and `job_finished.report` `null`; total
+  credit wait ≤ 1 s (exact on the controlled clock, [+ 100 ms] on the real
+  one); start of W → `job_finished` ≤ 5 s ([+ 300 ms] on the real clock);
+  status by verdict (§5.2); the thread keeps its reservations (E §6.2).
+- **Normal and late completion** (portable, controlled writer): a write
+  returning before its deadline → its measured bytes committed once, by
+  the persistence thread at the return, and its credits back in the pool;
+  a write gated past its deadline, then released after the job handed the
+  thread to the cleanup service → its credits returned to the closed pool
+  at the return (not reissued), its measured bytes committed exactly once,
+  by the cleanup service after the join, the queued artefacts' reservations
+  released then; retained bytes equal the files on disk in both cases.
+- **Empty accepted set**: a build-free `cpf build` (no execution, no
+  artefact before the report) → W ends at once, `report.json` published,
+  start of W → `job_finished` ≤ 5 s [+ 300 ms].
+- **Cancellation in a credit wait** (portable, controlled writer): writes
+  gated, an enqueue waiting at `persist.credit`, intent → that artefact's
+  `Ref` (or, for `cleanup.log`, its `persist` warning) has error
+  `cancelled`; gate released → artefacts accepted earlier are published,
+  `report.json` published; encoder, decoder and the Python oracle agree on
+  `{"kind":"cancelled"}`; cancellation status.
 - Intent at `settle.wait` in a `test` job after hooks, and in a `build` job
   → recorded with phase `settlement`, verdict unchanged, settlement
   completes, warning `late_cancellation`, cancellation status.
@@ -1346,10 +1584,81 @@ F), `persist.report`, `events.enqueue`, `delivery.write`, `stderr.write`,
   `output_chunk` without `=output`; with `=output`, a chunk boundary inside
   `é` decodes to the original bytes; `delivery.write` failing mid-stream →
   job completes, 11.
+- Stderr fixtures with real executions run on Linux and macOS (§9 platform
+  scope; Windows asserts the refusal for the same command lines); the queue
+  fixtures marked portable drive the stderr queue from the job engine with
+  an injected executor and a sink double on all three OSes.
 - `stderr.write` blocked at a barrier during a `cpf test` job of 3 000
-  trivial tests (each progress line ≥ 40 bytes, so > 64 KiB is offered) →
-  the job finishes, `progress_dropped.lines` > 0, the final summary appears
-  after the barrier is released and is not interleaved.
+  trivial tests (each per-test line ≥ 40 bytes, so > 64 KiB is offered) →
+  the job finishes and delivers its document while blocked; released 1 s
+  after t_q → exactly 3 000 per-test lines in plan order, then the final
+  warnings, the summary last; `progress_dropped.lines` counts only
+  progress lines.
+- **Drop finality across E, S, D** (portable): sink double blocked from
+  before E until after D with progress queued, then released 1 s after
+  t_q →
+  `progress_dropped.lines` in `report.json`, the stdout document and the
+  final `report` event of `--events` are equal, and equal progress
+  offered before E minus progress the writer took before E; no progress
+  line is written after release; the per-test lines and summary follow.
+- **Full result ceiling** (portable): 10 000 planned tests (repeat 1, the
+  C §8.2 maximum), each per-test line exactly 512 B, the final allowance
+  filled (64 diagnostics, 29 warning lines, 16 summary lines; stress
+  aggregates in A4), sink double blocked until after D → peak queued
+  result bytes ≤ 5 251 072 B and the debug assertion holds; released → all
+  10 000 per-test lines and the final batch written once, in sequence
+  order.
+- Build-free `cpf build` → its summary is written through the final
+  allowance.
+- **10 000-execution progress flood**, two forms:
+  - Linux and macOS, real executions: a selected problem with ten enabled
+    tests and `[commands.flood]` with `argv` naming the trivial fixture
+    program (exits 0, no output), `for_each_test = true`, `repeat = 1000`
+    (C §8.1, §8.2: 10 × 1 000 = 10 000 planned runs, the maximum; no
+    `needs_build`, so no build). `cpf cmd flood` with `stderr.write`
+    blocked from the first run, released 1 s after t_q → status 0; stderr
+    holds, in order, any start-up configuration diagnostics, exactly ten
+    per-test lines (one per test, label `OK`, §2.8, with the per-test
+    aggregates of C §8.2) in plan order, then the final warnings including
+    `progress_dropped` with `lines` > 0, the summary last; only progress
+    lines are missing, and `progress_dropped.lines` equals the progress
+    lines offered minus those written. Windows: the same command asserts
+    the refusal (status 10).
+  - Portable, injected engine: the same plan (ten tests × 1 000 iterations)
+    from an injected executor with a sink double → the same assertions.
+  (Stress: A4 adds the stalled-then-resumed stress case with its final
+  aggregates.)
+- `stderr.lock` held while another thread offers with free space
+  (portable) → the line is queued, not dropped, once the lock is released;
+  exactly the offered lines are written. A force exit while `stderr.lock`
+  is held completes without the lock (§5.3 status).
+- Sink double writing 1 byte per call (partial writes), and one returning
+  `EINTR` before every successful call (portable) → output byte-identical
+  to an unrestricted sink.
+- **Final-drain deadline** (portable sink double; real clock; every bound
+  measured from t_q, recorded by a debug milestone at the end of the
+  enqueue critical section, never from the end of D): sink blocked
+  forever after the job → exit 5 s [+ 100 ms] after t_q with the status by
+  verdict, no summary written; sink taking 2 s per write call → exit 5 s
+  [+ 100 ms] after t_q, exactly the first two lines of the final batch
+  written (the third call, begun about t_q + 4 s, is abandoned), the rest
+  lost, the stream not ending with the summary line; sink writing 1 byte
+  per 10 ms call (partial writes) and one returning `EINTR` every 10 ms →
+  exit 5 s [+ 100 ms] after t_q (retries and continuations do not extend
+  it); `stderr.lock` held for 1 s between the end of D and t_q → exit still
+  5 s [+ 100 ms] after t_q (the deadline starts at t_q, not at D); a second
+  Ctrl-C 1 s into the final drain, and one between two partial writes of a
+  line → force exit at once, §5.3, no further write call.
+- Raw `cpf run` (Linux and macOS): child exiting non-zero with the stderr
+  sink blocked after the drain milestone → forwarding flush ends by the
+  console flush deadline (drain milestone + 2 s [+ 100 ms]); the summary
+  line is then queued and exit follows its enqueue instant + 2 s
+  [+ 100 ms] (raw final-diagnostic wait), each measured from its own
+  origin.
+- `stderr.write` failing with `EPIPE` at the first and at the 100th line →
+  no later stderr bytes, status by verdict; Ctrl-C during the job with a
+  blocked sink, then released → the per-test lines offered before intent,
+  then a summary naming the cancellation, then the §5.3 status.
 - Refusals: phase-1 config error → `refused`, class `config`, 7,
   `persistence.report.kind = "not_attempted"`; `SourceCollision` after
   registration → `refused`, `job` set, class `workspace`, 8, no
@@ -1534,7 +1843,13 @@ Decided (user, 2026-11-21):
 - **O2** Full capture manifest persisted as `inputs/capture.json` with
   reservation and publication semantics; bounded previews, digest and
   reference in the report (§4.2).
-- **O3** 64 KiB non-blocking progress queue, lines ≤ 512 bytes, drop counter
-  finalized at E, final summary through the same stderr writer (§8).
+- **O3** One ordered stderr stream through one writer: sequence-numbered
+  result lines that the queue never drops, within a bounded ceiling; a
+  64 KiB lossy progress budget whose queued remainder is detached and
+  counted at E, where the drop counter is final; lines ≤ 512 bytes; a plain
+  queue lock with bounded work inside it, never taken by force exit; and an
+  absolute 5 s final-drain deadline from the final-batch enqueue instant,
+  past which the unwritten tail is lost, visible only as a stream not
+  ending with the summary (§8).
 
 No open decisions remain.
