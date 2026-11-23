@@ -869,8 +869,8 @@ cleanup result (t_c), drain start (t_drain_start, §5.2), reader stopped
 (t_s), capture frozen (t_f), record finalized (t_rec), record persisted
 (t_p), resources released (t_rel). Each bound is a **fixed policy deadline**
 (exact, from §5.5) plus a **test allowance** in brackets. Allowances are for
-the Linux container and ×4 on macOS and Windows CI, an assumption about
-hosted runners; policy deadlines are never scaled.
+the Linux container, ×2 on hosted Linux CI and ×4 on macOS and Windows CI,
+an assumption about hosted runners; policy deadlines are never scaled.
 
 | Path | Bound |
 |---|---|
@@ -967,8 +967,9 @@ rejected; real Ctrl-C and second Ctrl-C (after CLI integration).
 - Force exit does not wait for an in-progress creation. On Unix an
   unregistered child may survive force exit for an unbounded time, at most
   one per job (§3.4).
-- macOS/Windows CI allowances are the Linux allowances ×4, an assumption
-  about hosted runners; policy deadlines are never scaled.
+- Hosted Linux CI allowances are the Linux allowances ×2 and macOS/Windows
+  CI allowances ×4, an assumption about hosted runners; policy deadlines are
+  never scaled.
 - Fixture readiness uses a bounded, test-only control channel outside the
   inheritance rule instead of lossy `OutputChunk` events.
 - Unix observers need no thread (pidfd, kqueue or polling); all workers exist

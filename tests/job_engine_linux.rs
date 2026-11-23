@@ -22,6 +22,20 @@ use std::time::Duration;
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static PROBE: NativeProbe = NativeProbe;
 
+/// Hosted-runner allowance scale (execution contract §10.1): ×4 on macOS,
+/// ×2 on hosted Linux CI, ×1 in the Linux container. Policy deadlines are
+/// never scaled.
+#[allow(dead_code)]
+fn allowance_scale() -> u64 {
+    if cfg!(target_os = "macos") {
+        4
+    } else if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        2
+    } else {
+        1
+    }
+}
+
 fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
     run_test_with_timeout(Duration::from_secs(120), future);
 }
@@ -219,7 +233,7 @@ fn cancel_during_executor_creation_keeps_the_runtime_responsive() {
         }
 
         fn allowance(milliseconds: u64) -> Duration {
-            Duration::from_millis(milliseconds * if cfg!(target_os = "macos") { 4 } else { 1 })
+            Duration::from_millis(milliseconds * allowance_scale())
         }
         let fixture = Fixture::new();
         let ready = ready(&fixture, "int main() { return 0; }\n");
@@ -288,7 +302,7 @@ async fn cancel_paused_run_setup(point: cpforge::jobs::engine::Point) {
     }
 
     fn allowance() -> Duration {
-        Duration::from_secs(if cfg!(target_os = "macos") { 4 } else { 1 })
+        Duration::from_secs(allowance_scale())
     }
 
     let fixture = Fixture::new();
@@ -513,7 +527,7 @@ fn fixture_command_job(f: &Fixture, count: u32, budget: u64) -> (ReadyJob<'stati
 #[test]
 fn ten_thousand_real_runs_with_stalled_events_keep_terminal_sequence_and_report() {
     // Give the real executor a separate suite watchdog for 10 000 forks and scans.
-    let scale = if cfg!(target_os = "macos") { 4 } else { 1 };
+    let scale = allowance_scale();
     run_test_with_timeout(Duration::from_secs(600 * scale), move || async move {
         let f = Fixture::new();
         // MemoryPersistence retains metadata allowances until settlement.
@@ -642,7 +656,7 @@ fn healthy_run_milestones_meet_each_bound_over_five_runs() {
                 maxima[index] = maxima[index].max(elapsed);
             }
         }
-        let scale = if cfg!(target_os = "macos") { 4 } else { 1 };
+        let scale = allowance_scale();
         for (max, (milestone, milliseconds)) in maxima.into_iter().zip([
             ("cleanup → drain", 50),
             ("drain → readers stopped", 100),

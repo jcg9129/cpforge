@@ -312,9 +312,9 @@ not the separate zero-valued owned-resource counter required by §10.2.
 
 | # | Case | Tests | Linux | macOS | Windows |
 |---|---|---|---|---|---|
-| T1 | timer → kill ≤ 50 ms; kill → root exit ≤ 250 ms | `tests/supervisor_linux.rs::deadline_kills_hold_within_the_policy_bounds` | V | V (×4) | pending |
+| T1 | timer → kill ≤ 50 ms; kill → root exit ≤ 250 ms | `tests/supervisor_linux.rs::deadline_kills_hold_within_the_policy_bounds` | V (×2 on hosted CI) | V (×4) | pending |
 | T2 | root exit → cleanup result ≤ 1 s + 50 ms, also with a scan delayed past the deadline | `tests/supervisor_linux.rs::root_exit_to_cleanup_result_meets_the_cleanup_deadline` †; scanner semantics: `src/supervisor/sys/linux_proc.rs::scan_cut_by_cleanup_deadline_uses_only_the_last_completed_live_count`, `::slow_scan_distinguishes_the_reap_deadline_from_the_cleanup_deadline`; `src/supervisor/sys/macos_proc.rs::newer_scan_cut_by_the_cleanup_deadline_keeps_the_last_live_count`, `::completed_live_scan_at_deadline_differs_from_no_completed_scan` | V | P (healthy timing ×4; empty group can bypass delayed entry; slow-scan semantics tested separately) | pending |
-| T3 | Healthy milestones: cleanup → drain 50 ms; drain → readers stopped 100 ms; readers stopped → frozen 100 ms; frozen → finalized 100 ms; finalized → persisted and finalized → released 100 ms each | `tests/job_engine_linux.rs::healthy_run_milestones_meet_each_bound_over_five_runs` † (real engine, real persistence); wall observation only: `tests/supervisor_linux.rs::short_sleep_exits_without_enforcement_and_records_observed_wall` | V | V (×4) | pending |
+| T3 | Healthy milestones: cleanup → drain 50 ms; drain → readers stopped 100 ms; readers stopped → frozen 100 ms; frozen → finalized 100 ms; finalized → persisted and finalized → released 100 ms each | `tests/job_engine_linux.rs::healthy_run_milestones_meet_each_bound_over_five_runs` † (real engine, real persistence); wall observation only: `tests/supervisor_linux.rs::short_sleep_exits_without_enforcement_and_records_observed_wall` | V (×2 on hosted CI) | V (×4) | pending |
 | T4 | Consuming-wait retries bounded by the reap deadline, then transfer | `tests/supervisor_linux.rs::reap_timeouts_transfer_identity_and_ticket_gets_the_physical_outcome`, `::slow_cleanup_transfers_at_the_original_kill_reap_deadline` (Linux), `::post_exit_deadline_and_cancellation_do_not_add_late_trigger_notes`; `src/supervisor/root_macos.rs::zero_wait4_after_note_exit_retries_without_another_notification` | V | V | n/a |
 | T5 | Escaped pipe: contract drain 500 ms +100 ms | = S4 | P (test exit → return: 500 ms +400 ms) | P (same; allowance ×4) | n/a |
 | T6 | Stalled sink: contract drain → frozen 5 s +100 ms | = R16 | P (test exit → return: 5 s +500 ms) | P (same; allowance ×4) | pending |
@@ -496,7 +496,7 @@ portable-layer behaviors above are the Windows behavior currently evidenced.
   thread. No test bounds the poll-frame size or validates smaller stacks;
   the CLI does not itself set its main-thread stack size.
 - **Timing on hosted runners.** Contract allowances assume scheduling behavior
-  (×4 on macOS and Windows). Reactor stalls can exceed the fixed 50 ms grace;
+  (×2 on hosted Linux CI, ×4 on macOS and Windows). Reactor stalls can exceed the fixed 50 ms grace;
   polling's 10 ms backoff cap does not bound scheduling delay. Both can produce
   a violation for a program that finished in time. `Timing.observer` and the
   wall method identify the observation mechanism. P rows identify tests whose

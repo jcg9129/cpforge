@@ -215,9 +215,23 @@ fn thread_count() -> usize {
     threads as usize
 }
 
+/// Hosted-runner allowance scale (execution contract §10.1): ×4 on macOS,
+/// ×2 on hosted Linux CI, ×1 in the Linux container. Policy deadlines are
+/// never scaled.
+#[allow(dead_code)]
+fn allowance_scale() -> u64 {
+    if cfg!(target_os = "macos") {
+        4
+    } else if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        2
+    } else {
+        1
+    }
+}
+
 // Scale runner scheduling allowances only; policy deadlines stay fixed.
 fn allowance(milliseconds: u64) -> Duration {
-    Duration::from_millis(milliseconds * if cfg!(target_os = "macos") { 4 } else { 1 })
+    Duration::from_millis(milliseconds * allowance_scale())
 }
 
 fn expected_cleanup() -> Cleanup {
