@@ -252,8 +252,11 @@ impl TinyFs {
         let mut file = fs::File::create(path).unwrap();
         let bytes = [0_u8; 64 * 1024];
         let mut written = 0;
+        // Some filesystems (HFS+) refuse a write that does not fit instead of
+        // writing a short prefix, so halve the chunk until one byte no longer fits.
+        let mut chunk = bytes.len();
         loop {
-            match file.write(&bytes) {
+            match file.write(&bytes[..chunk]) {
                 Ok(0) => panic!("tmpfs filler made no progress"),
                 Ok(n) => {
                     written += n as u64;
@@ -262,6 +265,10 @@ impl TinyFs {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+                    if chunk > 1 {
+                        chunk /= 2;
+                        continue;
+                    }
                     // Capture tests keep a stored prefix; persistence tests
                     // leave zero headroom and fail the next nonempty write.
                     assert!(written >= 64 * 1024);
