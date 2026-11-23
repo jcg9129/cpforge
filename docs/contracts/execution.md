@@ -171,7 +171,8 @@ diagnose an absent `record.json`.
   reserving their 2 thread credits atomically from the 32 (failure: credits returned, the
   job does not start, nothing to recover). Job threads hold no cleanup slot;
   their credits return when the job's threads have exited, or pass with a
-  stalled persistence thread to the cleanup service (§6.2). Per run, at admission: the
+  stalled persistence thread to the cleanup service (§6.2), which holds it
+  without a cleanup slot until the thread has exited. Per run, at admission: the
   Windows waiter, one sink worker per `File`/`Forward` stream, the stdin
   forwarder in raw mode. Unix observers need no thread (pidfd / kqueue, or
   polling, §4.1).
@@ -617,9 +618,18 @@ empty captures.
   job still finishes and prints its in-memory report with `--json`; the
   deadline does not cancel the syscall. The job never names a path it has not seen published (in
   `JobFinished`, the report or a record). A late rename may still land; it is
-  harmless and is not appended to `cleanup.log` (above); the thread with its
-  metadata reservation passes to the cleanup service until it returns. The
-  in-memory report stays authoritative for the invocation. Size bounds: spec
+  harmless and is not appended to `cleanup.log` (above): it follows a missed
+  deadline, after which the job's queue is unavailable, and the cleanup
+  service owns no persistence path. When the job drops its persistence
+  service while the thread is unavailable or still owes a result, the thread
+  passes to the cleanup service with its thread credit, its job-owner clone
+  (lease and byte budget) and the metadata reservations of its current and
+  queued artefacts, without a cleanup slot. The service never waits for it:
+  each poll joins the thread only once it has finished (as for transferred
+  sink workers), then commits the late write's measured bytes and releases
+  the rest. A healthy idle thread is not transferred; closing its queue ends
+  it, and it returns its own credit. The in-memory report stays authoritative
+  for the invocation. Size bounds: spec
   ≤ 256 KiB, record ≤ 64 KiB, `cleanup.log` ≤ 64 KiB (then a truncation
   marker), report ≤ 64 KiB + 12 KiB × planned executions (report contract
   §3.7; configuration contract caps runs per job).

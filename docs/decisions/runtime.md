@@ -56,7 +56,7 @@ starting either worker; failure leaves no credit reserved and refuses the job.
 |---|---|---|---|
 | Cleanup service (`cpf-cleanup`) | process | at `init_process`, before any job | owns transferred runs. Polls and reaps their roots with backoff, receives completions from transferred workers, publishes logical in-memory outcomes at the cutoff. It does not persist them. Uses non-consuming observation and consuming waits; Linux scans can occupy the poller until their deadline. |
 | Creation (`cpf-create`) | job | at job start, holds 1 credit | FIFO queue of blocking setup: run-directory creation, recipe resolution (deferred program completion, staging), opening stdin and sink files, pipe creation, the `spawn` call, and post-build validation (§3.4). |
-| Persistence (`cpf-persistence`) | job | at job start, holds 1 credit | temp file + rename for spec, record, `cleanup.log` and report, fed by a 16-entry queue (§6.2). |
+| Persistence (`cpf-persistence`) | job; the cleanup service if stalled when the job drops it | at job start, holds 1 credit; never a cleanup slot | temp file + rename for spec, record, `cleanup.log` and report, fed by a 16-entry queue (§6.2). A transferred worker keeps its credit, job-owner clone and metadata reservations until cleanup joins its finished thread. |
 | Sink worker (`cpf-sink`) | per captured `File` stream | during setup, before spawn | blocking writes of captured bytes to the run directory (§5.1); `Discard`/memory captures have no sink thread. |
 | Console forwarder (`cpf-console`), stdin forwarder (`cpf-stdin`) | per forwarded output stream, plus one stdin helper in raw `cpf run` | during setup, before spawn | 1 MiB output queue per stream, 64 KiB stdin queue; console cutoff 2 s from drain (§8.1). The stdin helper may remain blocked until process exit. |
 | Transcript writers (`cpf-transcript-*`) | session | at pair admission | bounded transcript files of connected runs. |
@@ -212,10 +212,22 @@ not revoke it.
   persistence (§§3.2 and 6.2). `cpf fsck` reports the schema of each run file present
   (`valid schema 1`); it does not diagnose an absent `record.json`.
   `cleanup.log` is the initial summary written by `JobPersistence` at record
-  time; events after persistence settles are not appended. A stalled
-  persistence worker retains its own credit, lease and
-  reservations in its detached thread; it is not registered with cleanup,
-  which falls short of §6.2's handover to the cleanup service.
+  time; events after persistence settles are not appended. Dropping
+  `JobPersistence` (`src/jobs/persist.rs`) while its worker is unavailable or
+  still owes a result hands the worker's join handle to the cleanup service
+  (`transfer_persistence` in `src/supervisor/cleanup.rs`) over an unbounded
+  queue that never waits; each entry carries its worker's own credit, so there
+  are at most 32, and none takes a cleanup slot. The thread's return value owns
+  its credit, job-owner clone (lease and budget), queue with the metadata
+  reservations of queued artefacts, and the timed-out artefact's reservation
+  with its measured late bytes. Each poll joins only finished threads (as for
+  transferred sink workers) and drops that value: the late bytes are
+  committed, then everything else is released. Transferred workers count in
+  `service_pending` and `transferred_workers` of `debug_counters` until then.
+  A healthy idle worker is detached as before: closing its queue ends it
+  without I/O and its credit returns at thread exit. A late rename after
+  handover is not logged: the timed-out queue is unavailable and cleanup
+  owns no persistence path.
 
 ## 2. Acceptance cases per OS
 
@@ -311,7 +323,7 @@ boundary, alongside equal fds, threads and service counters and no root zombies.
 | R22 | Enumeration error, truncation, short `proc_pidinfo`, zombie members | §4.4 scanners | Linux: `src/supervisor/sys/linux_proc.rs::directory_enumeration_failure_never_confirms_cleanup`, `::malformed_truncated_and_unreadable_entries_fail_the_scan`, `::completed_scan_uses_fdinfo_numbering_excludes_root_zombies_and_escaped_members`. macOS: `src/supervisor/sys/macos_proc.rs::live_enumeration_with_a_one_pid_buffer_reports_truncation`, `::short_pidinfo_reply_during_a_scan_never_confirms_cleanup`, `::full_buffers_grow_without_reallocation_and_stop_at_cap`, `::info_requires_exact_size_and_clean_errno_except_for_disappearance`, `::malformed_counts_errors_and_empty_success_are_distinct`; `src/supervisor/root_macos.rs::zombie_lookup_includes_an_unreaped_descendant_but_does_not_count_it_live`, `::libproc_failures_are_unverified_and_keep_measurements_partial` | V (including directory enumeration failure and zombie members) | V | pending (job accounting query) |
 | R23 | `/proc` prerequisite failures and `hidepid` (injected) → `Unverified` | mountinfo and fdinfo checks | `src/supervisor/sys/linux_proc.rs::prerequisites_never_confirm_an_unsupported_view`, `::stacked_mounts_validate_the_visible_mount_id_and_filtering`; `tests/supervisor_linux.rs::unverified_cleanup_marks_reaped_measurements_partial` | V | n/a | n/a |
 | R24 | Zero-byte read completion and `ERROR_BROKEN_PIPE` as EOF | — | none at supervisor level | n/a | n/a | pending |
-| R25 | Late persistence rename after `PersistError` | late rename never fills the success cell or changes the report | `src/jobs/persist.rs::late_rename_keeps_timeout_and_never_fills_the_success_cell` †; `src/jobs/engine/tests.rs::late_persistence_rename_keeps_report_final_at_w_without_duplicate_warnings` † | E (real publication; fake executor) | E (real publication; fake executor) | E |
+| R25 | Late persistence rename after `PersistError` | late rename never fills the success cell or changes the report; handover holds the credit, lease and metadata until thread exit, then counters return to baseline | `src/jobs/persist.rs::late_rename_keeps_timeout_and_never_fills_the_success_cell` †; `src/jobs/engine/tests.rs::late_persistence_rename_keeps_report_final_at_w_without_duplicate_warnings` †; `tests/job_engine_linux.rs::late_rename_handover_holds_credit_lease_and_metadata_until_worker_returns`, `::stalled_persistence_handover_holds_queued_reservations_until_worker_returns` (handover) | E (handover cases pending CI) | E (handover cases pending CI) | E (no handover case) |
 | R26 | Budget breach plus an independent write error, both reported | losses judged per kind | `tests/supervisor_linux.rs::budget_discard_does_not_mask_write_loss_and_events_stop_exactly_at_cap`, `::real_enospc_reports_write_loss_without_blocking_or_conflating_budget_loss` (Linux); `src/report/tests.rs::supervisor_adapter_fixtures`, `::classify_run_fixtures` | V | V | E (derivation) |
 | R27 | `ACTIVE_PROCESS_ZERO` never delivered, still `Confirmed` by polling | — | none | n/a | n/a | pending |
 | R28 | Address-space limit with a lower inherited hard limit | `Note::LimitLowered` | `tests/supervisor_linux.rs::inherited_address_space_hard_limit_is_respected` | V | n/a (refused) | n/a |

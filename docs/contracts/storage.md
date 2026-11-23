@@ -741,7 +741,8 @@ The workspace lock is held **continuously** from step 1 to step 5:
 6. Prune step 3: delete the renamed `.reclaim-*` directories, outside the lock.
 
 The **job owner** is one shared handle holding the lease; runs, the cleanup
-service's transferred runs (execution contract §3.3) and the report writer hold clones. The
+service's transferred runs and persistence threads (execution contract §§3.3,
+6.2) and the report writer hold clones. The
 lease is released when the last clone drops.
 
 **Inactive** = no cooperating owner holds the lease (the job finished or its

@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use std::{fmt, io};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
+
+use crate::jobs::persist::PersistenceWorker;
 
 const CLEANUP_SLOTS: usize = 4;
 const THREAD_CREDITS: usize = 32;
@@ -72,6 +74,8 @@ pub struct GlobalBounds {
     slots_in_use: AtomicUsize,
     reserved_mask: AtomicUsize,
     pending: AtomicUsize,
+    transferred_workers: AtomicUsize,
+    worker_transfers: mpsc::UnboundedSender<PersistenceWorker>,
     next_key: AtomicU64,
     wake_lock: Mutex<()>,
     wake: Condvar,
@@ -101,12 +105,27 @@ struct RunCell {
 }
 
 // Keep the transfer in its reserved cell: boxing here would allocate on Drop.
+// Job persistence workers hold no run slot and use their own handover queue.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Transfer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Root(super::root::unix::Transfer),
     FailedCaptures(super::capture::FailedCaptures),
+}
+
+/// Hand a still-running job persistence worker to the cleanup service. It
+/// reserves no run slot: each entry keeps its worker's own thread credit, so
+/// at most THREAD_CREDITS entries exist. This never waits for the poller.
+pub(crate) fn transfer_persistence(worker: PersistenceWorker) {
+    let bounds = global_bounds().expect("persistence initializes cleanup before spawning");
+    bounds.pending.fetch_add(1, Ordering::AcqRel);
+    bounds.transferred_workers.fetch_add(1, Ordering::AcqRel);
+    bounds
+        .worker_transfers
+        .send(worker)
+        .expect("the cleanup poller never returns");
+    bounds.wake.notify_one();
 }
 
 // Public Debug implementations must not borrow the exclusive slot/transfer
@@ -117,6 +136,10 @@ impl fmt::Debug for GlobalBounds {
             .field("slots_in_use", &self.slots_in_use.load(Ordering::Acquire))
             .field("thread_credits", &self.thread_credits)
             .field("service_pending", &self.pending.load(Ordering::Acquire))
+            .field(
+                "transferred_workers",
+                &self.transferred_workers.load(Ordering::Acquire),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -345,6 +368,8 @@ pub struct Counters {
     pub slots_in_use: usize,
     pub credits_in_use: usize,
     pub service_pending: usize,
+    /// Job persistence workers handed over without consuming a run slot.
+    pub transferred_workers: usize,
 }
 
 #[doc(hidden)]
@@ -358,6 +383,7 @@ pub fn debug_counters() -> Counters {
         slots_in_use: bounds.slots_in_use.load(Ordering::Acquire),
         credits_in_use: bounds.thread_credits.used.load(Ordering::Acquire),
         service_pending: bounds.pending.load(Ordering::Acquire),
+        transferred_workers: bounds.transferred_workers.load(Ordering::Acquire),
     })
 }
 
@@ -367,6 +393,7 @@ pub(super) fn init() -> io::Result<()> {
     static INIT: Mutex<()> = Mutex::new(());
     let _init = INIT.lock().unwrap_or_else(|error| error.into_inner());
     if BOUNDS.get().is_none() {
+        let (worker_transfers, workers) = mpsc::unbounded_channel();
         let bounds = Arc::new(GlobalBounds {
             thread_credits: ThreadCredits {
                 used: Arc::new(AtomicUsize::new(0)),
@@ -378,6 +405,8 @@ pub(super) fn init() -> io::Result<()> {
             slots_in_use: AtomicUsize::new(0),
             reserved_mask: AtomicUsize::new(0),
             pending: AtomicUsize::new(0),
+            transferred_workers: AtomicUsize::new(0),
+            worker_transfers,
             next_key: AtomicU64::new(0),
             wake_lock: Mutex::new(()),
             wake: Condvar::new(),
@@ -391,7 +420,7 @@ pub(super) fn init() -> io::Result<()> {
             .name("cpf-cleanup".into())
             .spawn(move || {
                 let _credit = credit;
-                service.poll();
+                service.poll(workers);
             })?;
         BOUNDS.set(bounds).expect("initialization serialized");
     }
@@ -421,9 +450,23 @@ impl GlobalBounds {
         cell.ready.notify_waiters();
     }
 
-    fn poll(&self) -> ! {
+    fn poll(&self, mut transfers: mpsc::UnboundedReceiver<PersistenceWorker>) -> ! {
+        // Credits bound the entries, so pushing never reallocates.
+        let mut workers = Vec::with_capacity(THREAD_CREDITS);
         let mut backoff = 1;
         loop {
+            while let Ok(worker) = transfers.try_recv() {
+                workers.push(worker);
+            }
+            // Join only finished threads; release counts after resources drop.
+            workers.retain_mut(|worker| {
+                if !worker.resources_released() {
+                    return true;
+                }
+                self.pending.fetch_sub(1, Ordering::AcqRel);
+                self.transferred_workers.fetch_sub(1, Ordering::AcqRel);
+                false
+            });
             // Clone entries only while holding their short registry locks. The
             // transfer publisher never takes these locks, nor any service lock.
             for (index, slot) in self.slots.iter().enumerate() {

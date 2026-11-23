@@ -1,10 +1,13 @@
 //! One bounded persistence worker per leased job. Deadlines govern observation,
 //! not cancellation of filesystem calls. A timed-out worker keeps its resources
-//! until the syscall returns and never starts another queued write.
+//! until the syscall returns and never starts another queued write. Dropping the
+//! service hands a worker that may still be in a write to process-wide cleanup,
+//! without taking a run slot; an idle worker simply exits as before.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, oneshot};
@@ -60,22 +63,23 @@ enum Content {
 }
 // Reuse storage's pre-rename seam, after the temporary file is complete and
 // synced. The gate is local to this worker thread and never affects other jobs.
-#[cfg(all(test, feature = "storage-test-hooks"))]
+#[cfg(feature = "storage-test-hooks")]
 thread_local! {
     static RENAME_GATE: std::cell::RefCell<Option<Arc<RenameGate>>> = const {
         std::cell::RefCell::new(None)
     };
 }
 
-#[cfg(all(test, feature = "storage-test-hooks"))]
+#[cfg(feature = "storage-test-hooks")]
 #[derive(Debug, Default)]
-pub(crate) struct RenameGate {
-    pub(crate) reached: Notify,
-    pub(crate) release: Notify,
-    pub(crate) completed: Notify,
+#[doc(hidden)]
+pub struct RenameGate {
+    pub reached: Notify,
+    pub release: Notify,
+    pub completed: Notify,
 }
 
-#[cfg(all(test, feature = "storage-test-hooks"))]
+#[cfg(feature = "storage-test-hooks")]
 fn pause_before_rename(_: &std::path::Path) {
     let gate = RENAME_GATE.with(|cell| cell.borrow().as_ref().unwrap().clone());
     gate.reached.notify_one();
@@ -100,7 +104,7 @@ struct Write {
     spec_result: Option<Arc<Mutex<Option<ArtifactRef>>>>,
     #[cfg(test)]
     gate: Option<Arc<Notify>>,
-    #[cfg(all(test, feature = "storage-test-hooks"))]
+    #[cfg(feature = "storage-test-hooks")]
     rename_gate: Option<Arc<RenameGate>>,
 }
 
@@ -115,12 +119,51 @@ struct Request {
     spec_result: Option<Arc<Mutex<Option<ArtifactRef>>>>,
 }
 
+// The thread's return value owns its resources, so they outlive the thread
+// itself. Queued writes in the receiver retain their metadata allowances.
+struct WorkerResources {
+    _credit: crate::supervisor::Credits,
+    owner: JobOwner,
+    receiver: mpsc::Receiver<Write>,
+    late: Option<(Reservation, u64)>,
+}
+impl Drop for WorkerResources {
+    // This may run on the cleanup polling thread (or, for a detached worker, in
+    // its thread-exit path), so it must never panic or block. The measured
+    // length is within the reservation (checked before publication); clamping
+    // keeps that invariant without an assertion here.
+    fn drop(&mut self) {
+        if let Some((reservation, retained)) = &mut self.late {
+            let retained = (*retained).min(reservation.bytes());
+            let _ = reservation.commit(retained);
+        }
+    }
+}
+
+/// Slot-free ownership of one persistence worker thread.
+#[derive(Debug)]
+pub(crate) struct PersistenceWorker {
+    thread: Option<JoinHandle<WorkerResources>>,
+}
+impl PersistenceWorker {
+    /// As for transferred sink writers: join only a finished thread, so this
+    /// never waits. Dropping the join result releases the credit, lease clone
+    /// and metadata reservations; no publication or metadata I/O runs here.
+    pub(crate) fn resources_released(&mut self) -> bool {
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            let _ = self.thread.take().expect("finished worker").join();
+        }
+        self.thread.is_none()
+    }
+}
+
 /// Construct from the same ready job passed to the engine. Construction never
 /// starts a process or needs a runtime. Settlement needs Tokio's time driver.
 #[derive(Debug)]
 pub struct JobPersistence {
     _owner: JobOwner,
     sender: Option<mpsc::SyncSender<Write>>,
+    worker: Option<PersistenceWorker>,
     unavailable: Arc<AtomicBool>,
     pending: Vec<Pending>,
     active: Vec<usize>,
@@ -129,7 +172,7 @@ pub struct JobPersistence {
     report_attempted: bool,
     #[cfg(test)]
     report_gate: Option<Arc<Notify>>,
-    #[cfg(all(test, feature = "storage-test-hooks"))]
+    #[cfg(feature = "storage-test-hooks")]
     rename_gate: Option<Arc<RenameGate>>,
 }
 impl JobPersistence {
@@ -147,8 +190,9 @@ impl JobPersistence {
         Self::start(ready.owner.clone(), DEADLINE, None, credit)
     }
 
-    #[cfg(test)]
-    pub(crate) fn stalled(ready: &super::ReadyJob<'_>, bound: Duration, gate: Arc<Notify>) -> Self {
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    #[doc(hidden)]
+    pub fn stalled(ready: &super::ReadyJob<'_>, bound: Duration, gate: Arc<Notify>) -> Self {
         Self::start(ready.owner.clone(), bound, Some(gate), None).expect("persistence worker")
     }
 
@@ -164,8 +208,9 @@ impl JobPersistence {
         service
     }
 
-    #[cfg(all(test, feature = "storage-test-hooks"))]
-    pub(crate) fn stalled_rename(
+    #[cfg(feature = "storage-test-hooks")]
+    #[doc(hidden)]
+    pub fn stalled_rename(
         ready: &super::ReadyJob<'_>,
         bound: Duration,
         gate: Arc<RenameGate>,
@@ -184,15 +229,19 @@ impl JobPersistence {
         let (sender, receiver) = mpsc::sync_channel::<Write>(QUEUE);
         let unavailable = Arc::new(AtomicBool::new(false));
         let stopped = unavailable.clone();
-        let worker_owner = owner.clone();
         let credit = match credit {
             Some(credit) => credit,
             None => crate::supervisor::persistence_credit()?,
         };
-        std::thread::Builder::new()
+        let mut resources = WorkerResources {
+            _credit: credit,
+            owner: owner.clone(),
+            receiver,
+            late: None,
+        };
+        let thread = std::thread::Builder::new()
             .name("cpf-persistence".into())
             .spawn(move || {
-                let _credit = credit;
                 // A blocking test gate models an uninterruptible writer. It is
                 // released by the test; production never installs one.
                 if let Some(gate) = gate {
@@ -202,7 +251,7 @@ impl JobPersistence {
                         .expect("test gate runtime");
                     runtime.block_on(gate.notified());
                 }
-                while let Ok(mut write) = receiver.recv() {
+                while let Ok(mut write) = resources.receiver.recv() {
                     #[cfg(test)]
                     if let Some(gate) = write.gate.take() {
                         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -213,6 +262,7 @@ impl JobPersistence {
                     }
                     if stopped.load(Ordering::Acquire) || Instant::now() >= write.deadline {
                         stopped.store(true, Ordering::Release);
+                        resources.late = Some((write.reservation, 0));
                         break;
                     }
                     #[cfg(all(
@@ -250,22 +300,23 @@ impl JobPersistence {
                             })
                         }
                     };
+                    let mut retained = 0;
                     let result = match bytes {
                         Ok(bytes)
                             if (bytes.len() as u64)
                                 .checked_mul(2)
                                 .is_some_and(|needed| needed <= write.reservation.bytes()) =>
                         {
-                            let guard = WorkspaceGuard::leased(&worker_owner);
+                            let guard = WorkspaceGuard::leased(&resources.owner);
                             if let Some(parent) =
                                 write.path.parent().filter(|p| !p.as_os_str().is_empty())
                             {
                                 guard
                                     .created
                                     .borrow_mut()
-                                    .push(worker_owner.directory().join(parent));
+                                    .push(resources.owner.directory().join(parent));
                             }
-                            #[cfg(all(test, feature = "storage-test-hooks"))]
+                            #[cfg(feature = "storage-test-hooks")]
                             let guard = {
                                 let mut guard = guard;
                                 if let Some(gate) = &write.rename_gate {
@@ -278,9 +329,9 @@ impl JobPersistence {
                             };
                             let published =
                                 storage::publish_file_noclobber(&guard, &write.path, &bytes);
-                            #[cfg(all(test, feature = "storage-test-hooks"))]
+                            #[cfg(feature = "storage-test-hooks")]
                             RENAME_GATE.with(|cell| *cell.borrow_mut() = None);
-                            account(&mut write.reservation, bytes.len() as u64, &published);
+                            retained = publication_bytes(bytes.len() as u64, &published);
                             match published {
                                 Ok(published) => Outcome {
                                     reference: ArtifactRef {
@@ -305,12 +356,17 @@ impl JobPersistence {
                     // A completion after its deadline is never a publication observation.
                     if Instant::now() >= write.deadline || stopped.load(Ordering::Acquire) {
                         stopped.store(true, Ordering::Release);
-                        #[cfg(all(test, feature = "storage-test-hooks"))]
+                        resources.late = Some((write.reservation, retained));
+                        #[cfg(feature = "storage-test-hooks")]
                         if let Some(gate) = &write.rename_gate {
                             gate.completed.notify_one();
                         }
                         break;
                     }
+                    write
+                        .reservation
+                        .commit(retained)
+                        .expect("publication stays within its reserved file and temp bounds");
                     #[cfg(all(
                         feature = "storage-test-hooks",
                         any(target_os = "linux", target_os = "macos")
@@ -324,10 +380,14 @@ impl JobPersistence {
                     }
                     let _ = write.sender.send(result);
                 }
+                resources
             })?;
         Ok(Self {
             _owner: owner,
             sender: Some(sender),
+            worker: Some(PersistenceWorker {
+                thread: Some(thread),
+            }),
             unavailable,
             pending: Vec::new(),
             active: Vec::new(),
@@ -336,7 +396,7 @@ impl JobPersistence {
             report_attempted: false,
             #[cfg(test)]
             report_gate: None,
-            #[cfg(all(test, feature = "storage-test-hooks"))]
+            #[cfg(feature = "storage-test-hooks")]
             rename_gate: None,
         })
     }
@@ -409,7 +469,7 @@ impl JobPersistence {
                 } else {
                     None
                 },
-                #[cfg(all(test, feature = "storage-test-hooks"))]
+                #[cfg(feature = "storage-test-hooks")]
                 rename_gate: self.rename_gate.take(),
             };
             match &self.sender {
@@ -480,6 +540,26 @@ impl JobPersistence {
                 }
             }
         }
+    }
+}
+impl Drop for JobPersistence {
+    fn drop(&mut self) {
+        // Close the queue first; this never waits for the worker.
+        self.sender.take();
+        let Some(mut worker) = self.worker.take() else {
+            return;
+        };
+        // Healthy and idle: every accepted write has delivered its result, so
+        // the closed queue ends the thread without further I/O. Detach it as
+        // before; its join result (credit, lease clone) drops on its own exit.
+        let idle = !self.unavailable.load(Ordering::Acquire)
+            && self.pending.iter().all(|pending| pending.result.is_some());
+        if idle || worker.resources_released() {
+            return;
+        }
+        // Timed out, stalled or still writing: the thread keeps its credit,
+        // lease clone and metadata reservations under cleanup's ownership.
+        crate::supervisor::transfer_persistence(worker);
     }
 }
 impl Persistence for JobPersistence {
@@ -679,16 +759,20 @@ pub(crate) fn account(
     len: u64,
     result: &Result<Published, storage::StorageError>,
 ) {
-    let retained = match result {
+    reservation
+        .commit(publication_bytes(len, result))
+        .expect("publication stays within its reserved file and temp bounds");
+}
+
+// Measure retained files on the publishing thread, never cleanup's poller.
+fn publication_bytes(len: u64, result: &Result<Published, storage::StorageError>) -> u64 {
+    match result {
         Ok(published) => len * (1 + u64::from(matches!(published.cleanup, Cleanup::Pending(_)))),
         Err(error) => match &error.cleanup {
             Cleanup::Pending(path) => std::fs::metadata(path).map_or(len, |m| m.len()),
             _ => 0,
         },
-    };
-    reservation
-        .commit(retained)
-        .expect("publication stays within its reserved file and temp bounds");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -707,6 +791,17 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+    fn wait_for_worker(owner: &std::sync::Weak<JobLease>) {
+        runtime(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while owner.upgrade().is_some() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("cleanup did not release the persistence worker");
+        });
     }
     fn fixture() -> (PathBuf, JobOwner, Arc<JobBudget>) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -777,6 +872,7 @@ mod tests {
         );
         // The stalled writer keeps all queued allowances until it returns.
         assert_eq!(budget.usage().reserved, 2 * QUEUE as u64);
+        drop(service);
         gate.notify_one();
         runtime(async {
             tokio::time::timeout(Duration::from_secs(2), async {
@@ -787,7 +883,6 @@ mod tests {
             .await
             .unwrap();
         });
-        drop(service);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -795,6 +890,7 @@ mod tests {
     #[test]
     fn late_rename_keeps_timeout_and_never_fills_the_success_cell() {
         let (path, owner, budget) = fixture();
+        let weak_owner = Arc::downgrade(&owner);
         let gate = Arc::new(RenameGate::default());
         let mut service = JobPersistence::start(owner, Duration::from_secs(1), None, None).unwrap();
         service.rename_gate = Some(gate.clone());
@@ -828,12 +924,14 @@ mod tests {
         });
         assert!(start.elapsed() < Duration::from_secs(4));
         drop(service);
+        wait_for_worker(&weak_owner);
         std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
     fn missing_worker_is_unavailable_and_budget_refusal_is_io() {
         let (path, owner, budget) = fixture();
+        let weak_owner = Arc::downgrade(&owner);
         let mut service = JobPersistence::start(owner, DEADLINE, None, None).unwrap();
         let mut refused = request(0, &budget);
         refused.reservation = None;
@@ -849,6 +947,7 @@ mod tests {
             Some(PersistError::WorkerUnavailable)
         );
         drop(service);
+        wait_for_worker(&weak_owner);
         std::fs::remove_dir_all(path).unwrap();
     }
 

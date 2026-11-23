@@ -33,6 +33,7 @@ mod sys;
     any(target_os = "linux", target_os = "macos")
 ))]
 mod test_hooks;
+pub(crate) use cleanup::transfer_persistence;
 pub use cleanup::{
     Admission, Counters, Credits, GlobalBounds, ThreadCredits, TransferTicket, admit, admit_pair,
     debug_counters, global_bounds,

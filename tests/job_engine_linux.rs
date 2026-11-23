@@ -730,6 +730,142 @@ fn healthy_run_milestones_meet_each_bound_over_five_runs() {
     });
 }
 
+#[cfg(feature = "storage-test-hooks")]
+async fn wait_for_cleanup_counters(expected: supervisor::Counters) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while supervisor::debug_counters() != expected {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "cleanup did not reach {expected:?}: {:?}",
+            supervisor::debug_counters()
+        )
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+async fn persistence_handover(rename: bool) {
+    use cpforge::jobs::engine::{PersistError, ReportPersistence};
+    use cpforge::jobs::persist::{JobPersistence, RenameGate};
+    use std::sync::Arc;
+
+    // Release even if an assertion fails, so a failed test cannot strand the
+    // worker and its process-wide credit for the rest of this test binary.
+    struct ReleaseOnDrop(Arc<RenameGate>, Arc<tokio::sync::Notify>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release.notify_one();
+            self.1.notify_one();
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let baseline = supervisor::Counters {
+            credits_in_use: 1, // The cleanup polling thread's lifetime credit.
+            ..Default::default()
+        };
+        wait_for_cleanup_counters(baseline).await;
+        let f = Fixture::new();
+        let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
+        let directory = ready.dir.clone();
+        let budget = ready.budget.clone();
+        let owner = Arc::downgrade(&ready.owner);
+        let gate = Arc::new(RenameGate::default());
+        let write_gate = Arc::new(tokio::sync::Notify::new());
+        let _release = ReleaseOnDrop(gate.clone(), write_gate.clone());
+        let mut persistence = if rename {
+            JobPersistence::stalled_rename(&ready, Duration::from_secs(1), gate.clone())
+        } else {
+            JobPersistence::stalled(&ready, Duration::from_secs(1), write_gate.clone())
+        };
+        let engine = Engine::new(ready, request).unwrap();
+        let mut receiver = engine.events().subscribe().unwrap();
+        let mut executor = SupervisorExecutor::start().unwrap();
+        let mut hooks = NoHooks;
+        let (report, ()) = tokio::join!(
+            engine.run(&mut executor, &mut persistence, &mut hooks),
+            async {
+                if rename {
+                    gate.reached.notified().await;
+                }
+            }
+        );
+        assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+        for reference in [
+            &report.data().executions[0].spec,
+            &report.data().executions[0].record,
+        ] {
+            let reference = reference.as_ref().expect("settled artefact");
+            assert_eq!(reference.error, Some(PersistError::Timeout));
+            assert!(reference.path.is_none());
+        }
+        assert!(matches!(
+            report.persistence(),
+            ReportPersistence::Failed {
+                error: PersistError::WorkerUnavailable,
+                ..
+            }
+        ));
+        while receiver.recv().await.is_some() {}
+        assert!(receiver.terminal().await.report_id.is_none());
+        drop(receiver);
+        drop(report);
+        drop(executor);
+        let held = budget.usage();
+        assert!(held.reserved > 0);
+        assert!(!directory.join("r00000/spec.json").exists());
+        drop(persistence);
+
+        // The thread's one credit bounds its transfer entry; no cleanup slot
+        // belongs to a job worker. Its lease and all allowances remain live.
+        wait_for_cleanup_counters(supervisor::Counters {
+            credits_in_use: baseline.credits_in_use + 1,
+            service_pending: baseline.service_pending + 1,
+            transferred_workers: baseline.transferred_workers + 1,
+            ..baseline
+        })
+        .await;
+        assert_eq!(budget.usage(), held);
+        assert!(owner.upgrade().is_some());
+
+        gate.release.notify_one();
+        write_gate.notify_one();
+        if rename {
+            gate.completed.notified().await;
+        }
+        wait_for_cleanup_counters(baseline).await;
+        assert_eq!(budget.usage().reserved, 0);
+        assert_eq!(budget.usage().retained, 0);
+        assert!(owner.upgrade().is_none());
+        if rename {
+            let bytes = std::fs::read(directory.join("r00000/spec.json")).unwrap();
+            assert!(cpforge::report::wire::read::read_json(&bytes).is_ok());
+        } else {
+            assert!(!directory.join("r00000/spec.json").exists());
+        }
+        assert!(!directory.join("r00000/record.json").exists());
+        assert!(!directory.join("r00000/cleanup.log").exists());
+        assert!(!directory.join("report.json").exists());
+    })
+    .await
+    .expect("persistence handover timed out");
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn stalled_persistence_handover_holds_queued_reservations_until_worker_returns() {
+    run_test(move || async move { persistence_handover(false).await });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn late_rename_handover_holds_credit_lease_and_metadata_until_worker_returns() {
+    run_test(move || async move { persistence_handover(true).await });
+}
+
 #[cfg(all(target_os = "linux", feature = "storage-test-hooks"))]
 #[path = "support/tiny_filesystem.rs"]
 mod tiny_filesystem;
