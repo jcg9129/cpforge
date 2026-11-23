@@ -878,10 +878,12 @@ mod execution {
                 warnings = true;
                 // Real hosts give no service bound (E §6.2): backpressure can
                 // end in `queue_full`, which the platform evidence run, not
-                // this stderr fixture, classifies.
+                // this stderr fixture, classifies. A loaded host can also cut
+                // a cleanup scan at its deadline (E §4.4), which is a warning.
                 assert!(
                     line.contains("progress lines dropped")
                         || line.contains("artefact publication failed")
+                        || line.contains("cleanup not verified")
                         || line.contains("further warnings dropped"),
                     "{line}"
                 );
