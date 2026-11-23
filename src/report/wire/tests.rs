@@ -851,3 +851,51 @@ fn darwin_cleanup_failures_use_contract_reason_tokens() {
         );
     }
 }
+
+#[test]
+fn transferred_creation_record_and_summary_golden_bytes() {
+    let execution = e::ExecutionRecord::Transferred;
+    let reference = e::ArtifactRef {
+        digest: Some([0; 32]),
+        path: Some("r00000/spec.json".into()),
+        error: None,
+    };
+    let bytes = encode_record(&Record {
+        platform: "unix",
+        spec: &reference,
+        execution: &execution,
+    })
+    .unwrap();
+    assert_eq!(bytes, include_bytes!("fixtures/transferred_record.json"));
+    let input = r::RunInput::transferred();
+    let summary = e::RunSummary {
+        observation: e::SummaryEvidence {
+            capture_files: [None, None],
+            not_started_timing: Some((Duration::from_micros(1), "polling")),
+        },
+        class: r::classify_run(&input),
+        record: Arc::new(execution),
+        deadline: Duration::from_micros(3),
+        notes: r::run_notes(&input),
+        cwd_overflow_bytes: None,
+    };
+    assert_eq!(
+        encode_run_summary(&summary).unwrap(),
+        include_bytes!("fixtures/transferred_summary.json")
+    );
+    let result = r::ExecutionResult {
+        coverage: r::Coverage::Transferred,
+        class: Some(summary.class.clone()),
+        invariant: None,
+    };
+    assert_eq!(r::execution_invariant(&result), None);
+    let counts = r::coverage_counts(&[result], &[], &[]);
+    assert!(counts.partial);
+    assert_eq!(counts.primary.planned, 1);
+    assert_eq!(counts.primary.transferred, 1);
+    assert_eq!(counts.primary.started, 0);
+    assert_eq!(counts.primary.not_started, 0);
+    assert_eq!(counts.primary.admitted, 0);
+    assert_eq!(counts.primary.invalid, 0);
+    assert_eq!(counts.by_class.cancelled, 1);
+}

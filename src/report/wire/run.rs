@@ -383,7 +383,7 @@ pub(super) fn summary(v: &e::RunSummary) -> Result<Value> {
                 },
                 root.notes.iter().copied().map(note).collect::<Vec<_>>(),
             ),
-            e::ExecutionRecord::NotStarted(_) => {
+            e::ExecutionRecord::NotStarted(_) | e::ExecutionRecord::Transferred => {
                 let (setup, observer) = v
                     .observation
                     .not_started_timing
@@ -391,12 +391,24 @@ pub(super) fn summary(v: &e::RunSummary) -> Result<Value> {
                 if !matches!(observer, "pidfd" | "kqueue" | "polling" | "process_handle") {
                     return Err(Error("invalid observer"));
                 }
+                let transferred = matches!(v.record.as_ref(), e::ExecutionRecord::Transferred);
                 (
-                    kind("not_started"),
+                    kind(if transferred {
+                        "transferred"
+                    } else {
+                        "not_started"
+                    }),
                     obj([
                         ("setup_us", dur(setup)?),
                         ("wall_us", Value::Null),
-                        ("observer", s(observer)),
+                        (
+                            "observer",
+                            if transferred {
+                                Value::Null
+                            } else {
+                                s(observer)
+                            },
+                        ),
                     ]),
                     stream(None, None)?,
                     stream(None, None)?,

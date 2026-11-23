@@ -109,6 +109,11 @@ fn classify_run_fixtures() {
             causes([C::StatusUnknown]),
         ),
         (
+            "cancelled_during_creation",
+            RunInput::transferred(),
+            RunClass::Cancelled,
+        ),
+        (
             "cancelled_before_start",
             RunInput::not_started(NotStartedReason::CancelledBeforeStart),
             RunClass::Cancelled,
@@ -999,6 +1004,16 @@ fn verdict_rows() -> Vec<(&'static str, ExecutionResult, CheckOutcome, TestVerdi
             },
         ),
         (
+            "cancelled_during_creation",
+            ExecutionResult {
+                coverage: Coverage::Transferred,
+                class: Some(RunClass::Cancelled),
+                invariant: None,
+            },
+            not_admitted(N::RunNotEligible),
+            TestVerdict::Cancelled,
+        ),
+        (
             "cancelled_before_start",
             not_started(NotStartedReason::CancelledBeforeStart),
             not_admitted(N::RunNotEligible),
@@ -1129,7 +1144,7 @@ fn test_verdict_fixtures() {
 #[test]
 fn test_verdict_is_total_and_matches_every_legal_table_combination() {
     let rows = verdict_rows();
-    let mut coverage = vec![Coverage::Started, Coverage::Admitted];
+    let mut coverage = vec![Coverage::Started, Coverage::Admitted, Coverage::Transferred];
     coverage.extend(start_reasons().map(|reason| Coverage::NotStarted { reason }));
     coverage.extend(
         [
@@ -2792,6 +2807,13 @@ fn supervisor_adapter_fixtures() {
     };
     let rows = [
         Row {
+            name: "cancelled_during_creation",
+            record: RunRecord::Transferred,
+            consumes_stdout: true,
+            policies: discard,
+            expected: Ok(RunClass::Cancelled),
+        },
+        Row {
             name: "cancelled_before_start",
             record: record(StartFailureKind::CancelledBeforeStart),
             consumes_stdout: true,
@@ -2967,6 +2989,7 @@ fn build_validation_adapter_fixtures() {
 fn wire_token_fixtures() {
     let coverage = [
         (Coverage::Started, "started"),
+        (Coverage::Transferred, "transferred"),
         (
             Coverage::NotStarted {
                 reason: NotStartedReason::Setup,

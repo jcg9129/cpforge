@@ -403,7 +403,7 @@ pub(super) fn aggregate(v: &e::Aggregate) -> Result<Value> {
 }
 macro_rules! counts_object {($v:expr; $($field:ident),+)=>{obj([$( (stringify!($field),n($v.$field)) ),+])};}
 fn cov(v: r::Cov) -> Value {
-    counts_object!(v;planned,started,not_started,skipped,admitted,invalid)
+    counts_object!(v;planned,started,not_started,transferred,skipped,admitted,invalid)
 }
 pub(super) fn counts(v: r::Counts) -> Value {
     obj([

@@ -49,8 +49,8 @@ Run workers are created **before** the child exists; cleanup needs no new
 thread. Worker-start failure is `NotStarted{Worker}`; OS spawn failure is
 `NotStarted{CreateFailed}`. Already-started workers that stall during rollback
 keep their reservations until they return (`tests/supervisor_linux.rs::failed_capture_setup_transfers_a_sink_stalled_on_close`).
-The CLI starts creation and persistence workers separately before run admission,
-rather than atomically reserving their two credits together.
+The CLI atomically reserves creation and persistence's two credits before
+starting either worker; failure leaves no credit reserved and refuses the job.
 
 | Thread | Scope | Created | Does |
 |---|---|---|---|
@@ -67,21 +67,25 @@ The implementation has 4 cleanup slots (at most 4 supervisor runs admitted
 concurrently; a connected pair consumes 2) and 32 thread credits, including one
 held permanently by cleanup. These credits cover creation, persistence, sink,
 forwarding and transcript workers. Control and output threads do not reserve
-credits, so this is not an implementation-wide 32-thread bound as §3.3 requests.
-Unix observers need no dedicated thread.
+credits; at most one each of `cpf-control`, `cpf-stdout` and `cpf-stderr`
+are outside the credits (§3.3). The process-wide maximum is 32 credited
+threads plus these three. Unix observers need no dedicated thread.
 
 **Creation and cancellation.** A single atomic orders commit against cancel
 (`src/supervisor/creation.rs::CreationState`). Before commit, cancellation can
 return `NotStarted{CancelledBeforeStart}` while setup is still blocked; no
 child is then created. Resources remain with the worker until it returns.
 
-After commit, cancellation publishes intent, but **the creation future awaits
-the worker reply** (`receive`, `Cancel::Committed`). Once spawn returns the
-child is registered, and the caller's `wait_root` performs cancellation cleanup.
-Dropping the future instead closes the reply receiver, so the worker drops and
-transfers the created root. Thus §3.4's requirement that cancellation return
-without waiting is not met after commit; the reactor and force-exit control
-thread remain responsive. R8 and R9 distinguish these guarantees.
+After commit, cancellation publishes intent and returns `Transferred`
+without awaiting the worker reply (`receive`, `Cancel::Committed`); a reply
+already delivered is still taken, and the caller's wait kills that root.
+Child existence is unknown at a `Transferred` return.
+Closing the reply receiver makes the worker drop and transfer any created
+root once creation returns; cleanup kills and reaps it. Connected pairs
+follow the same rule. The live engine persists the cancellation snapshot
+and report normally. Dropping the future uses the same ownership transfer,
+with only a best-effort in-memory ticket outcome. R8 and R9 cover blocked
+creation and force-exit responsiveness separately.
 
 Run-directory creation and recipe resolution stop at step boundaries.
 Post-build validation is awaited because it decides the build result.
@@ -205,10 +209,13 @@ not revoke it.
   ownership. Cleanup can publish a frozen `RootOutcome` through a ticket, but
   does not own a persistence queue or storage path. The engine enqueues records
   only after its executor returns; dropping that future does not arrange
-  persistence. This falls short of §§3.2 and 6.2. `cleanup.log` is currently
-  an initial summary written by `JobPersistence`, not an appended late-event
-  log. A stalled persistence worker retains its own credit, lease and
-  reservations in its detached thread; it is not registered with cleanup.
+  persistence (§§3.2 and 6.2). `cpf fsck` reports the schema of each run file present
+  (`valid schema 1`); it does not diagnose an absent `record.json`.
+  `cleanup.log` is the initial summary written by `JobPersistence` at record
+  time; events after persistence settles are not appended. A stalled
+  persistence worker retains its own credit, lease and
+  reservations in its detached thread; it is not registered with cleanup,
+  which falls short of §6.2's handover to the cleanup service.
 
 ## 2. Acceptance cases per OS
 
@@ -280,13 +287,13 @@ not the separate zero-valued owned-resource counter required by §10.2.
 | R1 | Immediate exit before, during and after observer registration | exit seen once and reaped once. pidfd valid for an unreaped child. kqueue `ESRCH`. | `tests/supervisor_linux.rs::immediate_exit_remains_observable_and_unreaped_until_wait`, `::exit_during_pidfd_registration_is_observed_and_reaped_once` † (Linux, paused registration); `src/supervisor/root_macos.rs::exit_before_registration_takes_esrch_path_and_retains_status` (macOS) | V | P (before/after; no deterministic during-kqueue-registration injection) | pending |
 | R2 | Forced observer failure → polling | Linux: injected `pidfd_open` `ENOSYS` (note) and `EMFILE` (`Register`). macOS: injected kqueue registration error. | `tests/supervisor_linux.rs::pidfd_open_enosys_and_emfile_fall_back_to_polling` † (Linux), `::exits_and_signals_with_both_observers`; `src/supervisor/root_macos.rs::registration_error_falls_back_and_finite_zero_reaps_back_off` (macOS) | V | V | n/a |
 | R3 | `waitid`/`wait4` errors incl. injected `ECHILD` | §3.1.6: stop pid use, `Unknown`, transfer keeps the partial outcome | `src/supervisor/root_unix.rs::wait_errors_stop_pid_use_and_transfer_preserves_partial_outcome` | V | V | n/a |
-| R4 | Worker pre-creation failure → `NotStarted{Worker}` | credit exhaustion and injected thread-start failure. Every reservation returned. | `tests/supervisor_linux.rs::capture_worker_admission_and_setup_failures_return_all_reservations`, `::creation_credit_failure_refuses_the_job_before_admission` † | V | V | pending |
+| R4 | Worker pre-creation failure → `NotStarted{Worker}` | credit exhaustion (including exactly one free at job start) and injected thread-start failure. Every reservation returned. | `tests/supervisor_linux.rs::capture_worker_admission_and_setup_failures_return_all_reservations`, `::job_credit_reservation_with_one_free_refuses_without_reserving` † | V | V | pending |
 | R5 | Limit failure in `pre_exec` (phase-tagged) vs other spawn failure (generic) | phase pipe | `tests/supervisor_linux.rs::phase_pipe_distinguishes_limit_installation_from_exec_failure` | V | n/a (no `pre_exec`, limits refused) | n/a |
 | R6 | kqueue success vs error receipt | `EV_RECEIPT` validation | `src/supervisor/sys/macos.rs::receipts_are_acknowledgements_and_exit_events_are_strictly_validated` | n/a | P (receipt/event parser; not live registration failure) | n/a |
 | R7 | `WAIT_FAILED` (injected) | — | none | n/a | n/a | pending |
-| R8 | Cancellation before commit, during OS creation, after commit | Pre-commit cancellation returns while blocked; after commit the future remains pending until spawn returns (§1.2) | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::cancel_inside_os_creation_finishes_spawn_then_kills_and_reaps` †, `::cancel_after_commit_finishes_creation_then_kills` †, `::cancellation_is_persistent_and_mid_run_cancellation_kills`; `tests/job_engine_linux.rs::cancel_during_executor_creation_keeps_the_runtime_responsive` †, `::cancel_before_run_mkdir_keeps_the_runtime_responsive` †, `::cancel_before_recipe_completion_keeps_the_runtime_responsive` †; `src/jobs/engine/tests.rs::cancellation_before_admission_skips_without_allocating`, `::cancellation_after_admission_produces_a_not_started_record` | P (after-commit non-waiting requirement unmet) | P (same) | P/E (before/after admission only) |
-| R9 | Cancellation and force exit during a blocked creation (injected) | Pre-commit cancellation returns. Registry primitive kills an existing root without waiting for gated creation; not end-to-end forced termination inside a blocked OS spawn | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::force_exit_registry_primitive_does_not_wait_for_blocked_creation` † (before and after commit), `::session_cancel_and_drop_between_root_commits_release_both_roots` † | P (primitive only; committed cancel waits) | P (same) | pending |
-| R10 | Drop of the public future in every §3.2 state | Creation, Running, Terminating, observable-exit and reaped-capture drop/transfer tested; no deterministic drop in Frozen/Finalized and no persisted dropped-run record | `tests/supervisor_linux.rs::drop_before_commit_never_creates_a_child` †, `::drop_after_commit_kills_and_transfers_the_created_child` †, `::dropped_owner_is_killed_and_reaped`, `::cancelled_wait_future_transfers_ownership`, `::dropped_exit_transfers_full_outcome_and_cloneable_ticket`, `::cancelled_wait_ticket_records_sigkill_even_before_first_poll`, `::dropping_a_terminating_future_preserves_the_trigger_and_notes_cancellation`, `::dropping_a_paused_wait_reconciles_an_already_exited_root`, `::dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_worker` | P (state coverage and persistence gaps) | P (same) | pending |
+| R8 | Cancellation before commit, during OS creation, after commit | Cancellation returns while the creation gate is held, including inside OS creation; cleanup kills and reaps after gate release (§1.2) | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::cancel_inside_os_creation_returns_then_cleanup_kills_and_reaps` †, `::cancel_after_commit_returns_before_creation_then_cleanup_reaps` †, `::cancellation_is_persistent_and_mid_run_cancellation_kills`; `tests/job_engine_linux.rs::cancel_during_executor_creation_keeps_the_runtime_responsive` †, `::cancel_inside_os_creation_persists_transferred_record_and_report` †, `::cancel_before_run_mkdir_keeps_the_runtime_responsive` †, `::cancel_before_recipe_completion_keeps_the_runtime_responsive` †; `src/jobs/engine/tests.rs::cancellation_before_admission_skips_without_allocating`, `::cancellation_after_admission_produces_a_not_started_record` | V | V | P/E (before/after admission only) |
+| R9 | Cancellation and force exit during a blocked creation (injected) | Cancellation returns during committed creation for roots and connected pairs. Registry primitive kills an existing root without waiting for gated creation; not end-to-end forced termination inside a blocked OS spawn | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::force_exit_registry_primitive_does_not_wait_for_blocked_creation` † (before and after commit), `::session_cancel_and_drop_between_root_commits_release_both_roots` †, `::session_cancel_inside_os_creation_returns_then_cleanup_reaps_both` † | P (force-exit primitive only) | P (same) | pending |
+| R10 | Drop of the public future in every §3.2 state | Creation, Running, Terminating, observable-exit and reaped-capture drop/transfer tested; no deterministic drop in Frozen/Finalized; dropped runs publish in-memory ticket outcomes (§3.2) | `tests/supervisor_linux.rs::drop_before_commit_never_creates_a_child` †, `::drop_after_commit_kills_and_transfers_the_created_child` †, `::dropped_owner_is_killed_and_reaped`, `::cancelled_wait_future_transfers_ownership`, `::dropped_exit_transfers_full_outcome_and_cloneable_ticket`, `::cancelled_wait_ticket_records_sigkill_even_before_first_poll`, `::dropping_a_terminating_future_preserves_the_trigger_and_notes_cancellation`, `::dropping_a_paused_wait_reconciles_an_already_exited_root`, `::dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_worker` | P (state coverage gaps) | P (same) | pending |
 | R11 | Root exit with descendants holding stdout / stderr / neither | = S1–S3 | = S1–S3 | V | V | pending |
 | R12 | Late `OutputBudget` after root exit is still a violation | budget counts observed bytes until EOF | `tests/supervisor_linux.rs::capture_late_budget_breach_after_root_exit_is_still_a_violation` | V | V | pending |
 | R13 | Timer and exit ready in one wakeup, both orders (injected delay) | exit check before enforcement | `tests/supervisor_linux.rs::timer_and_exit_ready_together_are_reconciled_in_both_selection_orders`; `src/supervisor/root_unix.rs::observed_wall_judgment_has_exact_grace_boundaries_and_keeps_enforcement` | V | V | pending |

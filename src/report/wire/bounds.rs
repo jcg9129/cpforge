@@ -508,7 +508,7 @@ fn every_arithmetic_row_in_both_native_forms() {
         row("hook", &max_hook(), 244, 244);
         row("capture", &max_capture(binary), 13311, 13311);
         row("build", &max_build(binary), 6664, 6664);
-        row("report header", &max_header(binary), 53595, 64 * 1024);
+        row("report header", &max_header(binary), 53645, 64 * 1024);
         row("Diagnostic", &max_diagnostic(binary), 1237, 1237);
         let mut refusal = super::refusal_value(&tests::refusal()).unwrap();
         let header = max_header(binary);
@@ -548,7 +548,7 @@ fn every_arithmetic_row_in_both_native_forms() {
                 ("diagnostics_dropped", n(u32::MAX)),
             ]),
         );
-        row("refusal", &refusal, 103916, 104 * 1024);
+        row("refusal", &refusal, 103966, 104 * 1024);
         let event = obj([
             ("event", s("run_finished")),
             ("seq", u(u64::MAX)),
@@ -617,7 +617,7 @@ fn ten_thousand_full_structural_entries_fit_reserved_report() {
     }
     bytes.push(b'}');
     let len = bytes.len() - start;
-    let table = 53595 + 11946 * 10_000;
+    let table = 53645 + 11946 * 10_000;
     eprintln!("10000 executions: serialized={len}, table={table}, reserved={bound}");
     assert!(len <= table);
     assert!(len <= bound);

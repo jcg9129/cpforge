@@ -607,9 +607,13 @@ pub fn run_with_config(
             command.request(target.as_ref().expect("target job"))
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let mut executor = crate::jobs::engine::SupervisorExecutor::start()
-            .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
-        let mut persistence = JobPersistence::for_execution(&ready)
+        let (mut executor, persistence_credit) =
+            crate::jobs::engine::SupervisorExecutor::start_job()
+                .map(|(executor, credit)| (executor, Some(credit)))
+                .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let persistence_credit = None;
+        let mut persistence = JobPersistence::for_execution(&ready, persistence_credit)
             .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
         let after_test = if hook_reason.is_none() && !hook_plans.is_empty() {
             crate::hooks::prepare(
@@ -1521,9 +1525,13 @@ pub(crate) fn switch_hooks(selected: &Selected, config: LoadedConfig) -> ExitCod
                 keep_going: true,
             };
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let mut executor = crate::jobs::engine::SupervisorExecutor::start()
-                .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
-            let mut persistence = JobPersistence::for_execution(&ready)
+            let (mut executor, persistence_credit) =
+                crate::jobs::engine::SupervisorExecutor::start_job()
+                    .map(|(executor, credit)| (executor, Some(credit)))
+                    .map_err(|e| Error::Infrastructure(format!("creation worker: {e:?}")))?;
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let persistence_credit = None;
+            let mut persistence = JobPersistence::for_execution(&ready, persistence_credit)
                 .map_err(|e| Error::Infrastructure(format!("persistence worker: {e}")))?;
             let engine = Engine::with_cancellation(ready, request, cancel.clone())
                 .map_err(|e| Error::Config(e.to_string()))?;

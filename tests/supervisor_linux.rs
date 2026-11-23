@@ -1,6 +1,8 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use cpf_fixture::harness::fixture_path;
+#[cfg(feature = "storage-test-hooks")]
+use cpforge::supervisor::CreationError;
 use cpforge::supervisor::{
     Aggregation, CancelToken, Cleanup, Completeness, DEADLINE_GRACE, LocalLimit, MetricKind,
     NotStarted, Note, ObserverKind, OutputSpec, ParentReader, ProgramSpec, ReadResult, RootOutcome,
@@ -1711,7 +1713,7 @@ async fn at_creation_gate<F: Future>(future: &mut std::pin::Pin<Box<F>>, gate: &
     .expect("creation did not reach its gate");
 }
 
-#[cfg(feature = "storage-test-hooks")]
+#[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 async fn assert_creation_pending<F: Future>(future: &mut std::pin::Pin<Box<F>>) {
     assert!(
         std::future::poll_fn(|cx| {
@@ -1757,7 +1759,10 @@ fn cancel_before_commit_returns_while_creation_is_blocked() {
         let result = tokio::time::timeout(allowance(1000), future.as_mut())
             .await
             .expect("pre-commit cancellation waited for creation");
-        assert!(matches!(result, Err(NotStarted::CancelledBeforeStart)));
+        assert!(matches!(
+            result,
+            Err(CreationError::NotStarted(NotStarted::CancelledBeforeStart))
+        ));
         drop(future);
         assert_eq!(children(), before);
         gate.0.release();
@@ -1777,7 +1782,7 @@ fn cancel_before_commit_returns_while_creation_is_blocked() {
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
-fn cancel_after_commit_finishes_creation_then_kills() {
+fn cancel_after_commit_returns_before_creation_then_cleanup_reaps() {
     run_test(async {
         use cpforge::supervisor::{Creator, create_root};
         let (baseline, before, fds, threads) = creation_baseline().await;
@@ -1788,47 +1793,35 @@ fn cancel_after_commit_finishes_creation_then_kills() {
             ..SpawnOptions::default()
         };
         let cancel = CancelToken::new();
+        let admission = admit().unwrap();
+        let ticket = admission.ticket();
         let mut future = Box::pin(create_root(
             &creator,
             spec(&["hold"]),
-            admit().unwrap(),
+            admission,
             &options,
             &cancel,
         ));
         at_creation_gate(&mut future, &gate).await;
         cancel.cancel();
-        assert_creation_pending(&mut future).await;
+        let result = tokio::time::timeout(allowance(100), future.as_mut())
+            .await
+            .expect("committed cancellation waited for creation");
+        assert!(matches!(result, Err(CreationError::Transferred)));
         assert_eq!(children(), before);
+        assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
+        assert_eq!(debug_counters().credits_in_use, baseline.credits_in_use + 1);
+        drop(future);
         gate.0.release();
-        let root = tokio::time::timeout(allowance(1000), future.as_mut())
+        let outcome = tokio::time::timeout(allowance(1000), ticket.outcome())
             .await
             .unwrap()
-            .unwrap();
-        let pid = root.pid();
-        let ticket = root.ticket();
-        drop(future);
-        let outcome = tokio::time::timeout(
-            allowance(1000),
-            wait_root_controlled(
-                root,
-                RunControls {
-                    cancel,
-                    ..controls(Duration::from_secs(5))
-                },
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.stop_trigger, Some(StopTrigger::Cancelled));
-        assert!(matches!(
-            outcome.status,
-            Termination::Signalled { signal: 9, .. }
-        ));
-        assert!(process(pid).is_none());
-        assert!(ticket.outcome().await.is_none());
+            .expect("created child must transfer");
+        killed(&outcome, StopTrigger::Cancelled);
+        assert!(outcome.notes.contains(&Note::Transferred));
         drop(creator);
         quiescent().await;
-        assert_eq!(children(), before);
+        assert_eq!(children(), before, "cleanup leaked a child or zombie");
         settled(fds, threads).await;
         assert_eq!(debug_counters(), baseline);
     });
@@ -1971,7 +1964,7 @@ fn session_cancel_and_drop_between_root_commits_release_both_roots() {
     run_test(async {
         use cpforge::supervisor::{
             Creator,
-            session::{self, Fact, RunRecord, SessionSpec, StartFailureKind},
+            session::{self, Fact, RunRecord, SessionSpec},
         };
         for after_commit in [false, true] {
             for drop_future in [false, true] {
@@ -1992,13 +1985,9 @@ fn session_cancel_and_drop_between_root_commits_release_both_roots() {
                     gate.0.release();
                 } else {
                     cancel.cancel();
-                    // S has committed, so its record must be retained while
-                    // the creation worker finishes the pair's request.
-                    assert_creation_pending(&mut future).await;
-                    gate.0.release();
-                    let outcome = tokio::time::timeout(allowance(1000), future.as_mut())
+                    let outcome = tokio::time::timeout(allowance(100), future.as_mut())
                         .await
-                        .unwrap();
+                        .expect("session cancellation waited for creation");
                     drop(future);
                     assert!(
                         outcome
@@ -2007,33 +1996,11 @@ fn session_cancel_and_drop_between_root_commits_release_both_roots() {
                             .iter()
                             .any(|e| matches!(e.fact, Fact::CancelRequested))
                     );
-                    assert!(
-                        !outcome
-                            .record
-                            .events()
-                            .iter()
-                            .any(|e| matches!(e.fact, Fact::Infrastructure { .. }))
-                    );
-                    for (index, run) in [outcome.solution, outcome.interactor]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        match run {
-                            RunRecord::NotStarted(reason) => {
-                                assert_eq!(index, 1);
-                                assert!(!after_commit);
-                                assert_eq!(reason.kind, StartFailureKind::CancelledBeforeStart);
-                            }
-                            RunRecord::Started(outcome) => {
-                                assert!(index == 0 || after_commit);
-                                assert_eq!(outcome.stop_trigger, Some(StopTrigger::Cancelled));
-                                assert!(matches!(
-                                    outcome.status,
-                                    Termination::Signalled { signal: 9, .. }
-                                ));
-                            }
-                        }
-                    }
+                    assert!(matches!(outcome.solution, RunRecord::Transferred));
+                    assert!(matches!(outcome.interactor, RunRecord::Transferred));
+                    // Returned while the worker still owns the created S.
+                    assert!(peers.iter().all(|&pid| process(pid).is_some()));
+                    gate.0.release();
                 }
                 drop(creator);
                 quiescent().await;
@@ -2050,22 +2017,28 @@ fn session_cancel_and_drop_between_root_commits_release_both_roots() {
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
-fn creation_credit_failure_refuses_the_job_before_admission() {
+fn job_credit_reservation_with_one_free_refuses_without_reserving() {
     run_test(async {
         use cpforge::jobs::engine::SupervisorExecutor;
         let (baseline, before, fds, threads) = creation_baseline().await;
+        // Leave exactly one of the 32 credits free.
         let held = global_bounds()
             .unwrap()
             .thread_credits
-            .try_reserve(31)
+            .try_reserve(31 - baseline.credits_in_use)
             .unwrap();
         let occupied = debug_counters();
+        assert_eq!(occupied.credits_in_use, 31);
         assert!(matches!(
-            SupervisorExecutor::start(),
+            SupervisorExecutor::start_job(),
             Err(NotStarted::Worker)
         ));
         assert_eq!(debug_counters(), occupied);
         assert_eq!(children(), before);
+        // The refused job left its one free credit unreserved.
+        let last = global_bounds().unwrap().thread_credits.try_reserve(1);
+        assert!(last.is_some());
+        drop(last);
         drop(held);
         quiescent().await;
         settled(fds, threads).await;
@@ -2114,7 +2087,7 @@ fn pipe_creation_failures_release_partial_setup_without_starting_children() {
                 .unwrap_err();
                 drop(creator);
                 assert!(
-                    matches!(error, NotStarted::Setup(ref e) if e.raw_os_error() == Some(libc::EMFILE)),
+                    matches!(error, CreationError::NotStarted(NotStarted::Setup(ref e)) if e.raw_os_error() == Some(libc::EMFILE)),
                     "stdin={forward_stdin}, pipe={k}: {error:?}"
                 );
                 assert!(ticket.outcome().await.is_none());
@@ -3452,7 +3425,7 @@ fn pidfd_open_enosys_and_emfile_fall_back_to_polling() {
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
-fn cancel_inside_os_creation_finishes_spawn_then_kills_and_reaps() {
+fn cancel_inside_os_creation_returns_then_cleanup_kills_and_reaps() {
     run_test(async {
         use cpforge::supervisor::{CreationGate, Creator, create_root};
         let (baseline, before, fds, threads) = creation_baseline().await;
@@ -3463,10 +3436,12 @@ fn cancel_inside_os_creation_finishes_spawn_then_kills_and_reaps() {
             ..SpawnOptions::default()
         };
         let cancel = CancelToken::new();
+        let admission = admit().unwrap();
+        let ticket = admission.ticket();
         let mut future = Box::pin(create_root(
             &creator,
             spec(&["hold"]),
-            admit().unwrap(),
+            admission,
             &options,
             &cancel,
         ));
@@ -3477,32 +3452,23 @@ fn cancel_inside_os_creation_finishes_spawn_then_kills_and_reaps() {
         assert_eq!(created.len(), 1);
         let pid = created[0];
         cancel.cancel();
-        assert_creation_pending(&mut future).await;
+        let result = tokio::time::timeout(allowance(100), future.as_mut())
+            .await
+            .expect("cancellation waited for OS creation");
+        assert!(matches!(result, Err(CreationError::Transferred)));
         assert!(process(pid).is_some());
+        assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 1);
+        assert_eq!(debug_counters().credits_in_use, baseline.credits_in_use + 1);
+        drop(future);
         gate.0.release();
-        let root = tokio::time::timeout(allowance(1000), future.as_mut())
+        let outcome = tokio::time::timeout(allowance(1000), ticket.outcome())
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(root.pid(), pid);
-        let ticket = root.ticket();
-        drop(future);
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(2) + allowance(100),
-            wait_root_controlled(
-                root,
-                RunControls {
-                    cancel,
-                    ..controls(Duration::from_secs(5))
-                },
-            ),
-        )
-        .await
-        .unwrap();
+            .expect("child must transfer to cleanup");
         killed(&outcome, StopTrigger::Cancelled);
         assert!(outcome.errors.is_empty(), "{outcome:?}");
         assert!(process(pid).is_none());
-        assert!(ticket.outcome().await.is_none());
+        assert!(outcome.notes.contains(&Note::Transferred));
         drop(creator);
         drop(options);
         drop(gate);
@@ -3556,5 +3522,48 @@ fn root_exit_to_cleanup_result_meets_the_cleanup_deadline() {
                 );
             }
         }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn session_cancel_inside_os_creation_returns_then_cleanup_reaps_both() {
+    run_test(async {
+        use cpforge::supervisor::{
+            CreationGate, Creator,
+            session::{self, RunRecord, SessionSpec},
+        };
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Arc::new(Creator::start().unwrap());
+        let gate = CreationRelease(Arc::new(CreationGate::during_creation().unwrap()));
+        let mut session =
+            SessionSpec::new(spec(&["hold"]), spec(&["hold"]), Duration::from_secs(5));
+        session.creator = Some(creator.clone());
+        session.spawn_options[1].creation_gate = Some(gate.0.clone());
+        let cancel = session.cancel.clone();
+        let mut future = Box::pin(session::run_session(session));
+        at_creation_gate(&mut future, &gate).await;
+        let peers: Vec<_> = children().difference(&before).copied().collect();
+        assert_eq!(peers.len(), 2);
+        cancel.cancel();
+        let outcome = tokio::time::timeout(allowance(100), future.as_mut())
+            .await
+            .expect("session cancellation waited for OS creation");
+        assert!(matches!(outcome.solution, RunRecord::Transferred));
+        assert!(matches!(outcome.interactor, RunRecord::Transferred));
+        assert_eq!(debug_counters().slots_in_use, baseline.slots_in_use + 2);
+        assert_eq!(debug_counters().credits_in_use, baseline.credits_in_use + 1);
+        assert!(peers.iter().all(|&pid| process(pid).is_some()));
+        drop(future);
+        gate.0.release();
+        drop(creator);
+        drop(gate);
+        quiescent().await;
+        for pid in peers {
+            assert!(process(pid).is_none());
+        }
+        assert_eq!(children(), before, "session leaked a child or zombie");
+        settled(fds, threads).await;
+        assert_eq!(debug_counters(), baseline);
     });
 }

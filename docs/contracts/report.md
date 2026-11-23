@@ -104,6 +104,7 @@ outcome:
 | Coverage | Meaning | Record |
 |---|---|---|
 | `started` | E §6.1 `Execution::Started` | yes |
+| `transferred` | cancelled during committed creation; whether a child exists is unknown at return (E §3.4) | yes (unobserved captures) |
 | `not_started{reason}` | admitted, `Execution::NotStarted{reason}` (E §6.1 reasons, including `cancelled_before_start`) | yes (empty captures) |
 | `skipped{reason}` | never admitted: no run id, no record | no |
 | `admitted` | admitted (run id allocated) but no record was ever produced; only reachable through an internal failure (§2) | no |
@@ -121,7 +122,7 @@ outcome:
 - **Partial**: `result.partial = true` iff some **primary** execution is not
   `started` (`admitted` included: it is not shown to have started). Hook coverage of a `test` job never makes it partial.
 - Reconciliation, per population (primary, hooks): `planned = started +
-  not_started + skipped + admitted`; `planned_primary + planned_hooks` equals C §8.2's
+  not_started + transferred + skipped + admitted`; `planned_primary + planned_hooks` equals C §8.2's
   planned-run count. Hooks excluded by trust, the switch or the depth guard
   (C §8.3) are not planned; they appear in `hooks[]` as `not_planned`.
 
@@ -132,7 +133,7 @@ For an execution with a record, first matching row:
 | # | Condition | Class |
 |---|---|---|
 | 1 | E §6.4 infrastructure evidence: `NotStarted` other than `CancelledBeforeStart`; any `SupervisorError`; cleanup `Incomplete`; status `Unknown`; any **stdout** loss of kind `WriteError`, `WriteStalled`, `PipeRead`, `NoEofBeforeDrainDeadline`, `ForwardIncomplete` | `infrastructure{causes}` |
-| 2 | `NotStarted{CancelledBeforeStart}`, or `stop_trigger = Cancelled` | `cancelled` |
+| 2 | `Transferred`, `NotStarted{CancelledBeforeStart}`, or `stop_trigger = Cancelled` | `cancelled` |
 | 3 | violation `WallDeadline` (E §6.3) | `wall_deadline` |
 | 4 | `stop_trigger = OutputBudget(_)` (a `Kill` breach), or a breach (`exceeded_at` set, or `BudgetDiscard`) on a **consumed stream** | `output_budget{stream, streams}` |
 | 5 | `Signalled{signal, core_dumped}` | `signal{signal}` |
@@ -521,7 +522,8 @@ List of n items: 2 + Σ items + (n − 1).
   nothing was dropped); which entries are kept is stated per list.
 - Within schema 1 a writer may add members. Removing or renaming a member,
   changing a type or meaning, or adding an enum value is a new schema
-  version. A reader meeting a newer `schema` uses only `schema`,
+  version. Before the first release, schema 1 is still being defined and
+  may change in place. A reader meeting a newer `schema` uses only `schema`,
   `document`, `platform` (S §9: raw display only); cpf never prunes a job
   directory whose `report.json` is newer.
 
@@ -550,10 +552,10 @@ to check the arithmetic. Sizes in bytes.
 | hook entry | name 66, trigger, `u32`, outcome (kind + one token) | 244 | |
 | capture (header) | check 195 + 2 × (16 × `nsum(128)` + dropped) + counts + `u64` + digest + manifest `rel` 28 | 13 311 | |
 | build (header) | max of: `succeeded` + 16 artifacts × 399 (6 574); `failed{missing_output}` with 16 names × 399 and no artifacts (6 664) | 6 664 | |
-| **report header** | job 225, workspace `nsum(1024)` 2 191, problem 509, target 1 587, capture 13 311, fingerprints, build 6 664, result 1 734, fact 453, 32 × hook 244, 24 × warning 741, events, timing, persistence 448, scalars, keys | 53 595 | **64 KiB** |
+| **report header** | job 225, workspace `nsum(1024)` 2 191, problem 509, target 1 587, capture 13 311, fingerprints, build 6 664, result 1 784, fact 453, 32 × hook 244, 24 × warning 741, events, timing, persistence 448, scalars, keys | 53 645 | **64 KiB** |
 | **report** | header + Σ per planned execution (entry 8 851 + test 2 868 + aggregate 224 + 3 commas = 11 946) | | **64 KiB + 12 KiB × N** |
 | `Diagnostic` | file `nsum(256)` 655, key text, 2 × `u32`, message text | 1 237 | |
-| **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 916 | **104 KiB** |
+| **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 966 | **104 KiB** |
 | **event line** | max of: `run_finished` (summary + 99) 6 873; `output_chunk` (4 096 bytes → 5 464 base64 + 157) 5 621; others ≤ 400 | 6 873 | **7 KiB** (final envelope: report bound + 28, 29 with the line feed) |
 
 N is the number of planned executions (≤ 10 000, C §8.2); the test and
@@ -679,7 +681,7 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 | `index` | `u32` | plan index |
 | `stage` | `token` | `build`, `run`, `command`, `hook` |
 | `role` | object | `{"kind":"build"}`, `{"kind":"test","test":ident}`, `{"kind":"command","test":ident?,"iteration":u32}`, `{"kind":"raw"}`, `{"kind":"hook","name":ident,"trigger":token}` |
-| `coverage` | object | `{"kind":"started"}`, `{"kind":"not_started","reason":NotStarted}`, `{"kind":"skipped","reason":token}` |
+| `coverage` | object | `{"kind":"started"}`, `{"kind":"transferred"}`, `{"kind":"not_started","reason":NotStarted}`, `{"kind":"skipped","reason":token}` |
 | `run` | `rid?` | `null` iff `skipped` |
 | `program` | `nsum(256)?` | resolved executable (E §2); `null` iff `skipped` or interrupted preparation (below) |
 | `spec` | `Ref?` | `null` iff `skipped` or interrupted preparation (below) |
@@ -690,6 +692,17 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 
 - `coverage` also has the variant `{"kind":"admitted"}` (§2.1), which
   always comes with `invariant: "record_missing"`.
+- **Creation cancellation**: `transferred` is a finalized cancellation
+  snapshot (E §3.4), with class `cancelled`, non-null `run`, `program`,
+  `spec`, `record` and `summary`, and no invariant. The job persists it
+  normally. Its record and summary execution are `{"kind":"transferred"}`;
+  status, creation success and cleanup completion are unknown. Stream
+  counters are unobserved (`complete: false`, `file: null`); measurements,
+  limits and supervisor errors are empty. `timing.setup_us` is elapsed time
+  from admission to the snapshot; total creation duration is unknown.
+  `wall_us` and `observer` are null because creation has not returned. The later cleanup ticket outcome
+  does not rewrite the record or report. `Cov.transferred` counts this
+  coverage separately; it makes a primary population partial.
 - **Interrupted preparation**: when cancellation stops run preparation on
   the creation thread (E §3.4) before run-directory creation and recipe
   resolution complete, the execution is
@@ -716,8 +729,8 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 | Member | Type | Content |
 |---|---|---|
 | `class` | object | `{"kind":"exited_zero"}`, `{"kind":"nonzero_exit","code":code}`, `{"kind":"signal","signal":i32,"name":token?,"core_dumped":bool}`, `{"kind":"wall_deadline"}`, `{"kind":"output_budget","stream":token,"streams":[token; ≤2]}`, `{"kind":"cancelled"}`, `{"kind":"infrastructure","causes":[Cause; 8],"causes_dropped":u32}` |
-| `execution` | object | `{"kind":"not_started"}` or `{"kind":"started","status":Status,"stop_trigger":Trigger?,"enforced_at_us":dur?,"violations":[Violation; ≤3],"cleanup":Cleanup,"kill_attempts":u32}` |
-| `timing` | object | `{setup_us: dur, wall_us: dur?, observer: token}` (`pidfd`, `kqueue`, `polling`, `process_handle`) |
+| `execution` | object | `{"kind":"not_started"}`, `{"kind":"transferred"}` or `{"kind":"started","status":Status,"stop_trigger":Trigger?,"enforced_at_us":dur?,"violations":[Violation; ≤3],"cleanup":Cleanup,"kill_attempts":u32}` |
+| `timing` | object | `{setup_us: dur, wall_us: dur?, observer: token?}` (`pidfd`, `kqueue`, `polling`, `process_handle`; null for `transferred`) |
 | `deadline_us` | `dur` | |
 | `stdout`, `stderr` | object | `{observed: u64, stored: u64, forwarded: u64, eof: bool, complete: bool, exceeded_at: u64?, losses: [Loss; ≤6], file: rel? (≤ 17)}` |
 | `measurements` | `[Measurement; ≤5]` | one per requested kind |
@@ -808,8 +821,8 @@ internal: {invariant: token, locus: Locus, message: text}?}`.
   process status differs from it only by a later delivery failure (row 4),
   force exit (row 2) or an internal error caught after F (row 3).
 - `Counts`: `{primary: Cov, hooks: Cov, tests: u32, by_verdict: ByVerdict,
-  by_class: ByClass}`. `Cov` = `{planned, started, not_started, skipped,
-  admitted, invalid}` (`u32`); `planned = started + not_started + skipped +
+  by_class: ByClass}`. `Cov` = `{planned, started, not_started, transferred, skipped,
+  admitted, invalid}` (`u32`); `planned = started + not_started + transferred + skipped +
   admitted` counts observed coverage (§2.1), and `invalid` (not part of that sum) counts the
   executions of the population with a non-null `invariant`. `ByVerdict` has a `u32` member for every §2.5
   token (`passed`, `wrong_answer`, `unchecked`, `checker_failed`,

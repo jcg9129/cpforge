@@ -60,6 +60,7 @@ tokens! {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
+    Transferred,
     Started,
     NotStarted { reason: NotStartedReason },
     Skipped { reason: SkipReason },
@@ -69,6 +70,7 @@ impl Coverage {
     pub const fn wire_token(self) -> &'static str {
         match self {
             Self::Started => "started",
+            Self::Transferred => "transferred",
             Self::NotStarted { .. } => "not_started",
             Self::Skipped { .. } => "skipped",
             Self::Admitted => "admitted",
@@ -77,11 +79,13 @@ impl Coverage {
     pub const fn is_cancelled(self) -> bool {
         matches!(
             self,
-            Self::Skipped {
-                reason: SkipReason::Cancelled
-            } | Self::NotStarted {
-                reason: NotStartedReason::CancelledBeforeStart
-            }
+            Self::Transferred
+                | Self::Skipped {
+                    reason: SkipReason::Cancelled
+                }
+                | Self::NotStarted {
+                    reason: NotStartedReason::CancelledBeforeStart
+                }
         )
     }
 }
@@ -250,12 +254,14 @@ impl StreamEvidence {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionEvidence {
+    Transferred,
     NotStarted(NotStartedReason),
     Started(Termination),
 }
 impl ExecutionEvidence {
     pub const fn wire_token(self) -> &'static str {
         match self {
+            Self::Transferred => "transferred",
             Self::NotStarted(_) => "not_started",
             Self::Started(_) => "started",
         }
@@ -323,10 +329,21 @@ impl RunInput {
             supervisor::session::RunRecord::Started(root) => {
                 Self::from_root(root, consumes_stdout, policies)
             }
+            supervisor::session::RunRecord::Transferred => Self::transferred(),
             supervisor::session::RunRecord::NotStarted(reason) => {
                 Self::not_started(reason.kind.try_into()?)
             }
         })
+    }
+    pub fn transferred() -> Self {
+        Self {
+            execution: ExecutionEvidence::Transferred,
+            cleanup: Cleanup::Unverified {
+                reason: supervisor::UnverifiedReason::RootNotObserved,
+            },
+            stop_trigger: Some(StopTrigger::Cancelled),
+            ..Self::not_started(NotStartedReason::CancelledBeforeStart)
+        }
     }
     pub fn not_started(reason: NotStartedReason) -> Self {
         Self {
@@ -640,6 +657,7 @@ pub struct Cov {
     pub planned: u32,
     pub started: u32,
     pub not_started: u32,
+    pub transferred: u32,
     pub skipped: u32,
     pub admitted: u32,
     pub invalid: u32,

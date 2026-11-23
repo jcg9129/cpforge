@@ -136,16 +136,20 @@ impl JobPersistence {
     /// Reserves the worker's thread credit and creates the worker. Failure
     /// returns the credit; the job must not start (execution contract §3.3).
     pub fn new(ready: &super::ReadyJob<'_>) -> std::io::Result<Self> {
-        Self::start(ready.owner.clone(), DEADLINE, None)
+        Self::start(ready.owner.clone(), DEADLINE, None, None)
     }
 
-    pub(crate) fn for_execution(ready: &super::ReadyExecutionJob<'_>) -> std::io::Result<Self> {
-        Self::start(ready.owner.clone(), DEADLINE, None)
+    /// Uses the credit reserved together with the creation thread's, if given.
+    pub(crate) fn for_execution(
+        ready: &super::ReadyExecutionJob<'_>,
+        credit: Option<crate::supervisor::Credits>,
+    ) -> std::io::Result<Self> {
+        Self::start(ready.owner.clone(), DEADLINE, None, credit)
     }
 
     #[cfg(test)]
     pub(crate) fn stalled(ready: &super::ReadyJob<'_>, bound: Duration, gate: Arc<Notify>) -> Self {
-        Self::start(ready.owner.clone(), bound, Some(gate)).expect("persistence worker")
+        Self::start(ready.owner.clone(), bound, Some(gate), None).expect("persistence worker")
     }
 
     #[cfg(test)]
@@ -155,7 +159,7 @@ impl JobPersistence {
         gate: Arc<Notify>,
     ) -> Self {
         let mut service =
-            Self::start(ready.owner.clone(), bound, None).expect("persistence worker");
+            Self::start(ready.owner.clone(), bound, None, None).expect("persistence worker");
         service.report_gate = Some(gate);
         service
     }
@@ -166,17 +170,25 @@ impl JobPersistence {
         bound: Duration,
         gate: Arc<RenameGate>,
     ) -> Self {
-        let mut service = Self::start(ready.owner.clone(), bound, None).unwrap();
+        let mut service = Self::start(ready.owner.clone(), bound, None, None).unwrap();
         service.rename_gate = Some(gate);
         service
     }
 
-    fn start(owner: JobOwner, bound: Duration, gate: Option<Arc<Notify>>) -> std::io::Result<Self> {
+    fn start(
+        owner: JobOwner,
+        bound: Duration,
+        gate: Option<Arc<Notify>>,
+        credit: Option<crate::supervisor::Credits>,
+    ) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<Write>(QUEUE);
         let unavailable = Arc::new(AtomicBool::new(false));
         let stopped = unavailable.clone();
         let worker_owner = owner.clone();
-        let credit = crate::supervisor::persistence_credit()?;
+        let credit = match credit {
+            Some(credit) => credit,
+            None => crate::supervisor::persistence_credit()?,
+        };
         std::thread::Builder::new()
             .name("cpf-persistence".into())
             .spawn(move || {
@@ -210,7 +222,7 @@ impl JobPersistence {
                     let milestones = match &write.content {
                         Content::Record { record, .. } => match record.as_ref() {
                             ExecutionRecord::Started(root) => root.milestones.clone(),
-                            ExecutionRecord::NotStarted(_) => None,
+                            ExecutionRecord::NotStarted(_) | ExecutionRecord::Transferred => None,
                         },
                         _ => None,
                     };
@@ -508,6 +520,9 @@ impl Persistence for JobPersistence {
                     root.termination.cleanup, root.kill_attempts
                 ),
                 ExecutionRecord::NotStarted(_) => "record finalized; process not started\n".into(),
+                ExecutionRecord::Transferred => {
+                    "record finalized; cancelled during creation; cleanup pending\n".into()
+                }
             };
             let mut metadata = if artifact.writable {
                 artifact.metadata.take()

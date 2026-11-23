@@ -49,7 +49,8 @@ pub fn classify_run(record: &RunInput) -> RunClass {
     }
     if matches!(
         record.execution,
-        ExecutionEvidence::NotStarted(NotStartedReason::CancelledBeforeStart)
+        ExecutionEvidence::Transferred
+            | ExecutionEvidence::NotStarted(NotStartedReason::CancelledBeforeStart)
     ) || record.stop_trigger == Some(StopTrigger::Cancelled)
     {
         return RunClass::Cancelled;
@@ -82,7 +83,9 @@ pub fn classify_run(record: &RunInput) -> RunClass {
         ExecutionEvidence::Started(Termination::Exited { code: 0 }) => RunClass::ExitedZero,
         ExecutionEvidence::Started(Termination::Exited { code }) => RunClass::NonzeroExit { code },
         // These cases were consumed by rows 1 and 2.
-        ExecutionEvidence::Started(Termination::Unknown) | ExecutionEvidence::NotStarted(_) => {
+        ExecutionEvidence::Started(Termination::Unknown)
+        | ExecutionEvidence::NotStarted(_)
+        | ExecutionEvidence::Transferred => {
             unreachable!("earlier classification row")
         }
     }
@@ -163,10 +166,11 @@ pub fn execution_invariant(execution: &ExecutionResult) -> Option<Invariant> {
     match (execution.coverage, execution.class.as_ref()) {
         (Coverage::Admitted, _) => Some(Invariant::RecordMissing),
         (Coverage::Skipped { .. }, None) => None,
-        (Coverage::Started | Coverage::NotStarted { .. }, None) => {
+        (Coverage::Started | Coverage::NotStarted { .. } | Coverage::Transferred, None) => {
             Some(Invariant::SummaryUnderivable)
         }
         (Coverage::Started, Some(class)) if valid_class(class) => None,
+        (Coverage::Transferred, Some(RunClass::Cancelled)) => None,
         (
             Coverage::NotStarted {
                 reason: NotStartedReason::CancelledBeforeStart,
@@ -627,6 +631,7 @@ pub fn coverage_counts(
             counts.planned += 1;
             match execution.coverage {
                 Coverage::Started => counts.started += 1,
+                Coverage::Transferred => counts.transferred += 1,
                 Coverage::NotStarted { .. } => counts.not_started += 1,
                 Coverage::Skipped { .. } => counts.skipped += 1,
                 Coverage::Admitted => counts.admitted += 1,

@@ -221,68 +221,111 @@ fn cpp_cancel_after_the_running_program_announces_readiness() {
 #[cfg(feature = "storage-test-hooks")]
 #[test]
 fn cancel_during_executor_creation_keeps_the_runtime_responsive() {
-    run_test(move || async move {
-        use cpforge::supervisor::CreationGate;
-        use std::sync::Arc;
+    run_test(move || async move { cancel_gated_creation(false).await });
+}
 
-        struct Release(Arc<CreationGate>);
-        impl Drop for Release {
-            fn drop(&mut self) {
-                self.0.release();
-            }
-        }
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cancel_inside_os_creation_persists_transferred_record_and_report() {
+    run_test(move || async move { cancel_gated_creation(true).await });
+}
 
-        fn allowance(milliseconds: u64) -> Duration {
-            Duration::from_millis(milliseconds * allowance_scale())
+#[cfg(feature = "storage-test-hooks")]
+async fn cancel_gated_creation(during_creation: bool) {
+    use cpforge::supervisor::CreationGate;
+    use std::sync::Arc;
+
+    struct Release(Arc<CreationGate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
         }
-        let fixture = Fixture::new();
-        let ready = ready(&fixture, "int main() { return 0; }\n");
-        let engine = Engine::new(
-            ready,
-            JobRequest::Test {
-                comparator: Comparator::Tokens,
-            },
-        )
-        .unwrap();
-        let cancel = engine.cancellation();
-        let gate = Release(Arc::new(CreationGate::before_commit()));
-        let mut executor = SupervisorExecutor::start().unwrap();
-        executor.options.creation_gate = Some(gate.0.clone());
-        let mut persistence = MemoryPersistence::default();
-        let mut hooks = NoHooks;
-        let mut future = Box::pin(engine.run(&mut executor, &mut persistence, &mut hooks));
-        tokio::time::timeout(allowance(1000), async {
-            tokio::select! {
-                _ = gate.0.entered() => {},
-                _ = future.as_mut() => panic!("job finished before gated creation"),
-            }
-        })
+    }
+
+    fn allowance(milliseconds: u64) -> Duration {
+        Duration::from_millis(milliseconds * allowance_scale())
+    }
+    let fixture = Fixture::new();
+    let ready = ready(&fixture, "int main() { return 0; }\n");
+    let directory = ready.dir.clone();
+    let mut persistence = cpforge::jobs::persist::JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap();
+    let cancel = engine.cancellation();
+    let gate = Release(Arc::new(if during_creation {
+        CreationGate::during_creation().unwrap()
+    } else {
+        CreationGate::before_commit()
+    }));
+    let mut executor = SupervisorExecutor::start().unwrap();
+    executor.options.creation_gate = Some(gate.0.clone());
+    let mut hooks = NoHooks;
+    let mut future = Box::pin(engine.run(&mut executor, &mut persistence, &mut hooks));
+    tokio::time::timeout(allowance(1000), async {
+        tokio::select! {
+            _ = gate.0.entered() => {},
+            _ = future.as_mut() => panic!("job finished before gated creation"),
+        }
+    })
+    .await
+    .expect("creation blocked the runtime");
+    cancel.request_cancel(CancelSource::Api);
+    let report = tokio::time::timeout(allowance(1000), future.as_mut())
         .await
-        .expect("creation blocked the runtime");
-        cancel.request_cancel(CancelSource::Api);
-        let report = tokio::time::timeout(allowance(1000), future.as_mut())
-            .await
-            .expect("job cancellation waited for uncommitted creation");
-        drop(future);
-        assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
-        assert_eq!(report.data().result.counts.primary.started, 0);
-        gate.0.release();
-        drop(executor);
-        tokio::time::timeout(allowance(1000), async {
-            loop {
-                let counters = supervisor::debug_counters();
-                if counters.slots_in_use == 0
-                    && counters.service_pending == 0
-                    && counters.credits_in_use == 1
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        .expect("job cancellation waited for gated creation");
+    drop(future);
+    assert_eq!(report.data().result.verdict, JobVerdict::Cancelled);
+    assert_eq!(report.data().result.counts.primary.started, 0);
+    let execution = &report.data().executions[0];
+    let record_path = execution.record.as_ref().unwrap().path.as_ref().unwrap();
+    let persisted_record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join(record_path)).unwrap()).unwrap();
+    let persisted_report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("report.json")).unwrap()).unwrap();
+    assert_eq!(persisted_report["result"]["verdict"], "cancelled");
+    if during_creation {
+        assert_eq!(
+            execution.result.coverage,
+            cpforge::report::Coverage::Transferred
+        );
+        assert!(execution.result.invariant.is_none());
+        assert_eq!(report.data().result.counts.primary.transferred, 1);
+        assert_eq!(persisted_record["execution"]["kind"], "transferred");
+        assert!(persisted_record["execution"].get("status").is_none());
+        assert_eq!(
+            persisted_report["executions"][0]["coverage"]["kind"],
+            "transferred"
+        );
+        assert_eq!(
+            persisted_report["executions"][0]["summary"]["class"]["kind"],
+            "cancelled"
+        );
+        assert!(persisted_report["executions"][0]["summary"]["timing"]["observer"].is_null());
+    } else {
+        assert_eq!(persisted_record["execution"]["kind"], "not_started");
+    }
+    gate.0.release();
+    drop(executor);
+    drop(persistence);
+    tokio::time::timeout(allowance(1000), async {
+        loop {
+            let counters = supervisor::debug_counters();
+            if counters.slots_in_use == 0
+                && counters.service_pending == 0
+                && counters.credits_in_use == 1
+            {
+                break;
             }
-        })
-        .await
-        .expect("creation resources did not return after cancellation");
-    });
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("creation resources did not return after cancellation");
 }
 
 #[cfg(feature = "storage-test-hooks")]

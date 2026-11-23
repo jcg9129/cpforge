@@ -109,6 +109,8 @@ impl SessionSpec {
 }
 #[derive(Debug)]
 pub enum RunRecord {
+    /// Cancelled during committed creation; physical ownership stays with cleanup.
+    Transferred,
     NotStarted(StartFailure),
     Started(Box<RootOutcome>),
 }
@@ -609,7 +611,7 @@ mod unix {
     }
 
     pub(super) async fn run(mut spec: SessionSpec) -> SessionOutcome {
-        use crate::supervisor::creation::{self, CreationState, Request};
+        use crate::supervisor::creation::{self, CreationError, CreationState, Request};
         if spec.cancel.is_cancelled() {
             return failed(&spec, NotStarted::CancelledBeforeStart);
         }
@@ -618,6 +620,11 @@ mod unix {
         };
         let cancelled = failed(&spec, NotStarted::CancelledBeforeStart);
         let worker_failed = failed(&spec, NotStarted::Worker);
+        let mut transferred = failed(&spec, NotStarted::CancelledBeforeStart);
+        transferred.solution = RunRecord::Transferred;
+        transferred.interactor = RunRecord::Transferred;
+        transferred.record = SessionRecord::default();
+        transferred.record.wakeup(vec![Fact::CancelRequested]);
         let cancel = spec.cancel.clone();
         let state = std::sync::Arc::new(CreationState::default());
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -634,7 +641,10 @@ mod unix {
         }
         let start = match creation::receive(state, &cancel, receiver).await {
             Ok(start) => start,
-            Err(NotStarted::CancelledBeforeStart) => return cancelled,
+            Err(CreationError::NotStarted(NotStarted::CancelledBeforeStart)) => {
+                return cancelled;
+            }
+            Err(CreationError::Transferred) => return transferred,
             Err(_) => return worker_failed,
         };
         let start = match start {

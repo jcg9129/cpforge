@@ -13,9 +13,9 @@ use std::process::Stdio;
 mod capture;
 mod cleanup;
 mod creation;
-pub use creation::Creator;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use creation::create_root;
+pub use creation::{CreationError, Creator};
 mod events;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod forward;
@@ -46,6 +46,20 @@ pub use root::*;
 pub use test_hooks::{
     CreationGate, Milestone, Milestones, PipeTestGuard, force_kill_active_for_test,
 };
+
+/// Reserve both job worker credits in one operation before either thread starts.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn job_credits() -> Result<[Credits; 2], NotStarted> {
+    cleanup::init().map_err(|_| NotStarted::Worker)?;
+    let mut credits = cleanup::global_bounds()
+        .expect("initialized bounds")
+        .thread_credits
+        .try_reserve(2)
+        .ok_or(NotStarted::Worker)?
+        .split();
+    let persistence = credits.pop().expect("two job credits");
+    Ok([credits.pop().expect("two job credits"), persistence])
+}
 
 /// Persistence shares the process-wide credit bound without changing signal
 /// setup. A stalled worker retains this credit until its syscall returns.

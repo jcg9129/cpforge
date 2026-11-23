@@ -142,7 +142,11 @@ Prepared → Creating → Running → Terminating → RootObserved → Reaped �
 | Finalized | record in memory; nothing else unless something was transferred | nothing |
 
 Dropping the public future always counts as cancellation of the run; the
-cleanup service finalizes and persists the record and releases resources.
+cleanup service finalizes the outcome in memory, publishes it through the
+transfer ticket and releases resources. With no live engine to persist it,
+the record is best effort: cleanup owns no persistence queue. `cpf fsck`
+reports the schema of each run file present (`valid schema 1`); it does not
+diagnose an absent `record.json`.
 
 ### 3.3 Cleanup service and global bounds
 
@@ -154,13 +158,17 @@ cleanup service finalizes and persists the record and releases resources.
   0)`) and receives completions from transferred workers. It is also the
   recovery route for every observer failure; the cleanup path never needs a
   new thread.
-- Bounds (*fixed*): **4** cleanup slots and **32** threads process-wide. Every
+- Bounds (*fixed*): **4** cleanup slots and **32** credited supervisor worker
+  threads (cleanup, creation, persistence, sinks, forwarders and transcript
+  writers). The fixed process/command threads `cpf-control`, `cpf-stdout`
+  and `cpf-stderr` (at most one each) are outside the credits: the process-wide
+  maximum is 32 credited threads plus these three. Every
   admitted run holds a slot from admission to resources released, so at most
   **4 runs are admitted concurrently** (the CLI foundation runs tests sequentially; an
   interactive pair needs 2).
 - **Workers, all created before any child exists**: per job, one
   creation thread and one persistence thread, created at job start after
-  reserving their 2 thread credits from the 32 (failure: credits returned, the
+  reserving their 2 thread credits atomically from the 32 (failure: credits returned, the
   job does not start, nothing to recover). Job threads hold no cleanup slot;
   their credits return when the job's threads have exited, or pass with a
   stalled persistence thread to the cleanup service (§6.2). Per run, at admission: the
@@ -193,7 +201,14 @@ cleanup service finalizes and persists the record and releases resources.
   `cancel`, sets `committed`, calls the OS creation function. Cancellation
   sets `cancel` and returns **without waiting**; if `committed` was set, the
   creation thread registers the child under the registry lock as soon as
-  creation returns and then runs the kill path.
+  creation returns and then runs the kill path through cleanup transfer.
+  Unless creation's reply has already arrived (the run then continues and
+  its wait runs the kill path), the caller receives `Transferred`:
+  cancellation occurred during committed creation, and whether a child
+  exists is unknown at return time. The live
+  job persists this record and its report through the ordinary engine path;
+  cleanup's later ticket outcome does not replace the finalized record.
+  Connected-pair creation follows the same rule for both runs.
 - `setup_duration` (first setup step to end of creation) is recorded and is
   **outside** the deadline guarantee. The deadline timer starts when creation
   returns.
@@ -449,8 +464,9 @@ says so when cleanup is unverified.
   with the losses observed so far. This cutoff **overrides** the sink
   finalisation deadline: any sink with an unfinished operation (queued bytes,
   write, flush or close in progress) records `WriteStalled`, is incomplete,
-  is never compared, and keeps its resources until the worker returns. Physical cleanup continues; later facts go to `cleanup.log`. A job
-  waits for its runs' logical records, never for resources released.
+  is never compared, and keeps its resources until the worker returns.
+  Physical cleanup continues; `cleanup.log` remains the initial summary
+  (§6.2). A job waits for its runs' logical records, never for resources released.
 
 ### 5.3 Capture record
 
@@ -527,6 +543,7 @@ pub enum Execution {
                                         // UnsupportedLimit, Unsupported, ContainmentUnavailable, Setup(io),
                                         // CleanupCapacity, Worker, RetentionBudget, SpecTooLarge
     Started(Started),
+    Transferred,                         // cancelled during committed creation; child existence unknown
 }
 pub struct Started {
     pub status: Termination,
@@ -573,13 +590,18 @@ empty captures.
 ### 6.2 Milestones and publication
 
 - The record is **finalized** once capture is frozen, cleanup has a result
-  and status is known (or `Unknown`). It never changes afterwards; later
-  events (a stalled writer returning, a late reap) go to a bounded
-  `cleanup.log` in the run directory.
+  and status is known (or `Unknown`), or creation cancellation returns
+  `Transferred` (§3.4). It never changes afterwards. `cleanup.log` is the
+  bounded initial summary written by the job's persistence at record time;
+  late events (a stalled writer returning, a late reap) after persistence
+  settles are not appended. If the public future is dropped with no live
+  engine to persist it, cleanup finalizes the outcome only in memory and
+  publishes it through the ticket (§3.2); it owns no persistence queue.
 - The verdict is **derived after** finalization from all fields, never from
   the stop trigger alone.
 - Exactly one component finalizes each record: the supervisor, or the
-  cleanup service for transferred runs.
+  cleanup service for transferred resources. A §3.4 `Transferred` record is
+  a finalized cancellation snapshot; the eventual ticket outcome is separate.
 - **Persistence**: each artefact (spec, record,
   `cleanup.log`, report) is one temp file + rename (storage contract) on the job's
   persistence thread, fed by a bounded queue (16 artefacts; a full queue is
@@ -595,7 +617,7 @@ empty captures.
   job still finishes and prints its in-memory report with `--json`; the
   deadline does not cancel the syscall. The job never names a path it has not seen published (in
   `JobFinished`, the report or a record). A late rename may still land; it is
-  harmless, noted in `cleanup.log` if possible, and the thread with its
+  harmless and is not appended to `cleanup.log` (above); the thread with its
   metadata reservation passes to the cleanup service until it returns. The
   in-memory report stays authoritative for the invocation. Size bounds: spec
   ≤ 256 KiB, record ≤ 64 KiB, `cleanup.log` ≤ 64 KiB (then a truncation

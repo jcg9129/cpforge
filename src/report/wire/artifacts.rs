@@ -143,6 +143,15 @@ pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
         ),
     ]);
     let (execution, stdout, stderr, measurements, limits, errors, notes) = match v.execution {
+        e::ExecutionRecord::Transferred => (
+            kind("transferred"),
+            stream(None, None)?,
+            stream(None, None)?,
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+            Value::Array(vec![]),
+        ),
         e::ExecutionRecord::NotStarted(failure) => (
             obj([
                 ("kind", s("not_started")),

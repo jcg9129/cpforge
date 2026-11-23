@@ -1,4 +1,4 @@
-11 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+14 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169
@@ -16,9 +16,9 @@ utf8 warning: 716 <= table 741 <= bound 768
 utf8 hook: 226 <= table 244 <= bound 244
 utf8 capture: 13249 <= table 13311 <= bound 13311
 utf8 build: 6602 <= table 6664 <= bound 6664
-utf8 report header: 52140 <= table 53595 <= bound 65536
+utf8 report header: 52190 <= table 53645 <= bound 65536
 utf8 Diagnostic: 1236 <= table 1237 <= bound 1237
-utf8 refusal: 102869 <= table 103916 <= bound 106496
+utf8 refusal: 102919 <= table 103966 <= bound 106496
 utf8 run_finished event: 6220 <= table 6873 <= bound 7168
 utf8 output_chunk event: 5601 <= table 5621 <= bound 7168
 base64 Cause: 109 <= table 129 <= bound 129
@@ -38,9 +38,9 @@ base64 warning: 637 <= table 741 <= bound 768
 base64 hook: 226 <= table 244 <= bound 244
 base64 capture: 10721 <= table 13311 <= bound 13311
 base64 build: 5338 <= table 6664 <= bound 6664
-base64 report header: 45777 <= table 53595 <= bound 65536
+base64 report header: 45827 <= table 53645 <= bound 65536
 base64 Diagnostic: 1073 <= table 1237 <= bound 1237
-base64 refusal: 89703 <= table 103916 <= bound 106496
+base64 refusal: 89753 <= table 103966 <= bound 106496
 base64 run_finished event: 6220 <= table 6873 <= bound 7168
 base64 output_chunk event: 5601 <= table 5621 <= bound 7168
-10000 full entries: 110592137 <= table 119513595 <= reservation 122945536
+10000 full entries: 110592187 <= table 119513645 <= reservation 122945536

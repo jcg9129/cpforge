@@ -1,7 +1,21 @@
 //! Job-owned creation worker. Blocking setup never runs in an async poll.
 
+/// Creation can be cancelled after commit without knowing whether a child exists.
+#[derive(Debug)]
+pub enum CreationError {
+    NotStarted(super::NotStarted),
+    Transferred,
+}
+
+impl From<super::NotStarted> for CreationError {
+    fn from(reason: super::NotStarted) -> Self {
+        Self::NotStarted(reason)
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
+    use super::CreationError;
     use crate::supervisor::{
         Admission, CancelToken, NotStarted, ProgramSpec, SpawnOptions, Spawned, cleanup, root,
         session,
@@ -9,7 +23,7 @@ mod unix {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::{Arc, mpsc};
     use tokio::runtime::Handle;
-    use tokio::sync::oneshot;
+    use tokio::sync::oneshot::{self, error::TryRecvError};
 
     /// 0: Pending, 1: committed, 2: cancel published. A single atomic orders
     /// commit against cancellation, including the second commit of a pair.
@@ -106,6 +120,10 @@ mod unix {
                 .thread_credits
                 .try_reserve(1)
                 .ok_or(NotStarted::Worker)?;
+            Self::with_credit(credit)
+        }
+
+        pub(crate) fn with_credit(credit: cleanup::Credits) -> Result<Self, NotStarted> {
             let (sender, receiver) = mpsc::channel();
             std::thread::Builder::new()
                 .name("cpf-create".into())
@@ -171,7 +189,7 @@ mod unix {
             }
             let state = Arc::new(CreationState::default());
             let worker_state = state.clone();
-            let (reply, receiver) = oneshot::channel();
+            let (reply, mut receiver) = oneshot::channel();
             self.send(Request::Prepare(Box::new(move || {
                 let result = worker_state.check().and_then(|()| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
@@ -184,7 +202,16 @@ mod unix {
                 };
                 let _ = reply.send(result);
             })))?;
-            receive(state, cancel, receiver).await?
+            let _guard = CreationGuard(state.clone());
+            tokio::select! { biased;
+                result = &mut receiver => result.map_err(|_| NotStarted::Worker)?,
+                _ = cancel.cancelled() => match state.cancel() {
+                    Cancel::BeforeCommit => Err(NotStarted::CancelledBeforeStart),
+                    // Commit follows all blocking setup and immediately
+                    // precedes the reply, so this await never waits for I/O.
+                    Cancel::Committed => receiver.await.map_err(|_| NotStarted::Worker)?,
+                },
+            }
         }
 
         pub(in crate::supervisor) fn send(&self, request: Request) -> Result<(), NotStarted> {
@@ -196,16 +223,22 @@ mod unix {
         state: Arc<CreationState>,
         cancel: &CancelToken,
         mut receiver: oneshot::Receiver<T>,
-    ) -> Result<T, NotStarted> {
+    ) -> Result<T, CreationError> {
         let _guard = CreationGuard(state.clone());
         tokio::select! { biased;
-            result = &mut receiver => result.map_err(|_| NotStarted::Worker),
+            result = &mut receiver => result.map_err(|_| CreationError::NotStarted(NotStarted::Worker)),
             _ = cancel.cancelled() => {
                 match state.cancel() {
-                    Cancel::BeforeCommit => Err(NotStarted::CancelledBeforeStart),
-                    // Creating: finish the in-flight OS call, then the caller's
-                    // wait_root observes the same token and runs the kill path.
-                    Cancel::Committed => receiver.await.map_err(|_| NotStarted::Worker),
+                    Cancel::BeforeCommit => Err(NotStarted::CancelledBeforeStart.into()),
+                    Cancel::Committed => match receiver.try_recv() {
+                        // A reply that raced cancellation stays owned: the
+                        // caller's wait observes the same token and kills.
+                        Ok(result) => Ok(result),
+                        // Dropping the receiver hands any eventual child to
+                        // the worker's drop/transfer path, without waiting.
+                        Err(TryRecvError::Empty) => Err(CreationError::Transferred),
+                        Err(TryRecvError::Closed) => Err(NotStarted::Worker.into()),
+                    },
                 }
             }
         }
@@ -217,9 +250,9 @@ mod unix {
         admission: Admission,
         opts: &SpawnOptions,
         cancel: &CancelToken,
-    ) -> Result<Spawned, NotStarted> {
+    ) -> Result<Spawned, CreationError> {
         if cancel.is_cancelled() {
-            return Err(NotStarted::CancelledBeforeStart);
+            return Err(NotStarted::CancelledBeforeStart.into());
         }
         let state = Arc::new(CreationState::default());
         let (reply, receiver) = oneshot::channel();
@@ -231,7 +264,7 @@ mod unix {
             handle: Handle::current(),
             reply,
         })))?;
-        receive(state, cancel, receiver).await?
+        receive(state, cancel, receiver).await?.map_err(Into::into)
     }
 }
 

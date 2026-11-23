@@ -670,7 +670,7 @@ impl<'probe> Engine<'probe> {
                         wall_deadline: execution.summary.as_ref().map(|s| s.deadline),
                         measured_wall: execution.evidence.as_deref().and_then(|e| match e {
                             ExecutionRecord::Started(root) => root.timing.wall,
-                            ExecutionRecord::NotStarted(_) => None,
+                            ExecutionRecord::NotStarted(_) | ExecutionRecord::Transferred => None,
                         }),
                         budgets: vec![
                             (
@@ -1407,6 +1407,7 @@ impl Context<'_> {
         if let Some(record) = &record {
             result.coverage = match record.as_ref() {
                 ExecutionRecord::Started(_) => Coverage::Started,
+                ExecutionRecord::Transferred => Coverage::Transferred,
                 ExecutionRecord::NotStarted(failure) => Coverage::NotStarted {
                     reason: failure.reason,
                 },
@@ -1664,7 +1665,7 @@ fn summary_observation(record: &ExecutionRecord, job: &Path, setup: Duration) ->
             }),
             not_started_timing: None,
         },
-        ExecutionRecord::NotStarted(_) => SummaryEvidence {
+        ExecutionRecord::NotStarted(_) | ExecutionRecord::Transferred => SummaryEvidence {
             capture_files: [None, None],
             not_started_timing: Some((setup, "polling")),
         },

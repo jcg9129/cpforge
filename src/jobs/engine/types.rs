@@ -140,6 +140,8 @@ pub struct StartFailure {
 
 #[derive(Clone, Debug)]
 pub enum ExecutionRecord {
+    /// Cancellation returned before the committed OS creation call completed.
+    Transferred,
     NotStarted(StartFailure),
     Started(Box<RootOutcome>),
 }
@@ -150,6 +152,7 @@ impl ExecutionRecord {
         policies: [crate::supervisor::Exceed; 2],
     ) -> report::RunInput {
         match self {
+            Self::Transferred => report::RunInput::transferred(),
             Self::NotStarted(reason) => report::RunInput::not_started(reason.reason),
             Self::Started(root) => report::RunInput::from_root(root, consumed, policies),
         }
@@ -157,7 +160,7 @@ impl ExecutionRecord {
     pub fn stdout(&self) -> Option<&StreamCapture> {
         match self {
             Self::Started(root) => root.stdout.as_ref(),
-            Self::NotStarted(_) => None,
+            Self::NotStarted(_) | Self::Transferred => None,
         }
     }
 }

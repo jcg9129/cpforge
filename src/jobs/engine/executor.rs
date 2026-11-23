@@ -261,12 +261,26 @@ pub struct SupervisorExecutor {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl SupervisorExecutor {
-    /// Reserve and start the job's creation thread before any run is admitted.
+    /// Reserve and start a creation thread only (callers supply persistence).
     pub fn start() -> Result<Self, crate::supervisor::NotStarted> {
-        Ok(Self {
-            creator: Arc::new(crate::supervisor::Creator::start()?),
+        Ok(Self::with_creator(crate::supervisor::Creator::start()?))
+    }
+
+    /// Job start: reserve the creation and persistence credits in one step,
+    /// then start creation. Returns the persistence worker's credit; on
+    /// failure no credit stays reserved (execution contract §3.3).
+    pub fn start_job() -> Result<(Self, crate::supervisor::Credits), crate::supervisor::NotStarted>
+    {
+        let [creation, persistence] = crate::supervisor::job_credits()?;
+        let creator = crate::supervisor::Creator::with_credit(creation)?;
+        Ok((Self::with_creator(creator), persistence))
+    }
+
+    fn with_creator(creator: crate::supervisor::Creator) -> Self {
+        Self {
+            creator: Arc::new(creator),
             options: crate::supervisor::SpawnOptions::default(),
-        })
+        }
     }
 
     /// Connected sessions share this job's FIFO creation thread.
@@ -405,7 +419,8 @@ impl Executor for SupervisorExecutor {
                     )
                     .await,
                 )),
-                Err(reason) => not_started(reason),
+                Err(supervisor::CreationError::NotStarted(reason)) => not_started(reason),
+                Err(supervisor::CreationError::Transferred) => ExecutionRecord::Transferred,
             }
         })
     }
