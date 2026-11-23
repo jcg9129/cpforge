@@ -1,141 +1,69 @@
 # Roadmap
 
-cpforge is in early development. The following distinguishes implemented
-library and test infrastructure from planned CLI workflows. Design documents
-and contracts specify intended behavior, including features that are not yet
-implemented. No milestone here promises a release date.
+cpforge is in early development. This file separates what is implemented from
+what is planned. The design documents and contracts also describe behavior
+that is not yet available. No milestone here promises a release date.
 
-## Implemented foundation
+## Implemented: CLI foundation
 
-Implemented and exercised on Linux:
+Validated in CI on Linux and macOS:
 
-- Cargo workspace, `cpf` argument/help skeleton, error and exit-code types,
-  and a separate process-fixture binary with a control channel and independent
-  watchdog.
-- Shared pipe interface; Linux spawn, observation and reap ownership;
-  signalling capability revoked before the consuming wait; process-wide
-  cleanup service with bounded slots and worker credits.
-- Deadlines, cancellation, process-group termination, bounded drain and
-  procfs cleanup verification; bounded stdout/stderr capture and output events
-  with explicit loss reporting and slow-consumer handling.
-- Typed peak RSS and CPU measurements, explicit `RLIMIT_AS` installation,
-  and Linux capability reporting for future diagnostics.
-- Connected-run session API with atomic pair admission, independent relays,
-  session and peer deadlines, dialogue caps, bounded transcripts, idle
-  watchdog, direct pipes, execution facts and a latency benchmark. These
-  mechanics do not derive interactive judging verdicts.
+- The process supervisor: spawn, observe and reap ownership, cancellation,
+  deadlines, bounded output capture, a cleanup service and typed
+  measurements.
+- Connected runs for interactive problems. These are the process and relay
+  mechanics only; interactive judging is not implemented yet.
+- The job engine, with reports and the `--json` and `--events` outputs.
+- The workspace commands: `init`, `add`, `current`, `switch`,
+  `test add/ls/enable/disable`, `build`, `test`, `run`, `cmd`, `config`,
+  `doctor`, `status`, `clean`, `adopt`, `ignore`, `gitignore` and `fsck`.
 
-CI runs on Linux, macOS and Windows with current stable Rust, plus Rust 1.85
-on Linux. On macOS and Windows it exercises the test fixture and pipe layer
-only, which does not establish supervisor runtime support there.
+Limits of this version:
 
-## Process supervisor milestone
+- On Windows the CLI builds and the commands that do not start processes
+  work. `build`, `test`, `run` and `cmd` refuse with exit status 10 until a
+  Windows supervisor exists.
+- Selecting a checker, validator, interactor, answer or score policy is
+  refused as unsupported in this version. It never falls back to plain
+  comparison.
 
-- Implement and validate macOS spawn/observe/reap ownership, cleanup
-  enumeration and named measurements; offer only validated metrics and
-  explicitly supported enforcement mechanisms.
-- Implement Windows creation-time Job Object membership, ownership and
-  inheritance rules, cancellable pipes, bounded shutdown, measurements and
-  commit limits, including execution inside an existing Job Object.
-- Validate limit routing end to end: configured value, units, installed
-  limit, scope, setup failures and honest outcomes. Published judge limits
-  must remain separate from explicit local mechanisms.
-- Run the lifecycle, partial-setup failure, capture, connected-run and leak
-  suites on all supported platforms. Verify numeric deadlines, bounded worker
-  shutdown, disk/write failures and repeated-run resource counts.
-- Record the runtime decision and evidence across platforms before treating
-  the supervisor as complete.
+## Next: first useful release
 
-## CLI workspace milestone
+- AtCoder and CSES (problemset) fetching.
+- Simple and testlib checkers and validators.
+- Interactive problems with adaptive interactors.
+- Seeded stress testing, with saved failures and reruns.
+- Submission artifacts, with an optional configurable submit stage (for
+  example `distill`).
+- Tags, status, notes and search.
+- Conservative archive snapshots, with quarantine and restore.
 
-Implemented: `cpf init [<path>]` creates the workspace directories and
-initial admission sequence before publishing config, preserves existing
-records, and reports recovery/publication warnings. C4c covers init with
-real-binary crash and rerun fixtures at command and primitive boundaries.
-`cpf add <name>` publishes local problems, copies configured templates with
-creation provenance, and appends ordered contest membership with optional
-labels. C4d covers add, membership, crash recovery and idempotent reruns.
+A draft pre-release is planned once fetching and batch checkers work on Linux
+and macOS.
 
-Planned:
+## After that
 
-- Configuration schema, strict validation, layered provenance, platform
-  overrides, environment rules, placeholders and explicit shell execution.
-- Portable identifiers and collision detection; locks, atomic replacement,
-  no-clobber publication and recoverable command transactions.
-  C4a covers storage primitive fixtures; C4b covers publication and edit
-  commit points with real library helper subprocesses (storage contract §10).
-  Each command task additionally kills the actual `cpf` binary at its commit
-  points (init covered in C4c; add covered in C4d, test add in C6, job/fact work
-  in C10/C15).
-- Current-problem selection and switching;
-  test discovery and `cpf test add/ls/enable/disable` through the test-store
-  interface. Missing and empty answers stay distinct.
-- Byte-precise comparators and bounded diagnostics per the
-  [comparator specification](docs/compare-spec.md).
-- Fresh build outputs and artifact sets, proven with C++, Python and Java;
-  failed builds must never run stale outputs.
-- Job orchestration, cancellation, reports, `--json`/`--events`, byte-safe
-  encoding and documented exit codes; `cpf build`, `cpf test`, raw `cpf run`,
-  custom commands, repeat and opt-in trusted-workspace hooks.
-- Run registration, leases, frozen inputs, pruning and retention, including
-  real Ctrl-C and force-exit integration on Unix and Windows. Force exit
-  needs an enumerable live-run registry because signalling capability moves
-  with the cleanup lease.
-- `cpf config` and `cpf doctor`, separating read-only validation from
-  supervised probes and unavailable features from OS capabilities.
+- A terminal UI over the same job API.
+- More site adapters as parser fixtures allow: Timus, Szkopuł, UOJ, QOJ,
+  DMOJ, Library Checker, Codeforces and Project Euler.
 
-The [managed-workspace design](docs/design-workspace.md) adds source capture,
-admission sequences, run facts and fingerprints, `cpf status`, `cpf adopt`,
-`cpf ignore`, plan-first `cpf clean`, offered `.gitignore` updates and
-`cpf fsck`. Its storage and configuration amendments are **settled**;
-init sequence bootstrap is implemented, with the remaining transactions and
-their crash and conflict fixtures still planned.
+## Later
 
-## Initial feature release
+Windows supervisor, cgroup accounting, parallel test execution, a build cache
+and editor integration. Hardened isolation, automatic submission and broader
+test generation would need separate designs.
 
-Planned after the CLI foundation:
+## Known caveats
 
-- Conservative AtCoder and CSES fetching, with generation-based publication,
-  conflict handling and crash recovery. The interaction between editable
-  tests and generations must be resolved before fetch is implemented.
-- Simple and testlib checkers, validators, scores, interactive judging and
-  the event-record reducer, checking authority and follow-up checker rules.
-  Until supported, selecting a checker must produce an explicit unsupported
-  error rather than falling back to token comparison.
-- Seeded stress testing, saved failures and reruns, including adaptive
-  interactors and interactor checks. Seeded reruns are not a determinism
-  promise; byte-stream replay needs a separate design.
-- Source-copy submission artifacts with optional `distill` integration;
-  tags, status, notes and search; conservative archive snapshots, quarantine
-  and restore only after their crash and conflict tests pass.
+- Local execution is not a sandbox and does not promise judge-equivalent
+  timing. Processes that leave their process group are outside containment,
+  and cleanup confirmation is an observation, not proof.
+- The relay target of 35 µs or less per round trip in release mode has not
+  been verified on a quiet machine.
+- Minimum platform versions are declared but not verified.
+- Registry and main-workspace selection, workspace moves, link-based views
+  and retained download originals are sketches with open questions in the
+  [managed-workspace design](docs/design-workspace.md).
 
-Registry/main-workspace selection, workspace moves, link-based views and
-retained download originals remain sketches with unresolved blockers listed
-in the managed-workspace design.
-
-## Later versions
-
-A TUI over the same job API; more site adapters supported by parser fixtures;
-cgroup accounting and containment, explicit parallel test execution and a
-sound build cache. Editor integration, hardened isolation, automatic
-submission and broader test generation require separate designs.
-
-## Known technical caveats
-
-- Under host load,
-  `supervisor_linux::cancellation_after_a_deadline_kill_and_exit_observation_is_not_a_late_trigger`
-  can hit the two-second reap timeout. This known flaky test still needs a
-  fix and verification under load.
-- The relay target of **≤ 35 µs per round trip in release mode** is not yet
-  verified. The current implementation must be measured on a quiet machine;
-  overloaded-host measurements cannot establish that target.
-- macOS lacks `pipe2`: `pipe()` followed by `fcntl(CLOEXEC)` leaves a process
-  creation race. The macOS spawn backend **must serialise** that setup with
-  process creation before runtime support is accepted.
-- The test harness watchdog can target a reused process-group id if it fires
-  late during a failing test; its identity handling needs further work.
-- Unix processes escaping their process group are outside containment.
-  Cleanup confirmation is an observation, not proof against escape; local
-  execution is not a sandbox or a promise of judge-equivalent timing.
-- Minimum platform versions are declared, not verified. Cross-platform CI
-  and minimum-version validation remain outstanding.
+Evidence for the supervisor on each platform is in the
+[runtime decision record](docs/decisions/runtime.md).

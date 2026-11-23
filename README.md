@@ -8,16 +8,15 @@ submission files and a terminal interface are planned.
 
 ## Current status
 
-Early development: the supervisor/process layer is under construction on
-Linux. Linux process ownership, cancellation, deadlines, bounded capture,
-measurements and connected runs have implementations and tests. The CLI is
-mostly a skeleton; the workflows described in the design documents are not
-yet available as commands.
+Early development. The process supervisor, connected runs, the job engine
+and the workspace commands (`init`, `add`, `build`, `test`, `run`, `cmd`,
+`status`, `clean` and others) are implemented and tested in CI on Linux and
+macOS. On Windows the CLI builds, but commands that start processes refuse
+until a Windows supervisor exists. Checkers, validators, interactive judging,
+fetching and stress testing are not available yet.
 
-CI runs on Linux, macOS and Windows. On macOS and Windows it currently covers
-the test fixture and pipe layer only; the process supervisor is Linux-only so
-far, so runtime support there is not yet established. The supervisor runs the user's
-own programs; it is not a security sandbox. See the [roadmap](ROADMAP.md) for
+CI runs on Linux, macOS and Windows. The supervisor runs the user's own
+programs; it is not a security sandbox. See the [roadmap](ROADMAP.md) for
 completed work, planned milestones and known caveats.
 
 ## Build and test
