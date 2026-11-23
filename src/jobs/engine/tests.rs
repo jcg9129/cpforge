@@ -27,6 +27,16 @@ fn ready<'a>(
     selected: usize,
     probe: &'a dyn crate::exec::Probe,
 ) -> ReadyJob<'a> {
+    ready_with_budget(f, language, selected, probe, 256 << 20)
+}
+
+fn ready_with_budget<'a>(
+    f: &Fixture,
+    language: &str,
+    selected: usize,
+    probe: &'a dyn crate::exec::Probe,
+    job_bytes: u64,
+) -> ReadyJob<'a> {
     f.write(
         if language == "cpp" {
             "problem/main.cpp"
@@ -46,7 +56,7 @@ fn ready<'a>(
         ids.push(crate::names::Identifier::new(id).unwrap());
     }
     f.write("problem/tests.toml", &catalog);
-    let registered = f.job(256 << 20, PrunePolicy::default());
+    let registered = f.job(job_bytes, PrunePolicy::default());
     let frozen = registered
         .inputs()
         .freeze(
@@ -2496,7 +2506,9 @@ impl HeldStderr {
             fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
                 if let Some(entered) = self.entered.take() {
                     entered.send(()).unwrap();
-                    self.release.recv_timeout(Duration::from_secs(300)).unwrap();
+                    // A failing test drops the release sender while unwinding:
+                    // end the gate quietly instead of panicking this thread.
+                    let _ = self.release.recv_timeout(Duration::from_secs(300));
                 }
                 self.bytes.lock().unwrap().extend_from_slice(bytes);
                 Ok(bytes.len())
@@ -2612,7 +2624,12 @@ fn progress_drop_finality_across_e_s_d_matches_saved_stdout_and_events() {
 #[test]
 fn ten_thousand_execution_flood_keeps_ten_ordered_test_aggregates() {
     let f = Fixture::new();
-    let ready = ready(&f, "python", 10, &Tools);
+    // The report reservation for 10 000 planned executions is
+    // 2 x (64 KiB + 12 KiB x 10 000) = 234.5 MiB (report contract §3.7), so
+    // the fixture's usual 256 MiB job budget cannot also admit one target run
+    // (64 MiB stdout + 1 MiB stderr + 1 MiB metadata): the first run would be
+    // `retention_budget`, an infrastructure class. Use the 1 GiB default.
+    let ready = ready_with_budget(&f, "python", 10, &Tools, 1 << 30);
     let mut iterations = Vec::new();
     for test in ready.manifest.entries() {
         for iteration in 1..=1000 {
