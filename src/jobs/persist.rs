@@ -738,7 +738,7 @@ mod tests {
         let (path, owner, budget) = fixture();
         let gate = Arc::new(Notify::new());
         let mut service =
-            JobPersistence::start(owner, Duration::from_secs(1), Some(gate.clone())).unwrap();
+            JobPersistence::start(owner, Duration::from_secs(1), Some(gate.clone()), None).unwrap();
         for i in 0..=QUEUE {
             service.enqueue_write(request(i, &budget));
         }
@@ -796,7 +796,7 @@ mod tests {
     fn late_rename_keeps_timeout_and_never_fills_the_success_cell() {
         let (path, owner, budget) = fixture();
         let gate = Arc::new(RenameGate::default());
-        let mut service = JobPersistence::start(owner, Duration::from_secs(1), None).unwrap();
+        let mut service = JobPersistence::start(owner, Duration::from_secs(1), None, None).unwrap();
         service.rename_gate = Some(gate.clone());
         let cell = Arc::new(Mutex::new(None));
         let mut write = request(0, &budget);
@@ -834,7 +834,7 @@ mod tests {
     #[test]
     fn missing_worker_is_unavailable_and_budget_refusal_is_io() {
         let (path, owner, budget) = fixture();
-        let mut service = JobPersistence::start(owner, DEADLINE, None).unwrap();
+        let mut service = JobPersistence::start(owner, DEADLINE, None, None).unwrap();
         let mut refused = request(0, &budget);
         refused.reservation = None;
         service.enqueue_write(refused);
@@ -863,7 +863,7 @@ mod tests {
         let budget = Arc::new(JobBudget::new(1024));
         let owner = JobLease::create_and_lock_with_budget(&path, budget.clone()).unwrap();
         let weak_owner = Arc::downgrade(&owner);
-        let mut service = JobPersistence::start(owner, DEADLINE, None).unwrap();
+        let mut service = JobPersistence::start(owner, DEADLINE, None, None).unwrap();
         filesystem.fill_completely();
         service.enqueue_write(request(0, &budget));
         runtime(async {
