@@ -500,7 +500,10 @@ fn assert_cancelled(w: &Workspace, job: Job, output: &Output, signal: i32, json:
     );
     let executions = report["executions"].as_array().unwrap();
     let active = if job == Job::AfterTest { 2 } else { 0 };
-    assert_eq!(executions[active]["coverage"]["kind"], "started");
+    // A signal that lands while the OS creation call is in progress returns
+    // at once with a transferred run (execution §3.4); otherwise it started.
+    let coverage = executions[active]["coverage"]["kind"].as_str().unwrap();
+    assert!(matches!(coverage, "started" | "transferred"), "{coverage}");
     assert_eq!(executions[active]["summary"]["class"]["kind"], "cancelled");
     for execution in executions.iter().skip(active + 1) {
         assert_eq!(execution["coverage"]["kind"], "skipped");

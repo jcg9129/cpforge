@@ -170,7 +170,11 @@ fn checker_kind_refuses_before_admission() {
     for kind in ["checker", "interactive", "multi-file", "answer", "unknown"] {
         fixture.write(
             "problems/A/problem.toml",
-            &format!("schema = 1\n[problem]\nid = 'local:A'\nkind = '{kind}'\n"),
+            &format!(
+                "schema = 1\n[problem]\nid = 'local:A'\nkind = '{kind}'\n\
+                 [config]\nlanguage = 'python'\n\
+                 [config.run]\nargv = ['sh', '-c', 'printf ok']\n"
+            ),
         );
         fixture.refuses("problem kind");
     }
