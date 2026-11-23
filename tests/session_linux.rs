@@ -61,33 +61,118 @@ fn fd_count() -> usize {
     std::fs::read_dir(path).unwrap().count()
 }
 
+// Count supervisor threads only (all are named `cpf-*`). Execution contract
+// §3.3 bounds these; libtest starts and retires its own test threads even
+// while LOCK serializes the session bodies, so a whole-process count races.
 #[cfg(target_os = "linux")]
 fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").unwrap().count()
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter(|entry| {
+            let path = entry.as_ref().unwrap().path().join("comm");
+            match std::fs::read_to_string(&path) {
+                Ok(name) => name.starts_with("cpf-"),
+                // A task can exit after readdir and before its comm is read.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    false
+                }
+                Err(error) => panic!("cannot read {}: {error}", path.display()),
+            }
+        })
+        .count()
 }
 
 #[cfg(target_os = "macos")]
 fn thread_count() -> usize {
-    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
-    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
-    // SAFETY: the buffer fits the complete record; errno is thread-local.
-    let (count, errno) = unsafe {
-        *libc::__error() = 0;
-        let count = libc::proc_pidinfo(
-            std::process::id() as i32,
-            libc::PROC_PIDTASKINFO,
+    // <sys/proc_info.h>: list the task's thread handles for PROC_PIDTHREADINFO.
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+    let pid = std::process::id() as i32;
+    let mut handles = vec![0u64; 1024];
+    let capacity = std::mem::size_of_val(handles.as_slice()) as i32;
+    // SAFETY: the buffer is valid for `capacity` bytes of u64 handles.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDLISTTHREADS,
             0,
-            info.as_mut_ptr().cast(),
-            size,
-        );
-        (count, *libc::__error())
+            handles.as_mut_ptr().cast(),
+            capacity,
+        )
     };
-    assert_eq!(
-        count, size,
-        "proc_pidinfo(PROC_PIDTASKINFO) failed: errno {errno}"
+    assert!(
+        filled > 0 && filled < capacity,
+        "proc_pidinfo(PROC_PIDLISTTHREADS) returned {filled}: {}",
+        std::io::Error::last_os_error()
     );
-    // SAFETY: proc_pidinfo returned the entire initialized record.
-    unsafe { info.assume_init().pti_threadnum as usize }
+    handles.truncate(filled as usize / std::mem::size_of::<u64>());
+    let size = std::mem::size_of::<libc::proc_threadinfo>() as i32;
+    let mut resolved = 0;
+    let mut supervisor = 0;
+    for handle in handles {
+        let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::uninit();
+        // SAFETY: the buffer fits the complete record.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTHREADINFO,
+                handle,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        // A thread can exit after it was listed.
+        if count != size {
+            continue;
+        }
+        resolved += 1;
+        // SAFETY: proc_pidinfo returned the entire initialized record.
+        let info = unsafe { info.assume_init() };
+        let name: Vec<u8> = info
+            .pth_name
+            .iter()
+            .take_while(|&&byte| byte != 0)
+            .map(|&byte| u8::from_ne_bytes(byte.to_ne_bytes()))
+            .collect();
+        if name.starts_with(b"cpf-") {
+            supervisor += 1;
+        }
+    }
+    // The sampling thread itself is always live, so zero means a broken sample.
+    assert!(resolved > 0, "no thread information could be read");
+    supervisor
+}
+
+#[test]
+fn thread_sample_excludes_test_runner_threads() {
+    let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let baseline = thread_count();
+    // A libtest-style thread must be ignored; a supervisor-named one counted.
+    let parked = ["test-runner", "cpf-sample"].map(|name| {
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                entered.send(()).unwrap();
+                let _ = released.recv_timeout(Duration::from_secs(5));
+            })
+            .unwrap();
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        (release, thread)
+    });
+    let during = thread_count();
+    for (release, thread) in parked {
+        let _ = release.send(());
+        thread.join().unwrap();
+    }
+    assert_eq!(
+        during,
+        baseline + 1,
+        "only supervisor threads belong to the sample"
+    );
 }
 
 // Return (start identity, zombie). Root identities stay pinned until reaping;

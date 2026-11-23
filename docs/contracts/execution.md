@@ -182,6 +182,9 @@ diagnose an absent `record.json`.
   `NotStarted{CleanupCapacity}`; worker creation failure →
   `NotStarted{Worker}`, workers created so far stopped, credits returned.
   Nothing is left reserved.
+- Closing a job's creation queue hands its thread handle and credit to the
+  cleanup poller without taking a run slot or waiting for setup I/O. The
+  poller releases the credit only after joining the finished thread.
 - Credits and the slot are returned only at **resources released**. A run
   whose root is never reaped (uninterruptible sleep) or whose writer never
   returns keeps its slot for the life of the `cpf` process; this is reported

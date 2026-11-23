@@ -152,6 +152,8 @@ impl Shutdown {
 struct Handle {
     done: oneshot::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
+    // Handle::drop joins before this field returns capacity to admission.
+    _credit: crate::supervisor::Credits,
     failure: Arc<OnceLock<Failure>>,
     final_record: Arc<OnceLock<Final>>,
 }
@@ -331,7 +333,6 @@ impl Writer {
                 .name(format!("cpf-transcript-{name}"))
                 .spawn(move || {
                     worker.run();
-                    drop(credit);
                     let _ = done_send.send(());
                 });
             match started {
@@ -339,6 +340,7 @@ impl Writer {
                     writer.handles[index] = Some(Handle {
                         done,
                         thread: Some(thread),
+                        _credit: credit,
                         failure: failure.clone(),
                         final_record: final_record.clone(),
                     });

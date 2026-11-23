@@ -16,6 +16,7 @@ impl From<super::NotStarted> for CreationError {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
     use super::CreationError;
+    use crate::supervisor::creation_worker::CreationWorker;
     use crate::supervisor::{
         Admission, CancelToken, NotStarted, ProgramSpec, SpawnOptions, Spawned, cleanup, root,
         session,
@@ -109,7 +110,19 @@ mod unix {
     /// One FIFO creation thread per job; its credit is held until it exits.
     #[derive(Debug)]
     pub struct Creator {
-        sender: mpsc::Sender<Request>,
+        sender: Option<mpsc::Sender<Request>>,
+        worker: Option<CreationWorker<cleanup::Credits>>,
+    }
+
+    impl Drop for Creator {
+        fn drop(&mut self) {
+            // Closing the queue ends an idle worker. Blocking setup may still
+            // be running: the cleanup poller joins it without delaying Drop.
+            self.sender.take();
+            if let Some(worker) = self.worker.take() {
+                cleanup::transfer_creation(worker);
+            }
+        }
     }
 
     impl Creator {
@@ -125,56 +138,57 @@ mod unix {
 
         pub(crate) fn with_credit(credit: cleanup::Credits) -> Result<Self, NotStarted> {
             let (sender, receiver) = mpsc::channel();
-            std::thread::Builder::new()
-                .name("cpf-create".into())
-                .spawn(move || {
-                    let _credit = credit;
-                    while let Ok(request) = receiver.recv() {
-                        match request {
-                            Request::Prepare(work) => work(),
-                            Request::Root(request) => {
-                                let RootRequest {
-                                    spec,
-                                    admission,
-                                    options,
-                                    state,
-                                    handle,
-                                    reply,
-                                } = *request;
-                                let _enter = handle.enter();
-                                #[cfg(feature = "storage-test-hooks")]
-                                let _pipes = options
-                                    .fail_pipe_at
-                                    .map(crate::supervisor::PipeTestGuard::fail_at);
-                                let result = state.check().and_then(|()| {
-                                    root::unix::spawn_with_state(spec, admission, &options, &state)
-                                        .map(|inner| Spawned {
-                                            inner: Box::new(inner),
-                                        })
-                                });
-                                // A closed receiver drops the root here, with the
-                                // runtime entered, killing and transferring it.
-                                let _ = reply.send(result);
-                            }
-                            Request::Session {
+            let worker = CreationWorker::spawn(credit, move || {
+                while let Ok(request) = receiver.recv() {
+                    match request {
+                        Request::Prepare(work) => work(),
+                        Request::Root(request) => {
+                            let RootRequest {
                                 spec,
+                                admission,
+                                options,
                                 state,
                                 handle,
                                 reply,
-                            } => {
-                                let _enter = handle.enter();
-                                #[cfg(feature = "storage-test-hooks")]
-                                let _pipes = spec
-                                    .fail_pipe_at
-                                    .map(crate::supervisor::PipeTestGuard::fail_at);
-                                let result = session::prepare_session(*spec, &state);
-                                let _ = reply.send(result);
-                            }
+                            } = *request;
+                            let _enter = handle.enter();
+                            #[cfg(feature = "storage-test-hooks")]
+                            let _pipes = options
+                                .fail_pipe_at
+                                .map(crate::supervisor::PipeTestGuard::fail_at);
+                            let result = state.check().and_then(|()| {
+                                root::unix::spawn_with_state(spec, admission, &options, &state).map(
+                                    |inner| Spawned {
+                                        inner: Box::new(inner),
+                                    },
+                                )
+                            });
+                            // A closed receiver drops the root here, with the
+                            // runtime entered, killing and transferring it.
+                            let _ = reply.send(result);
+                        }
+                        Request::Session {
+                            spec,
+                            state,
+                            handle,
+                            reply,
+                        } => {
+                            let _enter = handle.enter();
+                            #[cfg(feature = "storage-test-hooks")]
+                            let _pipes = spec
+                                .fail_pipe_at
+                                .map(crate::supervisor::PipeTestGuard::fail_at);
+                            let result = session::prepare_session(*spec, &state);
+                            let _ = reply.send(result);
                         }
                     }
-                })
-                .map_err(|_| NotStarted::Worker)?;
-            Ok(Self { sender })
+                }
+            })
+            .map_err(|_| NotStarted::Worker)?;
+            Ok(Self {
+                sender: Some(sender),
+                worker: Some(worker),
+            })
         }
 
         /// Run owned setup on this job's FIFO thread. Commit only after all
@@ -215,7 +229,11 @@ mod unix {
         }
 
         pub(in crate::supervisor) fn send(&self, request: Request) -> Result<(), NotStarted> {
-            self.sender.send(request).map_err(|_| NotStarted::Worker)
+            self.sender
+                .as_ref()
+                .expect("live creator")
+                .send(request)
+                .map_err(|_| NotStarted::Worker)
         }
     }
 

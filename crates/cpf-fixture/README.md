@@ -70,6 +70,12 @@ its addressee to run. Each handshake direction has a five-second timeout; a
 fixture waiting too long exits 65, and a harness readiness failure kills
 containment and panics. `ready` without the channel is a validation error (64).
 
+On Unix both the peek and consume may report temporary contention (`EAGAIN`
+or `EINTR`), including after a matching peek when another descendant peeks
+concurrently. Neither failure consumes a datagram; the fixture stays in the
+same bounded handshake. A blocking harness receive that reaches `SO_RCVTIMEO`
+reports `TimedOut` (the raw timeout can be `EAGAIN` on macOS).
+
 The watchdog owns an independent containment reference and timer. It kills the
 Unix process group or Windows Job Object even while the test blocks in a pipe
 read or `wait`. Windows uses a kill-on-close Job Object; an inherited event gates

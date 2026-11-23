@@ -43,6 +43,16 @@ impl Server {
         let count = loop {
             match self.0.recv(&mut buffer) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // This socket is blocking. SO_RCVTIMEO expiry is EAGAIN on
+                // Unix (including macOS), not evidence of a nonblocking fd.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Err(super::timeout());
+                }
                 result => break result?,
             }
         };
@@ -103,16 +113,35 @@ pub(crate) fn ready() -> io::Result<()> {
         format!("READY {pid} {start_id}\n").as_bytes(),
     )?;
     let fd = inherited_fd("CPF_FIXTURE_ACK")?;
+    await_ack(pid, |peek, buffer| receive(fd, peek, buffer))
+}
+
+// A local receive seam lets tests force contention between a matching peek and
+// its consuming receive, independently of the host kernel's socket locking.
+fn await_ack(
+    pid: u32,
+    mut receive: impl FnMut(bool, &mut [u8]) -> io::Result<usize>,
+) -> io::Result<()> {
     let expected = format!("ACK {pid}\n");
     let until = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut buffer = [0; MAX_MESSAGE];
     loop {
-        match receive(fd, true, &mut buffer) {
+        match receive(true, &mut buffer) {
             Ok(n) if buffer[..n] == *expected.as_bytes() => {
                 // Only the process named in this datagram consumes it. Other
                 // processes merely peek, so this cannot consume another's ACK.
-                receive(fd, false, &mut buffer)?;
-                return Ok(());
+                match receive(false, &mut buffer) {
+                    Ok(_) => return Ok(()),
+                    // On Darwin a concurrent peeker may hold the socket buffer
+                    // lock even though our ACK is queued. A failed consume has
+                    // made no progress: stay in the same bounded handshake.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
             }
             Ok(_) => {}
             Err(error)
@@ -123,6 +152,54 @@ pub(crate) fn ready() -> io::Result<()> {
             Err(error) => return Err(error),
         }
         retry_pause(until)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ack_consume_contention_does_not_strand_other_descendants() {
+        for errno in [libc::EAGAIN, libc::EINTR] {
+            let (server, child) = UnixDatagram::pair().unwrap();
+            // Queue the sibling's ACK behind ours: it must remain untouched.
+            server.send(b"ACK 101\n").unwrap();
+            server.send(b"ACK 202\n").unwrap();
+            let mut injected = false;
+            let result = await_ack(101, |peek, buffer| {
+                if !peek && !injected {
+                    injected = true;
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+                receive(child.as_raw_fd(), peek, buffer)
+            });
+            assert!(injected);
+            assert!(
+                result.is_ok(),
+                "consume failed after a matching peek: {result:?}"
+            );
+            await_ack(202, |peek, buffer| receive(child.as_raw_fd(), peek, buffer)).unwrap();
+            let mut buffer = [0; MAX_MESSAGE];
+            assert_eq!(
+                receive(child.as_raw_fd(), true, &mut buffer)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn ready_receive_timeout_is_reported_as_timeout() {
+        let (server, _child) = channel().unwrap();
+        assert_eq!(
+            server
+                .receive(Duration::from_millis(20))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 }
 

@@ -14,6 +14,8 @@ mod capture;
 mod cleanup;
 mod creation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod creation_worker;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use creation::create_root;
 pub use creation::{CreationError, Creator};
 mod events;

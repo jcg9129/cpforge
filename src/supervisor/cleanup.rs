@@ -75,7 +75,7 @@ pub struct GlobalBounds {
     reserved_mask: AtomicUsize,
     pending: AtomicUsize,
     transferred_workers: AtomicUsize,
-    worker_transfers: mpsc::UnboundedSender<PersistenceWorker>,
+    worker_transfers: mpsc::UnboundedSender<TransferredWorker>,
     next_key: AtomicU64,
     wake_lock: Mutex<()>,
     wake: Condvar,
@@ -105,13 +105,50 @@ struct RunCell {
 }
 
 // Keep the transfer in its reserved cell: boxing here would allocate on Drop.
-// Job persistence workers hold no run slot and use their own handover queue.
+// Job creation and persistence workers hold no run slot and share a worker queue.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Transfer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Root(super::root::unix::Transfer),
     FailedCaptures(super::capture::FailedCaptures),
+}
+
+#[derive(Debug)]
+enum TransferredWorker {
+    Persistence(PersistenceWorker),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Creation(super::creation_worker::CreationWorker<Credits>),
+}
+
+impl TransferredWorker {
+    fn resources_released(&mut self) -> bool {
+        match self {
+            Self::Persistence(worker) => worker.resources_released(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Creation(worker) => worker.resources_released(),
+        }
+    }
+
+    // Only persistence handovers are counted as transferred workers.
+    fn is_persistence(&self) -> bool {
+        match self {
+            Self::Persistence(_) => true,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Creation(_) => false,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn transfer_creation(worker: super::creation_worker::CreationWorker<Credits>) {
+    let bounds = global_bounds().expect("creation initializes cleanup before spawning");
+    bounds.pending.fetch_add(1, Ordering::AcqRel);
+    bounds
+        .worker_transfers
+        .send(TransferredWorker::Creation(worker))
+        .expect("the cleanup poller never returns");
+    bounds.wake.notify_one();
 }
 
 /// Hand a still-running job persistence worker to the cleanup service. It
@@ -128,7 +165,7 @@ pub(crate) fn transfer_persistence(worker: PersistenceWorker) {
     bounds.transferred_workers.fetch_add(1, Ordering::AcqRel);
     bounds
         .worker_transfers
-        .send(worker)
+        .send(TransferredWorker::Persistence(worker))
         .expect("the cleanup poller never returns");
     bounds.wake.notify_one();
 }
@@ -455,7 +492,7 @@ impl GlobalBounds {
         cell.ready.notify_waiters();
     }
 
-    fn poll(&self, mut transfers: mpsc::UnboundedReceiver<PersistenceWorker>) -> ! {
+    fn poll(&self, mut transfers: mpsc::UnboundedReceiver<TransferredWorker>) -> ! {
         // Credits bound the entries, so pushing never reallocates.
         let mut workers = Vec::with_capacity(THREAD_CREDITS);
         let mut backoff = 1;
@@ -469,7 +506,9 @@ impl GlobalBounds {
                     return true;
                 }
                 self.pending.fetch_sub(1, Ordering::AcqRel);
-                self.transferred_workers.fetch_sub(1, Ordering::AcqRel);
+                if worker.is_persistence() {
+                    self.transferred_workers.fetch_sub(1, Ordering::AcqRel);
+                }
                 false
             });
             // Clone entries only while holding their short registry locks. The
