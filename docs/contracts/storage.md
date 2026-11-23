@@ -14,6 +14,12 @@ local add with template provenance and contest membership (C4d) are implemented,
 while the remaining amended transactions are planned.
 References labelled *workspace design* point to `../design-workspace.md`.
 
+**Fetch amendment: draft.** Remote identities (§2.1), the fetch transaction
+and test publication (§5.8), the download area and fetch records (§3, §4.5),
+catalog download fields (§8.1), their schemas (§9) and allowed states (§10).
+Amended content is marked *(fetch, draft)*. It replaces generation-based
+publication: tests are published through the catalog commit of §5.8.
+
 Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
@@ -137,6 +143,19 @@ native error, never treated as success.
   "local:<name>"` with the same spelling; any other value is
   `IdentityMismatch`, reported by `fsck` and `status`, and such a directory
   is not a problem for lookup. Remote sites arrive with fetch.
+- *(fetch, draft)* **Remote identity**: `<site>:<native>` with `site` from
+  the general grammar and not `local`, and `<native>` from that site's
+  native-id grammar (sites contract). The directory is `<site>-<native>`,
+  which must be an Identifier; an identity whose directory name is not one
+  is refused by its adapter. `problems/<site>-<native>/problem.toml` must
+  hold exactly that identity (same spelling); anything else is
+  `IdentityMismatch`. The derivation need not be injective: a directory
+  holds one identity, and a second identity deriving the same name (a
+  local `atcoder-abc400_a`, or another site) is refused, never mapped to
+  it. The resolution rules for `cpf add` apply to fetch creation with the
+  derived name, rule 6 comparing with the remote identity. Contest
+  directories are `contests/<site>-<native>/`, bound by `[contest] id`
+  (§5.8.13); a local contest directory has no `[contest]` table.
 - **Resolution for `cpf add <name>`** (§5.2 step 1), over the entries of
   `problems/` read under the lock. The first matching rule decides:
   1. No entry with the key of `<name>` → create.
@@ -211,6 +230,11 @@ native error, never treated as success.
 | `problems/<p>/problem.toml` `[files] user` *(draft)* | user field | edit transaction by `cpf adopt` (§5.4) |
 | `problems/<p>/problem.toml` `[files] created` *(draft)* | tool field | edit transaction by the creating command |
 | `<root>/.gitignore` cpf block *(draft)* | tool block in a user file | only on `cpf gitignore --write` (§5.5) |
+| `.cpforge/downloads/<txn>/` *(fetch, draft)* | tool, leased | created with its lease under the lock, written lock-free only by the lease owner; removed by the owner or by recovery when the lease is free (§5.8.3) |
+| `.cpforge/fetch/<p>/journal.toml` *(fetch, draft)* | tool | no-clobber under the lock; removed when its transaction finishes or is reconciled (§5.8.7) |
+| `.cpforge/fetch/<p>/txn-<txn>.toml` *(fetch, draft)* | tool, durable | no-clobber under the lock; never rewritten or removed by cpf (§5.8.10) |
+| `.cpforge/fetch/<p>/status.toml` *(fetch, draft)* | tool | atomic replace under the lock (§5.8.9) |
+| `problems/<p>/tests.toml` `[fetch]`, entry `download`; `problem.toml` `[problem]` `url`, `title`, `kind`, `limits`; `contest.toml` `[contest]` *(fetch, draft)* | tool fields | edit transaction by `cpf fetch` (§5.8), never another command |
 
 Tool fields (`id`, `url`, `kind`, published limits, `schema`) and user fields
 (tags, status, language, comparator, comments, unknown keys) share a TOML
@@ -219,14 +243,17 @@ file. A command changes only its own fields; untouched items survive as a
 outside every retention budget.
 
 **Reserved trees** *(draft)*: `.cpforge/runs/`, `.cpforge/cache/`,
-`.cpforge/staging/`, `.cpforge/facts/` and the files `.cpforge/state.toml`,
+`.cpforge/staging/`, `.cpforge/facts/`, *(fetch, draft)* `.cpforge/downloads/`,
+`.cpforge/fetch/` and the files `.cpforge/state.toml`,
 `lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
-(initial feature release) are disposable. No path under `problems/` or `contests/` is
+(initial feature release) are disposable; a `downloads/` entry is removed
+only by its protocol (§5.8.3), and `fetch/` is not disposable. No path under `problems/` or `contests/` is
 disposable; outside the reserved trees nothing is deleted automatically,
 with one exception: leftover recovery (§4.5) removes regular files named
 exactly `.cpf-tmp-` + 32 lowercase hex digits in its metadata recovery
-locations (a reserved name, §2.1).
+locations (a reserved name, §2.1). Fetch never deletes or modifies a file
+under `problems/<p>/tests/` (§5.8).
 Provenance and visibility of problem files are defined in workspace design §2.2.
 
 ## 4. Primitives
@@ -364,6 +391,12 @@ An editor saving an older buffer after the tool overwrites the tool's change.
   created outside cpf is removed (documented, §3). Temporary files inside a
   job directory (e.g. from publishing `job.toml`, §6.2) are not recovered
   here: they go with the job directory when it is pruned (§6.3).
+  *(fetch, draft)* Each `.cpforge/fetch/<p>/` is a metadata recovery
+  location too. Recovery also reclaims download areas whose lease is free
+  and `.reclaim-<txn>` leftovers in `.cpforge/downloads/` (§5.8.3); a held
+  or unprobeable area is kept. Every locked operation does this, `cpf
+  clean` plan mode included. Recovery never reconciles fetch journals
+  (§5.8.7).
 - **Recovery outcome**: a missing location is skipped; a location that
   cannot be enumerated, or a leftover that cannot be removed, is kept and
   reported as the warning `RecoveryIncomplete{paths, errors}` of the
@@ -553,7 +586,10 @@ and ignored, never acted on.
 ### 5.5 `cpf gitignore [--write]` *(draft)*
 
 Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
-`.cpforge/staging/`, then the comment `# optional: .cpforge/facts/`.
+`.cpforge/staging/`, *(fetch, draft)* `.cpforge/downloads/`, then the comment `# optional: .cpforge/facts/`
+and *(fetch, draft)* the comment `# optional: .cpforge/fetch/` (fetch history
+is the provenance of downloaded test files; ignoring it makes them user
+content in another checkout, which is safe).
 `--write` is a **text edit transaction**, §4.4 with these differences:
 lock; read `<root>/.gitignore` (absent → publish no-clobber a file holding
 only the block, §4.3); refuse a link, a non-regular file or more than one
@@ -589,6 +625,16 @@ targets, unexpected entries in reserved trees, and the state of `job-seq`
   never repaired either (it may be a transient access problem): reported
   with the I/O error; the user fixes access, or removes the file, after
   which it is `missing`.
+
+*(fetch, draft)* `fsck` also reports: fetch journals (`fetch_incomplete`,
+§5.8.12) and their classification; held and unprobeable download areas;
+unexpected entries in `downloads/` and `fetch/`; non-`valid` history and
+status records; history records whose identity differs from the
+problem's; fetch records of problems that no longer exist (reported only,
+never removed: history is provenance). `--apply` reconciles every `valid`
+journal (§5.8.7) and removes `malformed` journals; it never removes a
+download area other than through recovery's lease probe, never a history
+or status record, never a test file.
 
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
@@ -697,6 +743,358 @@ identity; an unknown-kind problem selectable; stdout purity of `current`;
 recovery); same-selection `switch` writes nothing; `switch` inside another
 problem prints the identity alone on stdout and the note on stderr; configuration loaded for `--problem` B while the
 current directory is in A uses B's `[config] language`.
+
+### 5.8 `cpf fetch`: fetch transaction and test publication *(fetch amendment, draft)*
+
+Publishes a remote problem's metadata and sample tests. HTTP, site adapters
+and canonical sample bytes belong to the sites contract; this section starts
+from a parsed problem and ends with committed records. Test files are never
+modified or deleted: an update publishes new files and changes the catalog.
+There are no generation directories.
+
+#### 5.8.1 Adapter result (the interface this section consumes)
+
+- **Parsed problem**: `identity` (a remote identity, §2.1, from the adapter's
+  URL resolution, never from page text); `url` (the adapter's canonical URL,
+  ≤ 2048 bytes); metadata fields `title` (≤ 1024 bytes), `kind` (string
+  ≤ 64 bytes), `limits.time_ms`, `limits.memory_bytes` (positive integers
+  ≤ 2^53), each either **available** or **unavailable** in this response;
+  `samples`: an ordered list of 0–64 pairs `(input, answer)` of canonical
+  bytes, both always present (either may be empty); `fetched_at` (response
+  time). The **ordinal** of a pair is its position, from 1.
+- Zero samples are a result only for a page the adapter positively
+  recognized; more than 64 pairs, or an identity other than the requested
+  one, is an adapter failure. An adapter failure produces no parsed problem;
+  the attempt then records only its status (§5.8.9).
+- **Parsed contest**: `identity`, `url`, `title` (optional), ordered
+  `members`, each a label (contest record label grammar, §5.2) and a remote
+  problem identity, at most the bulk cap of the sites contract.
+
+#### 5.8.2 Records
+
+`<p>` is the problem directory name (`<site>-<native>`, §2.1).
+
+| Record | Class | Written | Meaning |
+|---|---|---|---|
+| `problems/<p>/tests.toml`: entries with `download`, table `[fetch]` | shared; tool fields (§8.1) | step 5 (creation: step 4) | **commit record**: test membership; `[fetch] txn` names the last committed fetch |
+| `problems/<p>/problem.toml` `[problem]` `url`, `title`, `kind`, `limits` (`id` fixed at creation) | shared; tool fields | step 6 (creation: step 4) | last successful metadata |
+| `contests/<c>/contest.toml` | shared | step 8 | contest membership |
+| `.cpforge/fetch/<p>/journal.toml` | tool-only, no-clobber, removed at step 7 | step 3 | intent of the open transaction |
+| `.cpforge/fetch/<p>/txn-<txn>.toml` | tool-only, no-clobber, **never rewritten** | step 7 | durable history of one transaction |
+| `.cpforge/fetch/<p>/status.toml` | tool-only, atomic replace | end of each attempt | latest attempt, kept apart from the metadata |
+| `.cpforge/downloads/<txn>/` | tool, leased | steps 0–1 | download area |
+
+- **Transaction id** `<txn>`: the job-id grammar (§6.2), generated at step 0;
+  the exclusive `create_dir` of the download area makes it unique (an
+  existing name → new random part). History lists in txn order.
+- **Encodings**: `sha256` values are 64 lowercase hex digits of SHA-256 over
+  the file bytes; times are RFC 3339 UTC with second precision and `Z`
+  (`2026-11-23T10:15:00Z`); `ordinal` is an integer 1–64.
+- `problem.toml` shape (tool fields; all other items are user fields and
+  round-trip untouched, §3):
+
+  ```toml
+  [problem]
+  id = "atcoder:abc400_a"
+  url = "https://atcoder.jp/contests/abc400/tasks/abc400_a"
+  title = "Example"
+  kind = "batch"
+  limits = { time_ms = 2000, memory_bytes = 1073741824 }
+  ```
+
+  `limits` are published judge limits and never become local limits
+  (configuration contract §7.2). An unavailable field is never written,
+  changed or removed by that fetch.
+
+#### 5.8.3 Download area
+
+- Created at step 0 under the workspace lock: `create_dir`
+  `.cpforge/downloads/<txn>/` (parents by the guard), then `lease` created
+  with `create_new` and locked non-blockingly with the §6.2 lease primitive,
+  before the lock is released. A lease is created only there, so a lease
+  found free is never taken again.
+- The owner writes the canonical sample bytes as `<k>.in` and `<k>.ans`
+  (`k` = ordinal), computing SHA-256 while writing. Nothing else writes in
+  the area. Nothing in it is synced: a crash discards it.
+- **Reclamation** is part of leftover recovery (§4.5): an entry named by a
+  txn id is probed with an independently opened handle (§6.2 outcomes).
+  `held` → kept; `acquired` or `absent` → probe released and closed, the
+  directory renamed to `.reclaim-<txn>` and deleted with the no-follow
+  walker (§2); `failed(e)` → kept and reported (`RecoveryIncomplete`). An
+  entry `.reclaim-<txn>` is deleted (an entry vanishing meanwhile is
+  success). Any other entry is kept and reported by `fsck`. A process's
+  own probe of its own held area returns `held`.
+- **Owner release** (end of step 7, and after any abort): under the lock,
+  drop the lease handle, rename the area to `.reclaim-<txn>`, release the
+  lock, delete it. A failed rename or deletion is left for recovery.
+
+#### 5.8.4 Order of one problem transaction
+
+**Bases** are recorded at step 0: whether `problems/<p>` exists; the SHA-256
+of the bytes of `problem.toml` and of `tests.toml` (or `absent`); for every
+**download entry** (an entry with a `download` table, §8.1), the state of its
+`input` and `answer` file: SHA-256 of a regular file (links followed, §8.1
+health), or `missing` (absent, not a regular file, or unreadable).
+
+0. **Prepare** (lock, §4.5 recovery). Reconcile a journal of `<p>`
+   (§5.8.7). Then refuse, with nothing created, when: the problem exists and
+   `problem.toml` is not `valid` or its identity is not the requested one;
+   it does not exist and the §2.1 resolution of `<p>` is not "create"; the
+   catalog is not `missing` or `valid` (§8.1); a journal of `<p>` remains
+   (classification other than `valid`, or reconciliation left it).
+   Otherwise create the download area, record the bases, release the lock.
+1. **Network phase**, without the workspace lock: the adapter produces the
+   parsed problem, whose samples are written into the area.
+2. **Revalidate** (lock, recovery). A journal of `<p>` present now is
+   reconciled first. Then every base is recomputed; any difference is the
+   conflict `base_changed`: nothing is published, the status is recorded.
+   **Editedness is observed here** (it equals the step-0 observation). The
+   plan is computed under this lock: pair outcomes (§5.8.5), file names
+   (§5.8.6), catalog operations, metadata diff (one `(field, old, new)` per
+   available field whose value differs). A plan with no file, no catalog
+   operation, an unchanged `[fetch] upstream_samples` and no metadata diff
+   is `unchanged`: no txn record, no journal, status only. A plan whose
+   catalog, journal or history record would exceed 1 MiB (§9) is refused
+   (`record_too_large`) before step 3.
+3. **Journal**: publish `.cpforge/fetch/<p>/journal.toml` no-clobber (§4.3,
+   synced): `schema`, `txn`, `identity`, `create` (bool), the bases, the
+   planned files (path, sha256, side, ordinal, role), the catalog operations
+   and the metadata diff. A refetch publishes from the area directly; only
+   creation stages.
+4. **Publish files** no-clobber (§4.3), in plan order (input before answer
+   of each pair), each streamed from the area. The SHA-256 of the bytes
+   written to the temporary file must equal the planned hash before the
+   publishing call; a mismatch or `Exists` stops publication and aborts
+   (§5.8.8, `failed` or `name_taken`). Each publication syncs the file
+   before its rename and the directory after it (§4.3).
+5. **Commit the catalog**: one §4.4 edit of `tests.toml` without the replay
+   wrapper, applying the journal's operations and setting `[fetch] txn` and
+   `upstream_samples`. A missing catalog is first created no-clobber as
+   exactly `schema = 1\n` (as §5.3). **Each publish attempt** (§4.4 step 4,
+   every Windows retry included) also rehashes (a) the input and answer of
+   every entry the edit replaces, against their bases, and (b) every file
+   this txn published that the edit registers, against its planned hash. A
+   difference is `Conflict`: nothing is committed and the transaction
+   aborts (§5.8.8, `conflict`, reason `edited_during_commit`).
+6. **Metadata**: one §4.4 edit of `problem.toml` with the replay wrapper.
+   For each diff field: current = old → set new; current = new → nothing;
+   otherwise kept and reported (`metadata_conflict{field}`). A second
+   `Conflict`, or any other failure, leaves the journal: the tests are
+   committed with old metadata (allowed, reported, §5.8.12) until
+   reconciliation rolls step 6 forward. The status is then `committed` with
+   the finding `metadata_pending`, and the area is released. A
+   `problem.toml` that is no longer `valid`, or no longer bound to the
+   identity, is not edited: finding `metadata_not_applied`, and step 7
+   follows (the journal never waits on a user repair).
+7. **Finish**: publish `txn-<txn>.toml` no-clobber; replace `status.toml`;
+   remove the journal (unlink, then sync `.cpforge/fetch/<p>/`); release
+   the area (§5.8.3).
+
+**Creation** (no `problems/<p>` at steps 0 and 2): step 3 writes the journal
+with `create = true`; step 4 stages `.cpforge/staging/<txn>/` with the same
+problem files as §5.2 step 2 (identity, template solution under the same
+rules, `[files] created`), the tool fields of `problem.toml`, `tests.toml`
+(`schema = 1`, `[fetch]`, one entry per pair) and the sample files under
+the base names, then `publish_dir_noclobber` to `problems/<p>`. That
+publication commits steps 4–6 at once; a non-committed publication is
+reclassified by §2.1 and aborts with nothing published. Step 7 follows.
+Zero samples give an empty catalog (`upstream_samples = 0`, no entries) and
+the warning `no_samples`.
+
+**Problem sets of several problems** run one transaction per problem, in
+selection order, each with its own txn, area and lock acquisitions; a
+contest selection then runs step 8.
+
+#### 5.8.5 Pair rules
+
+- A **sample** is an (input, answer) pair. A download entry is **edited**
+  when either file's state at the bases differs from its `download` hash
+  (bytes differ, or `missing`). Its **recorded pair** is
+  `(input_sha256, answer_sha256)`; for an upstream pair `U_k`, the hashes of
+  its canonical bytes.
+- `n` = number of upstream pairs; `n_prev` = `[fetch] upstream_samples`
+  (0 when `[fetch]` is absent).
+- **Identical upstream**: every download entry's ordinal `k` has
+  `U_k` = its recorded pair, and no `U_k` lacks an entry → no pair
+  outcome; the checks below are skipped.
+- **Zero samples**: `n = 0` with at least one download entry → the test set
+  is kept: no pair outcome, no catalog operation, `upstream_samples`
+  unchanged, `--disable-removed` ignored, warning `zero_samples`.
+- **Ambiguity** otherwise: any of the following is a *conflict* of the whole
+  problem: nothing is published, registered or changed (metadata
+  included), the status records each finding.
+  - `duplicate_ordinal`: two download entries with one ordinal;
+  - `duplicate_recorded`: two download entries with equal recorded pairs;
+  - `duplicate_upstream`: two equal upstream pairs;
+  - `moved`: an upstream pair `U_k` that differs from the recorded pair of
+    entry `k` (or has no entry `k`) and whose input hash equals the recorded
+    input hash of an entry with ordinal `j ≠ k` (renumbering, permutation).
+- **Matching**: upstream pair `k` matches the download entry with ordinal
+  `k`, which the checks above make unique.
+- **Outcome table** (per ordinal `k`, after the checks; "disabled" changes
+  nothing in a row except where stated):
+
+| Local state of `k` | Upstream `U_k` | Outcome |
+|---|---|---|
+| no entry, `k > n_prev` | present | `added`: publish under the base name if free, else a revision name (§5.8.6); append entry `id` = stem, `origin = "sample"`, `enabled = true`, `download`; files role `registered` |
+| no entry, `k ≤ n_prev` | present | `removed_locally`: nothing published or added |
+| no entry | absent | nothing |
+| entry, unedited | = recorded | `unchanged` |
+| entry, unedited | ≠ recorded | `updated`: publish a revision pair; replace the entry's `input`, `answer`, `download` (id, `enabled` and unknown keys kept, so a disabled entry stays disabled); new files `registered`, old files `superseded` |
+| entry, edited (input, answer or both; a file missing) | = recorded | `kept_edited`: nothing |
+| entry, edited | ≠ recorded | `kept_edited`: the whole pair and its entry are kept; the upstream pair is published as an unregistered revision pair (role `unregistered-upstream`) unless already retained (below) |
+| entry (any) | absent (`k > n ≥ 1`) | `removed_upstream`: reported; with `--disable-removed` the edit sets `enabled = false`; files untouched |
+
+- **Already retained**: a valid history record of `<p>` (§5.8.10) lists,
+  for ordinal `k`, an `unregistered-upstream` pair with exactly `U_k`'s
+  hashes, both files are present with those hashes, and no catalog entry
+  names either → nothing is published; the outcome names that pair.
+- Catalog entries without `download` (custom, imported, stress, or a
+  `sample` entry written by hand) take no part in matching; their paths
+  still reserve names (§5.8.6).
+- `cpf test register` may register any unregistered candidate, including a
+  superseded file or an unregistered upstream pair; the entry is
+  `origin = "custom"` without `download` (§5.3) and takes precedence over
+  the history (§5.8.10).
+
+#### 5.8.6 File names
+
+- A pair is published under one stem `s`: `tests/<s>.in`, `tests/<s>.ans`.
+  The base stem of ordinal `k` is `sample-<k>`; a revision stem is
+  `sample-<k>.r<m>`, `m ≥ 2` in decimal without leading zeros.
+- A stem is **free** when, by collision key (§2.1), neither file name equals
+  an entry of `tests/` (any type), a path named by a catalog entry (even a
+  missing file), a name planned earlier in this plan, or a path listed in a
+  valid history record of `<p>`; and, for an `added` entry, `s` is no
+  catalog id. Names are chosen under the step-2 lock.
+- `added` uses the base stem if free, else the smallest free revision stem;
+  `updated` and `unregistered-upstream` always use the smallest free
+  revision stem. An existing unregistered `sample-1.r2.in` (or any file of
+  that name) makes the choice skip to `r3`. A name is never reused for other
+  content, so a name and hash pair identifies one publication.
+
+#### 5.8.7 Reconciliation of a journal
+
+Runs under the lock: in `cpf fetch` at steps 0 and 2 for that problem, and in
+`cpf fsck --apply` for every journal. `cpf fsck` and readers only report.
+Other commands do not reconcile.
+
+- Classification (§9 record): `valid` → below. `too_new`, `unreadable`,
+  `malformed` → kept, reported, and `cpf fetch` of `<p>` refused. `fsck
+  --apply` removes a `malformed` journal (reported); the files it named are
+  then user content. `too_new` and `unreadable` journals are never removed.
+- **Committed?** Refetch: `tests.toml` is `valid` and `[fetch] txn` equals the
+  journal's txn. Creation: `problems/<p>` is a directory bound (§2.1) to the
+  journal's identity whose `tests.toml` `[fetch] txn` equals the txn.
+- In every branch below, a `txn-<txn>.toml` already present and `valid`
+  for that txn is kept, never rewritten, and a not-committed journal with
+  such a record is always rolled back (the transaction was decided).
+- **Committed** → roll step 6 forward (per-field rule and
+  `metadata_not_applied`, §5.8.4) and step 7; status `committed` with
+  `recovered = true`.
+- **Not committed, refetch.** *Present set* = planned files present as
+  regular files with their planned hash. Roll forward (steps 5–7, outcome
+  `committed`, `recovered = true`) only if the present set is every planned
+  file, every base still matches (a base `absent` catalog also matches a
+  file of exactly `schema = 1\n`) and the step-5 rehash holds. Otherwise
+  **roll back**: a history record with outcome `rolled_back` listing the
+  present set as `unreferenced` (written only when the present set is not
+  empty), status `rolled_back`, journal removed. No file is ever deleted.
+- **Not committed, creation**: never rolled forward (its staging is removed
+  by recovery); status `rolled_back`, journal removed.
+- A planned name present with another hash, or as another file type, is
+  user content: not recorded, never deleted (§5.8.10).
+
+#### 5.8.8 Abort of a live transaction
+
+An abort after step 3 (publication failure, `name_taken`, step-5 conflict) is
+the roll back of §5.8.7 performed by the owner under its lock: history with
+outcome `conflict` or `failed` listing the files this txn published as
+`unreferenced`, status, journal removal, area release. The published files
+stay as unregistered downloads. Before step 3 an abort writes only the status.
+
+#### 5.8.9 Status record
+
+`status.toml`: `schema = 1`, `attempted_at`, `outcome` (`committed`,
+`unchanged`, `conflict`, `refused`, `failed`, `rolled_back`), optional
+`txn` (when a journal was written), `recovered` (bool), `reason` (≤ 1024
+bytes), and `[[finding]]` records (`kind`, optional `ordinal`, optional
+`test`), at most 128. Written by atomic replace under the lock at the end of
+every attempt that reached step 0, including adapter failures (a short lock
+acquisition after step 1). A status that cannot be written (lock `Busy`,
+I/O error, a `too_new` status, which is never replaced) is a warning of the
+command; nothing else depends on it.
+
+#### 5.8.10 History and provenance
+
+- `txn-<txn>.toml`: `schema = 1`, `txn`, `identity`, `outcome` (`committed`,
+  `rolled_back`, `conflict`, `failed`), `fetched_at`, `url`, `[[pair]]`
+  (`ordinal`, `outcome` of §5.8.5) and `[[file]]` (`path`, `sha256`, `side`
+  `input` | `answer`, `ordinal`, `role`, optional `test`). It lists every
+  file the txn published (`registered`, `unregistered-upstream`,
+  `unreferenced`) and every file whose entry it replaced (`superseded`,
+  with the hash of the replaced `download`). Published no-clobber, never
+  rewritten or removed by cpf. Bounded by construction (64 pairs, four
+  files per pair, cpf-chosen names, catalog paths ≤ 255 bytes) and checked
+  at step 2.
+- **Tool-published**: a file under `tests/` counts as published by cpf only
+  when its name and current SHA-256 appear in the open journal or in a
+  `valid` history record of `<p>` whose `identity` is the problem's
+  identity. Anything else is user content. Records of another identity
+  (a directory name reused) or not `valid` contribute nothing.
+- **Provenance** (workspace design §2.2, amended): references in
+  `tests.toml` / `problem.toml` first (`registered`); then
+  `downloaded{role, txn}` from the rule above; then `[files] created`,
+  `[files] user`, otherwise `unknown`. A registered download entry whose
+  file differs from its `download` hash is reported as edited.
+- Displays: `cpf status` shows counts by role and the latest txn; `cpf fetch
+  --history` lists every record (a non-`valid` one by classification).
+  Records move with their problem into an archive.
+
+#### 5.8.11 Observation points and the remaining race
+
+- Editedness and every base are observed at step 0 and revalidated at
+  step 2; samples are rehashed again in every step-5 publish attempt; the
+  catalog itself is validated by §4.4 step 4.
+- **Remaining race.** §4.4 is not compare-and-swap with editors. An editor
+  save to a replaced sample file after the last step-5 rehash and before the
+  catalog rename is not detected: no file is modified or deleted, but the
+  catalog then names the upstream revision. `cpf status` reports the
+  superseded pair as edited (its hash differs from its history record).
+  A save to `problem.toml` after step 2 is handled field by field (step 6).
+  Stronger semantics would need generation directories.
+
+#### 5.8.12 Readers
+
+Lock-free readers use the committed `tests.toml` and `problem.toml`. While a
+journal of `<p>` exists (any classification) `cpf status` and `cpf test ls`
+report `fetch_incomplete`, with `pending` (not committed: the planned files
+are unregistered candidates) or `committed` (tests committed, metadata or
+history pending: old metadata with new tests). Jobs read the committed
+catalog; nothing they select depends on a journal.
+
+#### 5.8.13 Contest membership (step 8)
+
+- A contest selection resolves the parsed contest first, then runs one
+  transaction per member, then one membership edit under the lock.
+- `contests/<site>-<native>/contest.toml` carries `[contest] id =
+  "<site>:<native>"` (bound to the directory like a problem, §2.1),
+  `url`, `title` (tool fields). Absent → created no-clobber with `schema =
+  1` and `[contest]` before the edit (as §5.2); present with another or no
+  `[contest] id` → refused (`IdentityMismatch`).
+- The edit adds a record for each member that is **committed now**:
+  `problems/<dir>` is a directory bound to that identity with a `valid`
+  `problem.toml`. A member whose transaction failed but which is committed
+  from an earlier fetch is included; an uncommitted member never is.
+- Order: a new record is inserted before the first existing record whose
+  member comes later in the enumeration; records not in the enumeration keep
+  their position. An existing record keeps its stored label (a different
+  upstream label is reported); a label held by another record is omitted
+  from the new record and reported.
+- Fetch never writes or changes per-contest overrides (`limits` and other
+  record keys are user keys, §5.2); an upstream limit change edits only
+  `problem.toml`.
+- Problem-set sections (not contests) write no membership.
 
 ## 6. Job directories, leases, pruning
 
@@ -1057,6 +1455,33 @@ enabled = true
 - No hashes for `custom` tests: the current file is the content, and job
   admission hashes the bytes it copies (§7). Download hashes arrive with
   fetch and mean "content at download time".
+- *(fetch, draft)* **Download fields** (tool fields, written only by fetch,
+  §5.8):
+
+  ```toml
+  [fetch]
+  txn = "20261123101500123-0123456789abcdef"   # last committed fetch
+  upstream_samples = 3                         # upstream pair count at that fetch
+
+  [[test]]
+  id = "sample-1"
+  input = "tests/sample-1.in"
+  answer = "tests/sample-1.ans"
+  origin = "sample"
+  enabled = true
+  download = { input_sha256 = "…", answer_sha256 = "…", ordinal = 1, fetched_at = "2026-11-23T10:15:00Z", txn = "…" }
+  ```
+
+  `download` is valid only on an entry with `origin = "sample"` and an
+  `answer`; its five keys are required (encodings §5.8.2; `ordinal` 1–64,
+  `txn` the job-id grammar); unknown keys inside it are preserved. `[fetch]`
+  requires `txn` and `upstream_samples` (0–64). Any violation is
+  `malformed` (§9), like every invalid known field. Two entries with one
+  ordinal or equal hashes are **not** a catalog error: they make a refetch
+  a conflict (§5.8.5). The hashes describe the content at download time; an
+  entry whose files differ is *edited* and is still run as it is now.
+  Fetched answers are always present; a zero-byte fetched answer is
+  present-empty.
 - Per-test checker overrides are a later design; until then such keys are
   preserved as unknown keys, and a recognised execution-affecting key that
   the running version does not support is a planning error, never ignored.
@@ -1065,7 +1490,8 @@ enabled = true
   (including any invalid known field or duplicate), `too_new` (raw display
   only), `valid`. Only `missing` and `valid` permit mutation; the others
   refuse every command but `ls`, which reports the classification and still
-  lists discovery candidates.
+  lists discovery candidates. *(fetch, draft)* `cpf fetch` refuses at step
+  0 and again at step 2 (§5.8.4), before any request or publication.
 - **Entry health** (checked at use, reported by `ls`, never a catalog
   error): the files must exist and resolve to regular files; test data is
   read-only, so links are followed (§2), FIFOs, sockets, devices and
@@ -1082,9 +1508,12 @@ enabled = true
   `<stem>.ans` if present. A `.ans` no entry names and without a candidate
   `.in` is reported as a stray file. Candidates are never run, including
   through an explicit selector; `cpf test register` turns one into an entry.
-  `.cpf-tmp-*` names are never candidates.
-The CLI foundation implements it over `tests.toml` + `tests/`; the initial feature release may use
-generations behind it. Lock-free readers of metadata tolerate absence,
+  `.cpf-tmp-*` names are never candidates. *(fetch, draft)* Superseded
+  downloads and unregistered upstream pairs (§5.8.5) are ordinary
+  candidates: listed, never run, registrable by `cpf test register`.
+The CLI foundation implements it over `tests.toml` + `tests/`. *(fetch,
+draft)* Fetch keeps that model: no generations; the catalog edit of §5.8 is
+the commit. Lock-free readers of metadata tolerate absence,
 replacement between reads and malformed hand edits (reported with location);
 captures, logs and build outputs are running artefacts until their job
 finalizes them (execution contract §6.2).
@@ -1094,6 +1523,21 @@ finalizes them (execution contract §6.2).
 - Governed formats: `cpforge.toml`, `problem.toml`, `tests.toml`,
   `contest.toml` (user-editable, ordered `[[problem]]` membership, §5.2);
   `state.toml`, `spec.json`, `record.json`, `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
+  *(fetch, draft)* Also `.cpforge/fetch/<p>/journal.toml`, `status.toml`
+  and `txn-<txn>.toml` (tool-only, schema 1, unknown keys `malformed`, each
+  field set of §5.8 owned by its writer). The `tests.toml` download fields
+  (§8.1), the `problem.toml` tool fields and `contest.toml` `[contest]`
+  (§5.8.13) are additions to schema 1 of those user-editable formats: a
+  version without fetch preserves them as unknown keys.
+- *(fetch, draft)* **Fetch records**: classified with the tool-only record
+  classification below. Newer-schema handling: a `too_new` journal blocks
+  `cpf fetch` of its problem and is never removed; a `too_new` history
+  record is kept, never rewritten and contributes no provenance; a
+  `too_new` status is not replaced. Size: every fetch record, and the
+  catalog after a fetch edit, is checked against the cap before it is
+  written (§5.8.4 step 2): exceeding it is the refusal `record_too_large`,
+  never a truncation. With at most 64 pairs (§5.8.1) and cpf-chosen names,
+  a fetch that changes tests stays far below it.
 - Records read or edited by these TOML primitives are capped at **1 MiB**
   (1,048,576 bytes), including user-editable records. Larger input is
   `malformed` with a size-limit reason, before parsing; reads are bounded
@@ -1115,7 +1559,7 @@ finalizes them (execution contract §6.2).
   `schema` alone; decode and validate fields. Directory binding of a valid
   identity (§2.1) is checked after classification and is not part of it.
 - **Record classification** of the tool-only records `state.toml` (§5.7)
-  and, *(draft)*, `job-seq` and `facts/*.toml`, one enum used everywhere: `missing` (no file);
+  and, *(draft)*, `job-seq`, `facts/*.toml` and the fetch records, one enum used everywhere: `missing` (no file);
   `unreadable` (the bytes cannot be read: I/O error, permission, not a
   regular file); `malformed` (not TOML; `schema` absent or not an integer;
   `SchemaTooOld`, none exists yet; or a supported schema with a missing or
@@ -1155,6 +1599,24 @@ finalizes them (execution contract §6.2).
 | *(draft)* `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
 | *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
 | *(draft)* adopt / gitignore | old content | new content |
+| *(fetch, draft)* download area (step 0, `fetch.prepared`) | nothing, or `downloads/<txn>/` without `lease`: reclaimed by the next recovery | area with its lease, free once `cpf` died: reclaimed by the next recovery; nothing else changed |
+| *(fetch, draft)* network phase (`fetch.downloaded`) | as the row above | as the row above |
+| *(fetch, draft)* plan computed (step 2, `fetch.revalidated`) | as the row above | as the row above; no journal, no status |
+| *(fetch, draft)* journal publish (step 3, `fetch.journal_published`) | no journal; workspace unchanged | journal, no planned file present: reconciliation rolls forward only a plan without files whose bases match, else rolls back (status `rolled_back`, no history record) |
+| *(fetch, draft)* each test-file publish (step 4, `file_noclobber.after_publish#i`) | journal and a prefix of the planned files | journal and a longer prefix: reconciliation rolls back, history `rolled_back` lists the present files as `unreferenced`; they stay as candidates |
+| *(fetch, draft)* last test-file publish (`fetch.files_published`) | as the row above | every planned file: rolled forward (steps 5–7) if every base matches, else rolled back as above |
+| *(fetch, draft)* catalog commit (step 5, `fetch.catalog_committed`) | as the row above | new tests with old metadata, `fetch_incomplete` `committed`: steps 6–7 rolled forward |
+| *(fetch, draft)* metadata edit (step 6, `fetch.metadata_committed`) | as the row above | new metadata, history pending: step 7 rolled forward |
+| *(fetch, draft)* history publish (step 7, `fetch.history_published`) | as the row above | record present and kept; status and journal removal rolled forward |
+| *(fetch, draft)* status replace (`fetch.status_replaced`) | as the row above | journal removed by reconciliation, nothing else changes |
+| *(fetch, draft)* journal removal (`fetch.journal_removed`) | as the row above | transaction complete; the area is reclaimed by the next recovery |
+| *(fetch, draft)* area rename (`fetch.area_renamed`) | area with a free lease, reclaimed | `.reclaim-<txn>`, deleted by the next recovery |
+| *(fetch, draft)* creation staging (`fetch.staged`) | journal, no staging | no `problems/<p>`; staging removed by recovery; reconciliation: status `rolled_back`, journal removed |
+| *(fetch, draft)* creation directory publish (`fetch.problem_published`) | as the row above | complete problem with catalog and metadata; history, status, journal removal rolled forward |
+| *(fetch, draft)* abort history (§5.8.8, `fetch.abort_recorded`) | journal and published files: rolled back by reconciliation | record `conflict` or `failed` kept; reconciliation rolls back without a second record |
+| *(fetch, draft)* contest member loop (`fetch.member_finished#i`) | members committed so far, membership unchanged | as before; a rerun adds every committed member |
+| *(fetch, draft)* contest file creation (`fetch.contest_created`) | no `contest.toml` | `schema = 1` and `[contest]` only: a rerun edits it |
+| *(fetch, draft)* membership edit (`fetch.membership_edited`) | committed members not yet listed | every committed member listed in enumeration order |
 
 Coverage assignment (command rows remain assigned to their implementing tasks):
 
@@ -1166,9 +1628,12 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | test add, register, enable/disable (§5.3) | C6 |
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |
+| *(fetch, draft)* every fetch row above, reconciliation, download-area reclamation, readers, records | the fetch command tasks (transaction and recovery; creation; refetch pair rules; contest membership; status surfaces) |
 
 Reruns: `init`, `add --contest` complete the operation; `test add` may
-create a new number and leave the earlier files unregistered.
+create a new number and leave the earlier files unregistered. *(fetch, draft)*
+A rerun of `cpf fetch` reconciles first (§5.8.7), then fetches; a rerun of a
+contest fetch completes its membership.
 
 **Tests:**
 
@@ -1227,6 +1692,127 @@ create a new number and leave the earlier files unregistered.
   release on removal, overflow of checked arithmetic refused.
 - Links in tool-written paths refused; root via a link works.
 - Schema refusal per format; answer absent vs present-empty.
+- *(fetch, draft)* **Fetch harness.** A test adapter (`storage-test-hooks`)
+  returns a given parsed problem or contest (§5.8.1) without network; every
+  fetch test below drives the actual `cpf` binary with it. Assertions read
+  back, after each step: the catalog (entries in order, `download` tables,
+  `[fetch]`), the `problem.toml` tool fields, the files of `tests/` with
+  their SHA-256, each history record (outcome, pairs, files and roles), the
+  status outcome and findings, whether a journal exists, and the entries of
+  `downloads/`. Crash points: `fetch.prepared`, `fetch.downloaded`,
+  `fetch.revalidated`, `fetch.journal_published`, `fetch.files_published`,
+  `fetch.catalog_committed`, `fetch.metadata_committed`,
+  `fetch.history_published`, `fetch.status_replaced`,
+  `fetch.journal_removed`, `fetch.area_renamed`, `fetch.staged`,
+  `fetch.problem_published`, `fetch.abort_recorded`,
+  `fetch.member_finished`, `fetch.contest_created`,
+  `fetch.membership_edited`, and `file_noclobber.after_publish#i` during
+  step 4; `fetch_reconcile.catalog_committed`,
+  `fetch_reconcile.metadata_committed`, `fetch_reconcile.history_published`
+  inside reconciliation. Pause barriers: `fetch.network` (area held, no
+  lock), `fetch.before_rehash` (files published, before the catalog edit's
+  first validation), `fetch.after_rehash` (after the last step-5 rehash,
+  before the rename), `fetch.before_metadata`.
+- **Fetch crash states:** a kill at each crash point above for a creation, a
+  refetch with one `updated`, one `added` and one `kept_edited` pair, and a
+  metadata-only refetch; reconciliation then by `cpf fetch` (same parsed
+  problem) and, separately, by `cpf fsck --apply`; the recovered state
+  equals the §10 row; a second reconciliation changes nothing; no test file
+  is ever modified or deleted (hashes of every pre-existing file unchanged).
+  A kill inside reconciliation at each `fetch_reconcile.*` point, then a
+  further reconciliation, gives the same final state.
+- **Restart cases** (after the kill, before reconciliation): `tests.toml`
+  edited (an `enabled` change) → rolled back; a planned file modified →
+  that file is not in the history record and the others are `unreferenced`;
+  a planned file name created by the user with other bytes → user content,
+  not recorded; a `problem.toml` tool field edited after a kill past step 5
+  → kept, `metadata_conflict{field}`; the catalog edited after step 5 →
+  steps 6–7 still rolled forward, catalog untouched by reconciliation.
+- **Aborts:** `Exists` on a planned name (created at `fetch.before_rehash`
+  by another process) → `name_taken`, history `failed`, earlier files
+  `unreferenced`; a hash mismatch injected into the area → `failed`, the
+  file not published; an editor save of a replaced input at
+  `fetch.before_rehash` → `conflict` `edited_during_commit`, catalog
+  byte-identical, published files candidates; the Windows retry path with a
+  save between attempts → the same conflict.
+- **Observation points and the race:** a save of a download entry's input at
+  `fetch.network` → `base_changed`, nothing published, no journal; a save at
+  `fetch.after_rehash` → the catalog names the revision pair, the superseded
+  file keeps the user's bytes, `cpf status` reports it as edited (the
+  stated race); a save to `problem.toml` at `fetch.before_metadata` →
+  per-field rule.
+- **Pair rules:** one test per row of the §5.8.5 outcome table, each with an
+  enabled and a disabled entry; input-only edit, answer-only edit, deleted
+  input, deleted answer, input replaced by a directory; each ambiguity kind
+  (`duplicate_ordinal`, `duplicate_recorded`, `duplicate_upstream`, `moved`
+  by swap and by insertion at the front) → conflict, workspace
+  byte-identical except `status.toml`; identical upstream with duplicate
+  pairs → `unchanged`; zero samples with and without `--disable-removed` →
+  set kept, `zero_samples`; `removed_upstream` with `--disable-removed` →
+  disabled, files untouched; `removed_locally` → not re-added; three
+  refetches with an edited pair and an unchanged upstream revision → exactly
+  one unregistered upstream pair; an unchanged refetch → every file
+  byte-identical except `status.toml`, no history record; three refetches
+  that each update a pair, a restart, then `cpf test register` of a
+  superseded file → registered as `custom`, history records unchanged, and
+  provenance `registered` before `downloaded`.
+- **Names:** `sample-1.r2.in` present and unregistered → `r3`; a directory
+  named `sample-1.r2.ans` → `r3`; a catalog path naming a missing
+  `sample-1.r2.in` → `r3`; a history-listed name deleted by the user is not
+  reused; `added` on an existing unregistered `sample-1.in` → `sample-1.r2`
+  with id `sample-1.r2`; collision-key variants (`Sample-1.R2.in`) count as
+  taken.
+- **Download area:** at `fetch.network`, `cpf fsck --apply`, `cpf clean
+  --apply` and `cpf clean` from other processes leave the area and its
+  lease intact and the fetch then commits; a kill at `fetch.network` → the
+  next locked command removes the area; an area without `lease` → removed;
+  an unopenable lease (Unix permission) → kept and reported by `fsck` and
+  as `RecoveryIncomplete`; an unexpected entry in `downloads/` → kept and
+  reported; the owner's own recovery at step 2 sees its area `held`;
+  Windows: owner release renames with no handle open.
+- **Concurrency:** two fetches of one problem paused at `fetch.network`,
+  released in turn → the first commits, the second `base_changed` with
+  nothing published; a rerun → `unchanged`. A fetch and `cpf test add` on
+  one problem serialize by the lock; a `test add` between steps 0 and 2 →
+  `base_changed`.
+- **Records:** each fetch record in each classification (`missing`,
+  `unreadable`, `malformed`, `too_new`, `valid`): a `too_new` journal
+  blocks `cpf fetch` and survives `fsck --apply`; a `malformed` journal is
+  removed by `fsck --apply` and its files become `unknown`; a `too_new`
+  status is not replaced; a `too_new` or `malformed` history record
+  contributes no provenance; a history record of another identity
+  contributes none; download-field validation (`download` on `custom`;
+  without `answer`; a missing key; `ordinal` 0 and 65; uppercase or short
+  hash; invalid `txn`; `[fetch]` without `txn`) → `malformed`; a version
+  without fetch support preserves the fields as unknown keys through `test
+  enable`; a plan whose catalog would pass 1 MiB → `record_too_large`,
+  nothing published.
+- **Readers:** with a `pending` and with a `committed` journal, `cpf status`
+  and `cpf test ls` report `fetch_incomplete` with that phase and leave the
+  workspace byte-identical; a pending journal's files are candidates and
+  never run.
+- **Metadata:** an unavailable field is not written; a limit change with a
+  contest record `limits` override → only `problem.toml` changes,
+  `contest.toml` byte-identical.
+- **Creation:** an existing local problem whose name is the derived one →
+  refused, nothing created; a directory bound to another remote identity →
+  `IdentityMismatch`; zero samples → empty catalog with `upstream_samples =
+  0` and `no_samples`; non-ASCII sample bytes published exactly.
+- **Contest membership:** a kill at `fetch.member_finished#2` of four, then a
+  rerun → membership equals the enumeration in order; a member failing in
+  the rerun but committed earlier → listed; a member never committed → not
+  listed; insertion before the first later member; an existing record with
+  another label keeps it; a label held by another record → record without
+  label, reported; `[contest] id` mismatch → refused; a problem shared by
+  two contests is one directory listed in both.
+- **fsync order** (trace recorder, `storage-test-hooks`): for every fetch
+  publication, file sync before rename before directory sync; the journal's
+  directory sync before the first test-file publication; the last test
+  file's directory sync before the catalog rename; the journal unlink
+  followed by its directory sync. Linux and macOS record directory syncs;
+  Windows records file flushes before each rename.
+- Every fetch test runs on Linux, macOS and Windows (fetch starts no
+  process).
 - Real runs on Linux, macOS and Windows on the supported filesystems;
   power-loss behaviour is not tested. Platform floor and toolchain as in
   [README](../../README.md) (platform floor).
