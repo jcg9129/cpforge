@@ -68,6 +68,8 @@ pub(in crate::supervisor) fn spawn(
     if let Some(gate) = gate {
         gate.install(&mut command);
     }
+    #[cfg(feature = "storage-test-hooks")]
+    let _cli_pause = super::creation_pause::install_cli(&mut command).map_err(NotStarted::Setup)?;
     let result = command.spawn();
     let mut child = result.map_err(|error| {
         if let Some(errno) = phase.as_ref().and_then(|pipe| pipe.read_failure()) {

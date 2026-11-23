@@ -13,6 +13,8 @@ pub(in crate::supervisor) struct CleanupScan {
     buffer: [u8; 4096],
     last_survivors: Option<u32>,
     entry_delay: Duration,
+    #[cfg(feature = "storage-test-hooks")]
+    rescan_delay: Option<Duration>,
     #[cfg(test)]
     scans_started: usize,
 }
@@ -48,6 +50,8 @@ impl CleanupScan {
             buffer: [0; 4096],
             last_survivors: None,
             entry_delay: Duration::ZERO,
+            #[cfg(feature = "storage-test-hooks")]
+            rescan_delay: None,
             #[cfg(test)]
             scans_started: 0,
         })
@@ -55,6 +59,11 @@ impl CleanupScan {
 
     pub(in crate::supervisor) fn set_entry_delay(&mut self, delay: Duration) {
         self.entry_delay = delay;
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    pub(in crate::supervisor) fn set_rescan_delay(&mut self, delay: Option<Duration>) {
+        self.rescan_delay = delay;
     }
 
     /// None means a completed scan found live members before the deadline.
@@ -84,6 +93,10 @@ impl CleanupScan {
             Ok(survivors) if Instant::now() >= deadline => Some(Cleanup::Incomplete { survivors }),
             Ok(survivors) => {
                 self.last_survivors = Some(survivors);
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(delay) = self.rescan_delay {
+                    self.entry_delay = delay;
+                }
                 None
             }
             // Only the deadline check yields ScanIncomplete from a scan.

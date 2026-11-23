@@ -1728,7 +1728,7 @@ async fn at_creation_gate<F: Future>(future: &mut std::pin::Pin<Box<F>>, gate: &
     .expect("creation did not reach its gate");
 }
 
-#[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
+#[cfg(feature = "storage-test-hooks")]
 async fn assert_creation_pending<F: Future>(future: &mut std::pin::Pin<Box<F>>) {
     assert!(
         std::future::poll_fn(|cx| {
@@ -2171,14 +2171,11 @@ fn session_pipe_creation_failures_release_cross_wiring_and_both_admissions() {
     });
 }
 
-// A real filesystem failure complements the deterministic failing sink stub
-// below (which also runs on macOS). No mount privilege is required when
-// CI supplies CPF_TEST_TINY_FS or a small /dev/shm.
-#[cfg(target_os = "linux")]
+// A real filesystem failure complements the deterministic failing sink stub.
+// Linux uses a small tmpfs; macOS uses an unprivileged writable HFS+ image.
 #[path = "support/tiny_filesystem.rs"]
 mod tiny_filesystem;
 
-#[cfg(target_os = "linux")]
 #[test]
 fn real_enospc_reports_write_loss_without_blocking_or_conflating_budget_loss() {
     run_test(async {
@@ -3505,6 +3502,62 @@ fn exit_during_pidfd_registration_is_observed_and_reaped_once() {
     });
 }
 
+#[cfg(all(feature = "storage-test-hooks", target_os = "macos"))]
+#[test]
+fn exit_during_kqueue_registration_is_observed_and_reaped_once() {
+    run_test(async {
+        use cpforge::supervisor::{Creator, Milestones, create_root};
+        let (baseline, before, fds, threads) = creation_baseline().await;
+        let creator = Creator::start().unwrap();
+        let gate = CreationRelease::new(false);
+        let stamps = Arc::new(Milestones::default());
+        let options = SpawnOptions {
+            milestones: Some(stamps.clone()),
+            registration_gate: Some(gate.0.clone()),
+            ..SpawnOptions::default()
+        };
+        let exit_gate = CapturePath::new();
+        let cancel = CancelToken::new();
+        let mut future = Box::pin(create_root(
+            &creator,
+            spec(&[&exit_gate.step(), "exit:23"]),
+            admit().unwrap(),
+            &options,
+            &cancel,
+        ));
+        // The queue exists, but EV_ADD has not run. Let the child exit while
+        // registration is held; WNOWAIT-style process inspection pins status.
+        at_creation_gate(&mut future, &gate).await;
+        let pid = gate.0.pid().unwrap();
+        assert!(process(pid).is_some_and(|p| p.state != 'Z'));
+        exit_gate.open();
+        until(|| process(pid).is_some_and(|p| p.state == 'Z')).await;
+        assert_creation_pending(&mut future).await;
+        gate.0.release();
+        let root = tokio::time::timeout(allowance(1000), future.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        let ticket = root.ticket();
+        drop(future);
+        let outcome = wait_root(root).await;
+        success(&outcome, 23);
+        // Darwin may acknowledge an exited zombie or return ESRCH. Both paths
+        // must latch one exit, retain wait4 status, and avoid polling fallback.
+        assert_eq!(outcome.timing.observer, ObserverKind::Kqueue);
+        assert_eq!(stamps.exit_observations(), 1);
+        assert_eq!(outcome.kill_attempts, 1);
+        assert!(process(pid).is_none());
+        assert!(ticket.clone().outcome().await.is_none());
+        assert!(ticket.outcome().await.is_none());
+        drop(creator);
+        quiescent().await;
+        settled(fds, threads).await;
+        assert_eq!(children(), before);
+        assert_eq!(debug_counters(), baseline);
+    });
+}
+
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 #[test]
 fn pidfd_open_enosys_and_emfile_fall_back_to_polling() {
@@ -3641,6 +3694,82 @@ fn root_exit_to_cleanup_result_meets_the_cleanup_deadline() {
                 );
             }
         }
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn cleanup_deadline_during_rescan_keeps_last_live_count() {
+    run_test(async {
+        use cpforge::supervisor::{Milestone, Milestones};
+        struct Member(std::process::Child);
+        impl Drop for Member {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let baseline = debug_counters();
+        let before = children();
+        let exit = CapturePath::new();
+        let stamps = Arc::new(Milestones::default());
+        let killed = CancelToken::new();
+        let scan_gate = CancelToken::new();
+        let _release = CancelOnDrop(scan_gate.clone());
+        let root = spawn_root(
+            spec(&[&exit.step(), "exit:0"]),
+            admit().unwrap(),
+            &SpawnOptions {
+                milestones: Some(stamps.clone()),
+                cleanup_kill_observed: Some(killed.clone()),
+                cleanup_scan_gate: Some(scan_gate.clone()),
+                cleanup_rescan_delay: Some(Duration::from_secs(2)),
+                ..SpawnOptions::default()
+            },
+        )
+        .unwrap();
+        let created: Vec<_> = children().difference(&before).copied().collect();
+        assert_eq!(created.len(), 1);
+        let pid = created[0];
+        exit.open();
+        let mut member = None;
+        let (outcome, ()) = tokio::join!(wait_root(root), async {
+            killed.cancelled().await;
+            // This process is outside the root's tree. Join its still-pinned
+            // group after the real kill, so verification must see a live member.
+            // Ownership moves into Member, whose Drop always kills and reaps.
+            #[allow(clippy::zombie_processes)]
+            let child = Command::new(fixture_path())
+                .arg("hold")
+                .process_group(pid as i32)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut owned = Member(child);
+            assert!(owned.0.try_wait().unwrap().is_none());
+            assert_eq!(process(owned.0.id()).unwrap().pgrp, pid);
+            member = Some(owned);
+            scan_gate.cancel();
+        });
+        success(&outcome, 0);
+        assert_eq!(
+            outcome.termination.cleanup,
+            Cleanup::Incomplete { survivors: 1 }
+        );
+        let elapsed = stamps
+            .get(Milestone::CleanupResult)
+            .unwrap()
+            .duration_since(outcome.timing.exit_observed.unwrap());
+        assert!(
+            (Duration::from_secs(1)..=Duration::from_secs(1) + allowance(50)).contains(&elapsed),
+            "delayed rescan cleanup: {elapsed:?}"
+        );
+        assert!(member.as_mut().unwrap().0.try_wait().unwrap().is_none());
+        drop(member);
+        quiescent().await;
+        assert_eq!(debug_counters(), baseline);
     });
 }
 

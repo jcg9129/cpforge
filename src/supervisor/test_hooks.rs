@@ -47,7 +47,6 @@ impl CreationGate {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub(super) fn before_registration(&self, pid: i32) {
         self.pid.store(pid as u32, Ordering::Release);
         self.wait();
@@ -205,4 +204,16 @@ impl Drop for OwnedResource {
 }
 pub(in crate::supervisor) fn owned_resources() -> usize {
     OWNED_RESOURCES.load(Ordering::Acquire)
+}
+
+// Cumulative handovers catch even a wrongly transferred healthy thread that the
+// cleanup poller joins before the next occupancy snapshot.
+static PERSISTENCE_HANDOVERS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn persistence_handovers() -> usize {
+    PERSISTENCE_HANDOVERS.load(Ordering::Acquire)
+}
+
+pub(crate) fn record_persistence_handover() {
+    PERSISTENCE_HANDOVERS.fetch_add(1, Ordering::AcqRel);
 }

@@ -762,7 +762,7 @@ async fn persistence_handover(rename: bool) {
         }
     }
 
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10 * allowance_scale()), async {
         let baseline = supervisor::Counters {
             credits_in_use: 1, // The cleanup polling thread's lifetime credit.
             ..Default::default()
@@ -831,12 +831,82 @@ async fn persistence_handover(rename: bool) {
         assert_eq!(budget.usage(), held);
         assert!(owner.upgrade().is_some());
 
+        // A stalled persistence thread must not occupy the cleanup poller.
+        // Submit a real transferred root while the write/rename gate stays shut.
+        let stamps = Arc::new(supervisor::Milestones::default());
+        let root = supervisor::spawn_root(
+            supervisor::ProgramSpec {
+                program: cpf_fixture::harness::fixture_path(),
+                args: vec!["hold".into()],
+                cwd: std::env::current_dir().unwrap(),
+                env: Vec::new(),
+                stdin: supervisor::StdinSpec::Null,
+                stdout: supervisor::OutputSpec::Null,
+                stderr: supervisor::OutputSpec::Null,
+                limits: Vec::new(),
+                measure: Vec::new(),
+            },
+            supervisor::admit().unwrap(),
+            &supervisor::SpawnOptions {
+                milestones: Some(stamps.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ticket = root.ticket();
+        let submitted = std::time::Instant::now();
+        drop(root);
+        tokio::time::timeout(
+            Duration::from_secs(1) + Duration::from_millis(150 * allowance_scale()),
+            async {
+                let outcome = ticket.outcome().await.expect("transferred root outcome");
+                assert_eq!(
+                    outcome.status,
+                    supervisor::Termination::Signalled {
+                        signal: libc::SIGKILL,
+                        core_dumped: false
+                    }
+                );
+                wait_for_cleanup_counters(supervisor::Counters {
+                    credits_in_use: baseline.credits_in_use + 1,
+                    service_pending: baseline.service_pending + 1,
+                    transferred_workers: baseline.transferred_workers + 1,
+                    ..baseline
+                })
+                .await;
+                while stamps
+                    .get(supervisor::Milestone::ResourcesReleased)
+                    .is_none()
+                {
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await
+        .expect("stalled persistence blocked cleanup of a transferred root");
+        assert!(stamps.get(supervisor::Milestone::RootReaped).unwrap() >= submitted);
+        let released = stamps
+            .get(supervisor::Milestone::ResourcesReleased)
+            .unwrap();
+        let finalized = stamps.get(supervisor::Milestone::RecordFinalized).unwrap();
+        assert!(
+            released.saturating_duration_since(finalized)
+                <= Duration::from_millis(100 * allowance_scale())
+        );
+        assert!(owner.upgrade().is_some());
+        assert_eq!(budget.usage(), held);
+
         gate.release.notify_one();
         write_gate.notify_one();
         if rename {
             gate.completed.notified().await;
         }
-        wait_for_cleanup_counters(baseline).await;
+        tokio::time::timeout(
+            Duration::from_millis(100 * allowance_scale()),
+            wait_for_cleanup_counters(baseline),
+        )
+        .await
+        .expect("returned persistence worker kept its credit past the release bound");
         assert_eq!(budget.usage().reserved, 0);
         assert_eq!(budget.usage().retained, 0);
         assert!(owner.upgrade().is_none());
@@ -856,6 +926,160 @@ async fn persistence_handover(rename: bool) {
 
 #[cfg(feature = "storage-test-hooks")]
 #[test]
+fn fixed_control_and_output_threads_hold_no_worker_credits() {
+    run_test(move || async move {
+        use cpforge::jobs::persist::JobPersistence;
+        use cpforge::progress::ProgressWriter;
+        use cpforge::transport::Delivery;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        struct Witness {
+            name: &'static str,
+            ready: Arc<Notify>,
+        }
+        impl std::io::Write for Witness {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                assert_eq!(std::thread::current().name(), Some(self.name));
+                self.ready.notify_one();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let baseline = supervisor::Counters {
+            credits_in_use: 1,
+            ..Default::default()
+        };
+        wait_for_cleanup_counters(baseline).await;
+        let out_ready = Arc::new(Notify::new());
+        let err_ready = Arc::new(Notify::new());
+        let progress = ProgressWriter::new(Witness {
+            name: "cpf-stderr",
+            ready: err_ready.clone(),
+        })
+        .unwrap();
+        let f = Fixture::new();
+        let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let engine = Engine::new(ready, request)
+            .unwrap()
+            .progress(progress.queue());
+        let signals =
+            cpforge::cancel_signals::CancelSignals::install(engine.cancellation()).unwrap();
+        let mut executor = SupervisorExecutor::start().unwrap();
+        let output = Delivery::new(
+            Witness {
+                name: "cpf-stdout",
+                ready: out_ready.clone(),
+            },
+            false,
+        )
+        .start_events(
+            engine.events().subscribe().unwrap(),
+            cpforge::report::JobKind::Cmd,
+            false,
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_millis(1000 * allowance_scale()), async {
+            // Offers are deliberately nonblocking and can lose queue-lock
+            // contention. Await an accepted marker instead of assuming one.
+            while !progress.queue().offer("job ready") {
+                tokio::task::yield_now().await;
+            }
+            tokio::join!(out_ready.notified(), err_ready.notified());
+        })
+        .await
+        .expect("output threads did not start");
+        assert_eq!(
+            supervisor::debug_counters().credits_in_use,
+            baseline.credits_in_use + 2
+        );
+        let report = engine
+            .run(&mut executor, &mut persistence, &mut NoHooks)
+            .await;
+        assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+        // Sinks can return their credits just after logical finalization.
+        // Leave all three fixed threads installed while they settle.
+        tokio::time::timeout(
+            Duration::from_millis(100 * allowance_scale()),
+            wait_for_cleanup_counters(supervisor::Counters {
+                credits_in_use: baseline.credits_in_use + 2,
+                ..baseline
+            }),
+        )
+        .await
+        .expect("only cleanup and job workers should hold credits");
+        output.finish().unwrap();
+        progress.finish("finished").unwrap();
+        drop(signals);
+        drop(persistence);
+        drop(executor);
+        tokio::time::timeout(
+            Duration::from_millis(100 * allowance_scale()),
+            wait_for_cleanup_counters(baseline),
+        )
+        .await
+        .expect("job credits did not return");
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn healthy_idle_persistence_returns_credit_without_cleanup_handover() {
+    run_test(move || async move {
+        use cpforge::jobs::persist::JobPersistence;
+        let baseline = supervisor::Counters {
+            credits_in_use: 1,
+            ..Default::default()
+        };
+        wait_for_cleanup_counters(baseline).await;
+        let handovers = supervisor::persistence_handovers();
+        let f = Fixture::new();
+        let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let engine = Engine::new(ready, request).unwrap();
+        let mut executor = SupervisorExecutor::start().unwrap();
+        let report = engine
+            .run(&mut executor, &mut persistence, &mut NoHooks)
+            .await;
+        assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+        assert!(matches!(
+            report.persistence(),
+            cpforge::jobs::engine::ReportPersistence::Published { .. }
+        ));
+        tokio::time::timeout(
+            Duration::from_millis(100 * allowance_scale()),
+            wait_for_cleanup_counters(supervisor::Counters {
+                credits_in_use: baseline.credits_in_use + 2,
+                ..baseline
+            }),
+        )
+        .await
+        .expect("healthy run resources did not settle");
+        assert_eq!(
+            supervisor::debug_counters().service_pending,
+            baseline.service_pending
+        );
+        assert_eq!(
+            supervisor::debug_counters().transferred_workers,
+            baseline.transferred_workers
+        );
+        drop(persistence);
+        drop(executor);
+        tokio::time::timeout(
+            Duration::from_millis(100 * allowance_scale()),
+            wait_for_cleanup_counters(baseline),
+        )
+        .await
+        .expect("healthy job workers kept their credits after job end");
+        assert_eq!(supervisor::persistence_handovers(), handovers);
+    });
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
 fn stalled_persistence_handover_holds_queued_reservations_until_worker_returns() {
     run_test(move || async move { persistence_handover(false).await });
 }
@@ -866,11 +1090,11 @@ fn late_rename_handover_holds_credit_lease_and_metadata_until_worker_returns() {
     run_test(move || async move { persistence_handover(true).await });
 }
 
-#[cfg(all(target_os = "linux", feature = "storage-test-hooks"))]
+#[cfg(feature = "storage-test-hooks")]
 #[path = "support/tiny_filesystem.rs"]
 mod tiny_filesystem;
 
-#[cfg(all(target_os = "linux", feature = "storage-test-hooks"))]
+#[cfg(feature = "storage-test-hooks")]
 #[test]
 fn real_enospc_record_and_report_failures_keep_verdict_refs_and_delivery() {
     run_test(move || async move {

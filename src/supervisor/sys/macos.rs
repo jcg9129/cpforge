@@ -81,6 +81,8 @@ pub(in crate::supervisor) fn spawn(
     if let Some(gate) = gate {
         gate.install(&mut command);
     }
+    #[cfg(feature = "storage-test-hooks")]
+    let _cli_pause = super::creation_pause::install_cli(&mut command).map_err(NotStarted::Setup)?;
     // Rust's Unix Command paths inherit the signal mask and ignored dispositions,
     // except SIGPIPE which std resets to SIG_DFL. init_process restores SIGCHLD.
     // This matches Linux: no blanket signal reset or production pre_exec hook. std sets
@@ -211,27 +213,16 @@ fn register(
     }
 }
 
-pub(in crate::supervisor) fn observer(pid: i32) -> io::Result<Observer> {
-    observer_inner(
-        pid,
-        #[cfg(feature = "storage-test-hooks")]
-        None,
-    )
-}
-
-#[cfg(feature = "storage-test-hooks")]
-pub(in crate::supervisor) fn observer_with_receipt_error(
-    pid: i32,
-    errno: i32,
-) -> io::Result<Observer> {
-    observer_inner(pid, Some(errno))
-}
-
-fn observer_inner(
+pub(in crate::supervisor) fn observer(
     pid: i32,
     #[cfg(feature = "storage-test-hooks")] receipt_error: Option<i32>,
+    #[cfg(feature = "storage-test-hooks")] gate: Option<&crate::supervisor::CreationGate>,
 ) -> io::Result<Observer> {
     let fd = queue()?;
+    #[cfg(feature = "storage-test-hooks")]
+    if let Some(gate) = gate {
+        gate.before_registration(pid);
+    }
     let exited = register(
         &fd,
         pid,

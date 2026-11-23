@@ -118,6 +118,11 @@ enum Transfer {
 /// reserves no run slot: each entry keeps its worker's own thread credit, so
 /// at most THREAD_CREDITS entries exist. This never waits for the poller.
 pub(crate) fn transfer_persistence(worker: PersistenceWorker) {
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    super::test_hooks::record_persistence_handover();
     let bounds = global_bounds().expect("persistence initializes cleanup before spawning");
     bounds.pending.fetch_add(1, Ordering::AcqRel);
     bounds.transferred_workers.fetch_add(1, Ordering::AcqRel);

@@ -76,3 +76,47 @@ impl CreationPause {
         }
     }
 }
+
+/// CLI seam: the harness owns the peer, so the child stays inside pre_exec even
+/// after force exit closes every descriptor in cpf. No environment lookup,
+/// allocation or Rust stream lock runs in the forked child.
+pub(in crate::supervisor) fn install_cli(command: &mut Command) -> io::Result<Option<UnixStream>> {
+    let Some(path) = std::env::var_os("CPF_STORAGE_CREATION_SOCKET") else {
+        return Ok(None);
+    };
+    let socket = UnixStream::connect(path)?;
+    let fd = socket.as_raw_fd();
+    // SAFETY: socket is kept alive until spawn returns. The child uses only
+    // getpid, read, write and errno; the test harness pins it until released.
+    unsafe {
+        command.pre_exec(move || {
+            let pid = libc::getpid().to_ne_bytes();
+            let mut sent = 0;
+            while sent < pid.len() {
+                let n = libc::write(fd, pid[sent..].as_ptr().cast(), pid.len() - sent);
+                if n > 0 {
+                    sent += n as usize;
+                } else {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EINTR) {
+                        return Err(error);
+                    }
+                }
+            }
+            loop {
+                let mut byte = 0_u8;
+                match libc::read(fd, (&mut byte as *mut u8).cast(), 1) {
+                    1 => return Ok(()),
+                    0 => return Err(io::Error::from_raw_os_error(libc::EPIPE)),
+                    _ => {
+                        let error = io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::EINTR) {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    Ok(Some(socket))
+}

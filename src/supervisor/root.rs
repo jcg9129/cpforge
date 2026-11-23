@@ -256,8 +256,11 @@ pub struct SpawnOptions {
     #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
     /// Pause after creation returns and before pidfd_open.
     pub pidfd_open_gate: Option<Arc<super::CreationGate>>,
-    #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
-    /// Pause after pidfd_open succeeds and before AsyncFd/epoll registration.
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    /// Pause before registration: after pidfd_open on Linux, before EV_ADD on macOS.
     pub registration_gate: Option<Arc<super::CreationGate>>,
     #[cfg(all(
         feature = "storage-test-hooks",
@@ -269,6 +272,23 @@ pub struct SpawnOptions {
         any(target_os = "linux", target_os = "macos")
     ))]
     pub creation_gate: Option<Arc<super::CreationGate>>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    /// Acknowledge the post-exit kill, then hold before the first cleanup scan.
+    pub cleanup_kill_observed: Option<CancelToken>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub cleanup_scan_gate: Option<CancelToken>,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    /// Apply entry delay only after a completed scan found live members.
+    pub cleanup_rescan_delay: Option<Duration>,
     pub stdout_sink: SinkTestOptions,
     pub stderr_sink: SinkTestOptions,
     pub force_polling_observer: bool,

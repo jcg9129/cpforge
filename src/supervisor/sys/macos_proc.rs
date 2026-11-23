@@ -25,6 +25,8 @@ pub(in crate::supervisor) struct CleanupScan {
     next_scan: Instant,
     backoff_ms: u64,
     entry_delay: Duration,
+    #[cfg(feature = "storage-test-hooks")]
+    rescan_delay: Option<Duration>,
     entry_ready: Option<Instant>,
     #[cfg(test)]
     list_reply: Option<(i32, i32)>,
@@ -60,6 +62,8 @@ pub(in crate::supervisor) fn cleanup_scan(
         next_scan: Instant::now(),
         backoff_ms: 1,
         entry_delay: Duration::ZERO,
+        #[cfg(feature = "storage-test-hooks")]
+        rescan_delay: None,
         entry_ready: None,
         #[cfg(test)]
         list_reply: None,
@@ -176,6 +180,11 @@ impl CleanupScan {
         self.entry_delay = delay;
     }
 
+    #[cfg(feature = "storage-test-hooks")]
+    pub(in crate::supervisor) fn set_rescan_delay(&mut self, delay: Option<Duration>) {
+        self.rescan_delay = delay;
+    }
+
     /// None yields to the caller: backoff, delayed entry, or bounded work remains.
     /// A partial scan never confirms or supplies a survivor count. At the cleanup
     /// deadline the last completed scan's survivors stand, even while a newer scan
@@ -216,6 +225,10 @@ impl CleanupScan {
                     return Some(Cleanup::Confirmed);
                 }
                 self.last_survivors = Some(survivors);
+                #[cfg(feature = "storage-test-hooks")]
+                if let Some(delay) = self.rescan_delay {
+                    self.entry_delay = delay;
+                }
                 self.next_scan = Instant::now() + Duration::from_millis(self.backoff_ms);
                 self.backoff_ms = (self.backoff_ms * 2).min(10);
                 None

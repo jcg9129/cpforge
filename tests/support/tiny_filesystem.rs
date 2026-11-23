@@ -1,8 +1,10 @@
-// Linux-only bounded tmpfs fixture shared by capture and persistence tests.
+// Bounded real filesystem fixture shared by capture and persistence tests.
 #![allow(dead_code)]
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -14,7 +16,12 @@ const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub struct TinyFs {
     pub directory: PathBuf,
     mounted: bool,
+    #[cfg(target_os = "linux")]
     sudo: bool,
+    #[cfg(target_os = "macos")]
+    image: PathBuf,
+    #[cfg(target_os = "macos")]
+    attach_attempted: bool,
 }
 
 fn bounded_command(command: &mut Command) -> std::io::Result<bool> {
@@ -23,7 +30,8 @@ fn bounded_command(command: &mut Command) -> std::io::Result<bool> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline =
+        Instant::now() + Duration::from_secs(if cfg!(target_os = "macos") { 40 } else { 3 });
     let failure = loop {
         match child.try_wait() {
             Ok(Some(_)) => break None,
@@ -52,6 +60,7 @@ fn bounded_command(command: &mut Command) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn small_tmpfs(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -71,6 +80,7 @@ fn small_tmpfs(path: &Path) -> bool {
 }
 
 impl TinyFs {
+    #[cfg(target_os = "linux")]
     pub fn acquire() -> Option<Self> {
         let name = format!("cpf-enospc-{}", std::process::id());
         let candidates = std::env::var_os("CPF_TEST_TINY_FS")
@@ -92,6 +102,7 @@ impl TinyFs {
         Self::one_mib()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn one_mib() -> Option<Self> {
         // Unique per process and call: test binaries and their threads may
         // each hold a mount at the same time.
@@ -137,6 +148,95 @@ impl TinyFs {
             );
             None
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn acquire() -> Option<Self> {
+        Self::one_mib()
+    }
+
+    // HFS+ needs room for its filesystem metadata. A 16 MiB writable image
+    // stays below MAX_BYTES and exercises native ENOSPC without root or sudo.
+    // Keep the shared entry point's name for Linux's 1 MiB tmpfs callers.
+    #[cfg(target_os = "macos")]
+    pub fn one_mib() -> Option<Self> {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let name = format!(
+            "cpf-enospc-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let directory = std::env::current_dir().unwrap().join("target").join(name);
+        let image = directory.with_extension("dmg");
+        fs::create_dir_all(&directory).unwrap();
+        let mut fixture = Self {
+            directory,
+            mounted: false,
+            image,
+            attach_attempted: false,
+        };
+        // Hosted runners occasionally report a transient "Resource busy" from
+        // hdiutil; retry a prompt failure, but never a timed-out helper.
+        let mut created = Ok(false);
+        for _ in 0..3 {
+            let _ = fs::remove_file(&fixture.image);
+            created = bounded_command(
+                Command::new("hdiutil")
+                    .args([
+                        "create",
+                        "-quiet",
+                        "-size",
+                        "16m",
+                        "-fs",
+                        "HFS+",
+                        "-layout",
+                        "NONE",
+                        "-volname",
+                        "cpf-enospc",
+                    ])
+                    .arg(&fixture.image),
+            );
+            if !matches!(created, Ok(false)) {
+                break;
+            }
+        }
+        let mut attached = Ok(false);
+        if matches!(created, Ok(true)) {
+            // Mark before attach so even a timed-out/partially successful attach
+            // gets a detach attempt from Drop.
+            fixture.attach_attempted = true;
+            for _ in 0..3 {
+                attached = bounded_command(
+                    Command::new("hdiutil")
+                        .args([
+                            "attach",
+                            "-quiet",
+                            "-nobrowse",
+                            "-noautoopen",
+                            "-mountpoint",
+                        ])
+                        .arg(&fixture.directory)
+                        .arg(&fixture.image),
+                );
+                if !matches!(attached, Ok(false)) {
+                    break;
+                }
+            }
+        }
+        if matches!(attached, Ok(true)) {
+            fixture.mounted = true;
+            return Some(fixture);
+        }
+        // A failed attach might not have mounted anything. Drop still tries to
+        // detach the mountpoint before removing its local files.
+        assert!(
+            std::env::var_os("CPF_REQUIRE_TMPFS").as_deref() != Some(std::ffi::OsStr::new("1")),
+            "required real ENOSPC fixture: HFS+ image unavailable: create={created:?}, attach={attached:?}"
+        );
+        eprintln!(
+            "SKIP real ENOSPC: hdiutil image unavailable: create={created:?}, attach={attached:?}"
+        );
+        None
     }
 
     pub fn fill(&self) {
@@ -185,6 +285,7 @@ impl Drop for TinyFs {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
         if self.mounted {
             let mut command = if self.sudo {
                 let mut command = Command::new("sudo");
@@ -216,7 +317,30 @@ impl Drop for TinyFs {
                 return;
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            if self.attach_attempted {
+                let result = bounded_command(
+                    Command::new("hdiutil")
+                        .args(["detach", "-quiet", "-force"])
+                        .arg(&self.directory),
+                );
+                // A failed attach need not have installed a device. A successful
+                // attach must detach before its backing file can be removed.
+                if self.mounted && !matches!(result, Ok(true)) {
+                    eprintln!("image detach failed: {result:?}");
+                    assert!(std::thread::panicking(), "image detach failed");
+                    return;
+                }
+            }
+            let _ = fs::remove_file(&self.image);
+        }
         let removed = fs::remove_dir(&self.directory);
+        // Disk Arbitration may remove a mount point itself on detach.
+        let removed = match removed {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        };
         assert!(removed.is_ok() || std::thread::panicking(), "{removed:?}");
     }
 }

@@ -13,6 +13,18 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "storage-test-hooks")]
+fn allowance(milliseconds: u64) -> Duration {
+    let scale = if cfg!(target_os = "macos") {
+        4
+    } else if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        2
+    } else {
+        1
+    };
+    Duration::from_millis(milliseconds * scale)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +179,7 @@ impl Workspace {
             .env_remove("CPF_STORAGE_PAUSE_AT")
             .env_remove("CPF_STORAGE_CRASH_AT")
             .env_remove("CPF_STORAGE_SIGNAL_READY")
+            .env_remove("CPF_STORAGE_CREATION_SOCKET")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -954,4 +967,130 @@ fn signals_in_later_iterations_preserve_completed_runs_and_skip_the_tail() {
             assert_all_gone(&identities, Duration::from_secs(2));
         }
     }
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn second_sigint_forces_exit_while_os_creation_is_still_held() {
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    struct Socket(PathBuf);
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    // Never send the release byte on cleanup: that would let the held child
+    // exec the job's long-lived command. Closing the peer instead makes
+    // pre_exec fail, so the child exits without exec.
+    struct HeldChild(Identity, Option<UnixStream>);
+    impl Drop for HeldChild {
+        fn drop(&mut self) {
+            if self.0.is_live() {
+                // SAFETY: the identity is pinned while pre_exec is blocked.
+                unsafe {
+                    libc::kill(self.0.pid as i32, libc::SIGKILL);
+                }
+            }
+            drop(self.1.take());
+        }
+    }
+
+    let w = Workspace::new(Job::Cmd, false);
+    // Relative socket names avoid sockaddr_un's small path limit even in long
+    // worktree paths. cpf's cwd is target/cli-signals-<id>.
+    let name = format!(
+        "creation-{}.sock",
+        cpforge::build::BuildId::generate().unwrap()
+    );
+    let socket = Socket(PathBuf::from("target").join(&name));
+    let listener = UnixListener::bind(&socket.0).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut command = w.command(Job::Cmd, true);
+    command
+        .env("CPF_STORAGE_CREATION_SOCKET", format!("../{name}"))
+        .env("CPF_STORAGE_SIGNAL_READY", w.path("signal-ready"))
+        // Keep orderly cancellation paused, so only the second signal can exit.
+        .env("CPF_STORAGE_PAUSE_AT", "job.after_delivery");
+    let mut child = Running::spawn(command);
+    let mut connection = None;
+    child.until(|| match listener.accept() {
+        Ok((stream, _)) => {
+            connection = Some(stream);
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(error) => panic!("creation connection: {error}"),
+    });
+    let mut connection = connection.unwrap();
+    // BSD accept() inherits the listener's O_NONBLOCK; Linux does not.
+    connection.set_nonblocking(false).unwrap();
+    connection.set_read_timeout(Some(allowance(1000))).unwrap();
+    let mut bytes = [0_u8; 4];
+    connection.read_exact(&mut bytes).unwrap();
+    let pid = i32::from_ne_bytes(bytes);
+    assert!(pid > 0);
+    // Read the start identity while the forked child is pinned before exec.
+    #[cfg(target_os = "linux")]
+    let start = {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        stat[stat.rfind(')').unwrap() + 2..]
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    #[cfg(target_os = "macos")]
+    let start = {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        // SAFETY: exact-size writable storage; arg=1 includes pinned zombies.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        assert_eq!(count, size);
+        // SAFETY: the exact initialized size was checked above.
+        let info = unsafe { info.assume_init() };
+        info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    };
+    w.write("blocked-root", &format!("{pid} {start}\n"));
+    let mut held = HeldChild(
+        Identity::from_file(&w.path("blocked-root")).unwrap(),
+        Some(connection),
+    );
+    assert!(held.0.is_live());
+    child.signal(libc::SIGINT);
+    child.until(|| w.path("signal-ready").is_file());
+    let first_observed = Instant::now();
+    // This wait satisfies debounce only; the socket handshake supplies readiness.
+    while first_observed.elapsed() < Duration::from_millis(120) {
+        std::thread::yield_now();
+    }
+    assert!(held.0.is_live());
+    let forced = Instant::now();
+    child.signal(libc::SIGINT);
+    child.until = child.until.min(forced + allowance(1000));
+    let output = child.wait();
+    assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
+    assert!(forced.elapsed() <= allowance(1000));
+    // No release byte has been sent. The sole creation thread cannot start a
+    // second child, and every OS creation call must connect through this seam.
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(
+        held.0.is_live(),
+        "the unregistered child should still be held"
+    );
+    // Closing the harness end makes the pinned pre_exec read EOF and fail,
+    // so the orphan exits without ever running the job command.
+    drop(held.1.take());
+    assert_all_gone(std::slice::from_ref(&held.0), allowance(1000));
 }

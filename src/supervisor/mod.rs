@@ -46,6 +46,7 @@ pub use root::*;
 #[doc(hidden)]
 pub use test_hooks::{
     CreationGate, Milestone, Milestones, PipeTestGuard, force_kill_active_for_test,
+    persistence_handovers,
 };
 
 /// Reserve both job worker credits in one operation before either thread starts.

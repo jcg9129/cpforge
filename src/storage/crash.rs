@@ -56,6 +56,10 @@
 //! exact leftover only on the fact's lock acquisition.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
+//! `CPF_STORAGE_CREATION_SOCKET=<Unix socket path>` holds OS creation in
+//! pre_exec: the child writes its native-endian i32 pid, then awaits one byte
+//! from the harness; EOF instead fails pre_exec, so the child exits without exec.
+//! The harness keeps it held across force exit, then closes its end.
 
 #[cfg(all(feature = "storage-test-hooks", target_os = "linux"))]
 pub(super) fn force_link_fallback() -> bool {

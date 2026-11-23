@@ -528,6 +528,8 @@ pub(in crate::supervisor) fn spawn_prepared(
     match sys::cleanup_scan(pid, None) {
         Ok(mut scan) => {
             scan.set_entry_delay(opts.cleanup_entry_delay);
+            #[cfg(feature = "storage-test-hooks")]
+            scan.set_rescan_delay(opts.cleanup_rescan_delay);
             root.scan = Some(scan);
         }
         Err(reason) => root.outcome().termination.cleanup = Cleanup::Unverified { reason },
@@ -634,11 +636,22 @@ async fn finish_observed(
     // Post-exit containment kill retains the capability throughout verification.
     request_kill(root.lease.as_ref().unwrap(), root.outcome.as_mut().unwrap());
     let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+    #[cfg(feature = "storage-test-hooks")]
+    {
+        if let Some(observed) = &root.opts.cleanup_kill_observed {
+            observed.cancel();
+        }
+        if let Some(gate) = &root.opts.cleanup_scan_gate {
+            gate.cancelled().await;
+        }
+    }
     root.cleanup_started = true;
     #[cfg(target_os = "linux")]
     match sys::cleanup_scan(pid, root.observer.as_ref()) {
         Ok(mut scan) => {
             scan.set_entry_delay(root.opts.cleanup_entry_delay);
+            #[cfg(feature = "storage-test-hooks")]
+            scan.set_rescan_delay(root.opts.cleanup_rescan_delay);
             root.scan = Some(scan);
         }
         Err(reason) => root.outcome().termination.cleanup = Cleanup::Unverified { reason },

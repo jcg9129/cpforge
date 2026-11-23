@@ -775,7 +775,7 @@ fn publication_bytes(len: u64, result: &Result<Published, storage::StorageError>
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "../../tests/support/tiny_filesystem.rs"]
 mod tiny_filesystem;
 
@@ -951,7 +951,7 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn real_enospc_keeps_failed_references_and_worker_accepts_a_later_write() {
         let Some(filesystem) = tiny_filesystem::TinyFs::one_mib() else {
