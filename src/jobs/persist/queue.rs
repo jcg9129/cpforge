@@ -419,15 +419,10 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
-    struct Wakeup;
-    impl Wake for Wakeup {
-        fn wake(self: Arc<Self>) {}
-    }
     fn poll<T>(future: Pin<&mut (impl Future<Output = T> + ?Sized)>) -> Poll<T> {
-        let waker = Waker::from(Arc::new(Wakeup));
-        future.poll(&mut Context::from_waker(&waker))
+        future.poll(&mut Context::from_waker(Waker::noop()))
     }
     fn acquire(pool: &Arc<Pool>, charge: usize, cancel: &CancelToken) -> Credit {
         let mut future = Box::pin(pool.acquire(charge, pool.clock.now(), cancel));
