@@ -497,6 +497,102 @@ fn late_cancellation_phase_is_total_for_every_job_kind() {
 }
 
 #[test]
+fn late_cancellation_replaces_newest_ordinary_warning_at_capacity() {
+    assert_warning_cap(true);
+}
+
+#[test]
+fn warning_capacity_without_late_cancellation_keeps_all_24_ordinary_warnings() {
+    assert_warning_cap(false);
+}
+
+fn assert_warning_cap(late_cancellation: bool) {
+    struct Hooks(usize);
+    impl PhaseHooks for Hooks {
+        fn fact_evidence(&self) -> Option<(Fact, Vec<WireWarning>)> {
+            Some((
+                Fact {
+                    outcome: FactOutcome::NotAttempted {
+                        reason: "not_completed",
+                    },
+                    warnings: Vec::new(),
+                },
+                (0..self.0)
+                    .map(|index| WireWarning {
+                        kind: WarningKind::Durability {
+                            artefact: "job_metadata",
+                            detail: "uncertain",
+                        },
+                        message: format!("ordinary warning {index}"),
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    // Exercise both warning buffers and their combined ordering.
+    for detail_count in [0, 12, 24] {
+        let f = Fixture::new();
+        let mut ready = ready(&f, "python", 1, &Tools);
+        assert!(warnings::admission(&ready.prune_report).is_empty());
+        let admission_count = 24 - detail_count;
+        ready.prune_report.selection.failed_probes = (0..admission_count)
+            .map(|index| {
+                (
+                    f.path(&format!("unreadable-job-{index}")),
+                    std::io::Error::other("probe unavailable"),
+                )
+            })
+            .collect();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap();
+        let cancel = engine.cancellation();
+        let engine = engine.observe(move |point| {
+            if late_cancellation && point == Point::BeforeSnapshot {
+                cancel.request_cancel(CancelSource::Api);
+            }
+        });
+        let report = runtime(engine.run(
+            &mut Fake::default(),
+            &mut MemoryPersistence::default(),
+            &mut Hooks(detail_count),
+        ));
+        let data = report.data();
+        assert_eq!(data.warnings.len() + data.details.warnings.len(), 24);
+        assert_eq!(data.details.warnings_dropped, u32::from(late_cancellation));
+        assert_eq!(data.result.cancellation.is_some(), late_cancellation);
+
+        let json = wire::read::read_json(&wire::encode_report(&report).unwrap()).unwrap();
+        let warnings = json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 24);
+        assert_eq!(json["warnings_dropped"], u32::from(late_cancellation));
+        let ordinary_count = 24 - usize::from(late_cancellation);
+        let kept_admission = admission_count.min(ordinary_count);
+        for warning in &warnings[..kept_admission] {
+            assert_eq!(warning["kind"], "prune");
+            assert_eq!(warning["detail"], "lease_unreadable");
+        }
+        for (index, warning) in warnings[kept_admission..ordinary_count].iter().enumerate() {
+            assert_eq!(warning["kind"], "durability");
+            assert_eq!(warning["message"], format!("ordinary warning {index}"));
+        }
+        if late_cancellation {
+            assert!(matches!(
+                data.warnings.last(),
+                Some(Warning::LateCancellation)
+            ));
+            assert_eq!(warnings[23]["kind"], "late_cancellation");
+            assert_eq!(warnings[23]["phase"], "closure");
+        }
+    }
+}
+
+#[test]
 fn cancellation_after_finalization_is_not_recorded_and_second_notification_requests_force_exit() {
     let f = Fixture::new();
     let engine = test_engine(&f, "python", 1);

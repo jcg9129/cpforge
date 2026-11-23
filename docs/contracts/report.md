@@ -176,6 +176,10 @@ Any other build coverage is an orphan (`internal_error{invariant}`). A
 build that is not `succeeded` starts nothing that depends on it (design
 §6.6); its dependants are `skipped{build_not_succeeded}`.
 
+`cpf build` on a build-free target (e.g. Python without a build stage)
+performs no executions and yields job verdict `succeeded` (§2.7),
+`build: null` (§4.4), and exit status 0 (§5.2).
+
 ### 2.4 Check outcome (test jobs)
 
 Evaluated once per test, after its record (if any) is finalized:
@@ -627,7 +631,7 @@ its temporary) is reserved before it is written during freezing.
 | `result` | object | §4.8 |
 | `fact` | object? | §4.9 |
 | `hooks` | `[Hook; 32]` | §4.9, plan order, first 32 |
-| `warnings` | `[Warning; 24]` | §4.10, first 24 in occurrence order |
+| `warnings` | `[Warning; 24]` | §4.10, first 24 in occurrence order, subject to the late-cancellation reservation |
 | `events` | object | `{dropped: u64}` (§7.4; `"0"` without a consumer) |
 | `timing` | object | `{started_at: time, finished_at: time, duration_us: dur}`: admission start (S §6.2 step 1) to F |
 | `refusal` | object? | §4.12 |
@@ -903,6 +907,11 @@ internal: {invariant: token, locus: Locus, message: text}?}`.
 
 `{kind: token, …, message: text}` (≤ 768 bytes, §3.7). Warnings never
 change a verdict or status.
+
+When late cancellation is recorded, reserve one of the 24 slots for
+`late_cancellation`, emit it after the first 23 ordinary warnings in
+occurrence order, and count every omitted ordinary warning in
+`warnings_dropped`; otherwise keep the first 24 ordinary warnings.
 
 | `kind` | Extra members | Source |
 |---|---|---|
@@ -1386,6 +1395,10 @@ clock), `events.enqueue`, `delivery.write`, `stderr.write`,
 `manifest.publish`, `run_dir.create`.
 
 ### 9.1 Derivations (pure, table-driven)
+
+| Fixture | Expected result | Test |
+|---|---|---|
+| `cpf build` on a build-free Python target (§2.3/§2.7) | `succeeded`, `build: null`, zero executions, exit 0 | `tests/cli_build.rs::execution::python_build_free_succeeds_without_running_the_script` |
 
 - Every row of §§2.1–2.5 and §2.7, and an orphan example per invariant
   (`skipped{admission_closed}` without a `retention_budget` refusal,

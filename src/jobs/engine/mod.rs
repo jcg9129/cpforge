@@ -1001,12 +1001,18 @@ impl<'probe> Engine<'probe> {
                 result.internal = state.internal.clone();
             }
             let cancellation = state.intent;
-            if cancellation.is_some_and(|c| c.phase != CancelPhase::Primary) {
-                warnings.push(Warning::LateCancellation);
-            }
-            let warning_slots = 24_usize.saturating_sub(details.warnings.len());
+            let late_cancellation = cancellation.is_some_and(|c| c.phase != CancelPhase::Primary);
+            // Keep the earliest ordinary warnings in serialization order, reserving
+            // the final slot only when late cancellation was actually recorded.
+            let warning_slots = 24 - usize::from(late_cancellation);
             details.warnings_dropped += warnings.len().saturating_sub(warning_slots) as u32;
             warnings.truncate(warning_slots);
+            let detail_slots = warning_slots - warnings.len();
+            details.warnings_dropped += details.warnings.len().saturating_sub(detail_slots) as u32;
+            details.warnings.truncate(detail_slots);
+            if late_cancellation {
+                warnings.push(Warning::LateCancellation);
+            }
             details.pre_delivery_exit = pre_delivery_exit(kind, result.verdict, cancellation);
             let report = FinalizedReport {
                 data: Arc::new(ReportData {

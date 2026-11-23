@@ -82,10 +82,17 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         return Err(Error("finished report cannot have refusal persistence"));
     }
     let mut warnings = Vec::new();
+    let mut late_cancellation = None;
     for engine_warning_value in &v.warnings {
-        warnings.push(engine_warning(engine_warning_value, v.result.cancellation)?);
+        let warning = engine_warning(engine_warning_value, v.result.cancellation)?;
+        if matches!(engine_warning_value, e::Warning::LateCancellation) {
+            late_cancellation = Some(warning);
+        } else {
+            warnings.push(warning);
+        }
     }
     warnings.extend(meta.warnings.clone());
+    warnings.extend(late_cancellation);
     let mut fields = vec![
         ("outcome", s("finished")),
         ("cpf_version", s(v.cpf_version)),
