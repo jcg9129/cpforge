@@ -341,7 +341,24 @@ impl Captures {
         if let Some(cutoff) = transfer_cutoff {
             self.transfer_cutoff = Some(cutoff);
         }
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        let first_drain = self.drain_start.is_none();
         let start = *self.drain_start.get_or_insert_with(Instant::now);
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        if first_drain
+            && self
+                .streams
+                .iter()
+                .any(|capture| matches!(capture.policy.sink, Sink::Forward(_)))
+        {
+            crate::storage::crash::console_drain_started(start);
+        }
         for capture in &self.streams {
             capture.drain.send_replace(Some(start + DRAIN));
         }

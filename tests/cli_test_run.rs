@@ -255,10 +255,15 @@ mod execution {
     #[cfg(feature = "storage-test-hooks")]
     impl PausedJob {
         fn start(w: &Workspace, point: &str) -> Self {
+            Self::start_args(w, point, &["test", "--json"])
+        }
+        fn start_args(w: &Workspace, point: &str, args: &[&str]) -> Self {
             use std::io::{BufRead, BufReader};
             let mut child = w
-                .command(&["test", "--json"])
+                .command(args)
                 .env("CPF_STORAGE_PAUSE_AT", point)
+                .env("CPF_STORAGE_STDERR_QUEUED", w.path("stderr-queued"))
+                .env("CPF_STORAGE_SIGNAL_READY", w.path("signal-ready"))
                 .stdin(Stdio::piped())
                 .spawn()
                 .unwrap();
@@ -287,6 +292,20 @@ mod execution {
             self.lines
                 .recv_timeout(Duration::from_secs(300))
                 .expect("cpf did not reach the barrier or deliver its report")
+        }
+        fn queued_at(&mut self, w: &Workspace) -> std::time::SystemTime {
+            wait_for_marker(w, &w.path("stderr-queued"), self.child.as_mut().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(nanos) = fs::read_to_string(w.path("stderr-queued"))
+                    .unwrap()
+                    .parse::<u64>()
+                {
+                    return std::time::UNIX_EPOCH + Duration::from_nanos(nanos);
+                }
+                assert!(Instant::now() < deadline, "incomplete t_q milestone");
+                std::thread::yield_now();
+            }
         }
         fn release(&mut self) {
             use std::io::Write;
@@ -477,6 +496,13 @@ mod execution {
     }
 
     #[cfg(feature = "storage-test-hooks")]
+    fn wait_until(at: std::time::SystemTime) {
+        while let Ok(remaining) = at.duration_since(std::time::SystemTime::now()) {
+            std::thread::park_timeout(remaining);
+        }
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
     #[test]
     fn three_thousand_tests_finish_while_stderr_is_blocked_then_deliver_serial_summary() {
         let w = Workspace::new(Some("fixture"));
@@ -506,15 +532,13 @@ mod execution {
                 .iter()
                 .all(|e| e["coverage"]["kind"] == "started")
         );
-        let dropped = report["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|warning| warning["kind"] == "progress_dropped")
-            .unwrap()["lines"]
-            .as_u64()
-            .unwrap();
-        assert!(dropped > 0);
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| warning["kind"] != "progress_dropped")
+        );
         assert!(paused.child.as_mut().unwrap().try_wait().unwrap().is_none());
         let (_, persisted) = w.report();
         assert_eq!(persisted["result"], report["result"]);
@@ -537,6 +561,10 @@ mod execution {
             0,
             "stderr produced bytes before releasing its write barrier"
         );
+        let queued_at = paused.queued_at(&w);
+        // This is the specified service schedule, after the enqueue milestone,
+        // rather than a delay used to guess whether enqueue has happened.
+        wait_until(queued_at + Duration::from_secs(1));
         paused.release();
         let output = paused.finish(delivered);
         status(&output, 0);
@@ -557,7 +585,8 @@ mod execution {
                 // contract PersistError `queue_full`) on slower runners.
                 assert!(
                     line.contains("progress lines dropped")
-                        || line.contains("artefact publication failed"),
+                        || line.contains("artefact publication failed")
+                        || line.contains("further warnings dropped"),
                     "{line}"
                 );
             } else {
@@ -566,13 +595,196 @@ mod execution {
                     "progress interleaved with final warnings: {line}"
                 );
                 let (id, label) = line.split_once("  ").unwrap();
-                assert!(ids.iter().any(|expected| expected == id), "{line}");
+                assert_eq!(id, ids[progress], "result order");
                 assert!(label.starts_with("OK"), "{line}");
                 assert!(line.len() >= 40);
                 progress += 1;
             }
         }
-        assert_eq!(progress + dropped, 3000);
+        assert_eq!(progress, 3000);
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn stalled_stderr_exits_five_seconds_after_final_enqueue_with_verdict_status() {
+        let w = Workspace::new(Some("fixture"));
+        w.write("cpforge.toml", "schema = 1\n[languages.fixture]\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = ['sh', '{source}']\n");
+        w.write("problems/A/main.sh", "exit 0\n");
+        w.cases(&[("one", "", Some(""), true)]);
+        let mut paused = PausedJob::start(&w, "stderr.write");
+        let delivered = paused.line();
+        let report: Value = serde_json::from_slice(&delivered).unwrap();
+        assert_eq!(report["result"]["verdict"], "passed");
+        let tq = paused.queued_at(&w);
+        // The write barrier is never released. Child process exit must abandon
+        // it, with stdout and report.json already complete.
+        while paused.child.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(
+                std::time::SystemTime::now().duration_since(tq).unwrap()
+                    < Duration::from_secs(5)
+                        + Duration::from_millis(100 * stderr_allowance_scale()),
+                "stalled final drain"
+            );
+            std::thread::yield_now();
+        }
+        let elapsed = std::time::SystemTime::now().duration_since(tq).unwrap();
+        assert!(elapsed >= Duration::from_secs(5));
+        let output = paused.finish(delivered);
+        status(&output, 0);
+        assert!(output.stderr.is_empty());
+        assert_eq!(document(&output), report);
+        assert_eq!(w.report().1["result"], report["result"]);
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    fn stderr_allowance_scale() -> u64 {
+        if cfg!(target_os = "macos") {
+            4
+        } else if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            2
+        } else {
+            1
+        }
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn force_exit_never_waits_for_stderr_lock_or_final_drain() {
+        for point in ["stderr.lock", "stderr.write"] {
+            let w = Workspace::new(Some("fixture"));
+            w.write("cpforge.toml", "schema = 1\n[languages.fixture]\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = ['sh', '{source}']\n");
+            w.write("problems/A/main.sh", "exit 0\n");
+            w.cases(&[("one", "", Some(""), true)]);
+            let mut paused = PausedJob::start(&w, point);
+            let delivered = if point == "stderr.write" {
+                let delivered = paused.line();
+                let tq = paused.queued_at(&w);
+                wait_until(tq + Duration::from_secs(1));
+                delivered
+            } else {
+                Vec::new()
+            };
+            let pid = paused.child.as_ref().unwrap().id() as i32;
+            // SAFETY: the subprocess is owned and remains alive at the barrier.
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+            wait_for_marker(&w, &w.path("signal-ready"), paused.child.as_mut().unwrap());
+            // Deliberately satisfy the signal debounce, after acknowledgement.
+            wait_until(std::time::SystemTime::now() + Duration::from_millis(110));
+            let forced_at = Instant::now();
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+            while paused.child.as_mut().unwrap().try_wait().unwrap().is_none() {
+                assert!(
+                    forced_at.elapsed() < Duration::from_millis(100 * stderr_allowance_scale()),
+                    "force exit waited for stderr"
+                );
+                std::thread::yield_now();
+            }
+            let output = paused.finish(delivered);
+            assert_eq!(output.status.signal(), Some(libc::SIGINT));
+            assert!(output.stderr.is_empty());
+        }
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn orderly_cancellation_drains_results_before_reraising_with_blocked_stderr() {
+        let w = Workspace::new(Some("fixture"));
+        w.write("cpforge.toml", "schema = 1\n[languages.fixture]\nsources = ['main.sh']\nbuild = false\n[languages.fixture.run]\nargv = ['sh', '{source}']\n");
+        let ready = w.path("second-ready");
+        w.write("problems/A/main.sh", &format!("read action\nif [ \"$action\" = wait ]; then\n  printf ready > {ready:?}\n  exec sleep 30\nfi\nexit 0\n"));
+        w.cases(&[
+            ("one", "pass\n", Some(""), true),
+            ("two", "wait\n", Some(""), true),
+        ]);
+        let mut paused = PausedJob::start(&w, "stderr.write");
+        wait_for_marker(&w, &ready, paused.child.as_mut().unwrap());
+        let pid = paused.child.as_ref().unwrap().id() as i32;
+        // SAFETY: the owned process is alive, with its second run at the gate.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+        let delivered = paused.line();
+        let report: Value = serde_json::from_slice(&delivered).unwrap();
+        assert_eq!(report["result"]["verdict"], "cancelled");
+        let tq = paused.queued_at(&w);
+        wait_until(tq + Duration::from_secs(1));
+        paused.release();
+        let output = paused.finish(delivered);
+        assert_eq!(output.status.signal(), Some(libc::SIGINT));
+        let text = stderr(&output);
+        let lines: Vec<_> = text.lines().collect();
+        assert!(lines[0].starts_with("one  OK"));
+        assert!(lines[1].starts_with("two  CANCELLED"));
+        assert!(
+            lines[2..lines.len() - 1]
+                .iter()
+                .any(|line| line.contains("CANCELLED"))
+        );
+        assert_eq!(lines.last(), Some(&"1/2 passed (tokens comparison)"));
+        assert_eq!(document(&output), report);
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn ten_thousand_command_executions_keep_ten_test_lines_with_blocked_stderr() {
+        let w = Workspace::new(None);
+        let fixture = cpf_fixture::harness::fixture_path();
+        let argv = serde_json::to_string(&[fixture.to_str().unwrap(), "exit:0"]).unwrap();
+        w.write(
+            "cpforge.toml",
+            &format!(
+                "schema = 1\n[commands.flood]\nargv = {argv}\nfor_each_test = true\nrepeat = 1000\n"
+            ),
+        );
+        let ids: Vec<_> = (0..10).map(|n| format!("case{n:02}")).collect();
+        let entries: Vec<_> = ids.iter().map(|id| (id.as_str(), "", None, true)).collect();
+        w.cases(&entries);
+        let mut paused = PausedJob::start_args(&w, "stderr.write", &["cmd", "flood", "--json"]);
+        let delivered = paused.line();
+        let report: Value = serde_json::from_slice(&delivered).unwrap();
+        assert_eq!(report["result"]["verdict"], "succeeded");
+        assert_eq!(report["executions"].as_array().unwrap().len(), 10_000);
+        assert_eq!(report["tests"].as_array().unwrap().len(), 10);
+        let warnings = report["warnings"].as_array().unwrap();
+        // The writer took one execution-progress line before blocking; all
+        // other progress is budget-dropped or detached at E. Persistence
+        // warnings precede it in the list, so on a runner whose persistence
+        // queue overflows it may be among the counted, unlisted warnings.
+        if let Some(warning) = warnings
+            .iter()
+            .find(|warning| warning["kind"] == "progress_dropped")
+        {
+            assert_eq!(warning["lines"], 9999);
+        } else {
+            assert_eq!(warnings.len(), 24);
+            assert!(report["warnings_dropped"].as_u64().unwrap() > 0);
+        }
+        let tq = paused.queued_at(&w);
+        wait_until(tq + Duration::from_secs(1));
+        paused.release();
+        let output = paused.finish(delivered);
+        status(&output, 0);
+        let text = stderr(&output);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines[0], "1/10000 executions finished");
+        for (n, line) in lines[1..11].iter().enumerate() {
+            assert!(
+                line.starts_with(&format!("{}  OK  1000/1000 succeeded", ids[n])),
+                "{line}"
+            );
+        }
+        assert!(
+            lines[11..lines.len() - 1]
+                .iter()
+                .all(|line| line.starts_with("cpf: warning:"))
+        );
+        assert_eq!(lines.last(), Some(&"OK"));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("executions finished"))
+                .count(),
+            1
+        );
+        assert_eq!(w.report().1["warnings"], report["warnings"]);
     }
 
     #[test]
@@ -1080,13 +1292,34 @@ mod execution {
 
 #[cfg(windows)]
 #[test]
-fn windows_refuses_test_execution_before_admission() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cpf"))
-        .args(["test", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(10), "{output:?}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["refusal"]["class"], "infrastructure");
-    assert!(report["job"].is_null());
+fn windows_refuses_stderr_fixture_commands_before_admission() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!(
+            "windows-stderr-{}",
+            cpforge::build::BuildId::generate().unwrap()
+        ));
+    std::fs::create_dir_all(&directory).unwrap();
+    for args in [
+        vec!["test", "--json"],
+        vec!["cmd", "flood", "--json"],
+        vec!["build", "--json"],
+        vec!["run"],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cpf"))
+            .args(&args)
+            .current_dir(&directory)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(10), "{args:?}: {output:?}");
+        if args == ["run"] {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported platform"));
+        } else {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["refusal"]["class"], "infrastructure");
+            assert!(report["job"].is_null());
+        }
+        assert!(!directory.join(".cpforge/runs").exists());
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }

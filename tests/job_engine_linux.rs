@@ -955,10 +955,13 @@ fn fixed_control_and_output_threads_hold_no_worker_credits() {
         wait_for_cleanup_counters(baseline).await;
         let out_ready = Arc::new(Notify::new());
         let err_ready = Arc::new(Notify::new());
-        let progress = ProgressWriter::new(Witness {
-            name: "cpf-stderr",
-            ready: err_ready.clone(),
-        })
+        let progress = ProgressWriter::new(
+            Witness {
+                name: "cpf-stderr",
+                ready: err_ready.clone(),
+            },
+            0,
+        )
         .unwrap();
         let f = Fixture::new();
         let (ready, request) = fixture_command_job(&f, 1, 256 << 20);
@@ -983,11 +986,7 @@ fn fixed_control_and_output_threads_hold_no_worker_credits() {
         )
         .unwrap();
         tokio::time::timeout(Duration::from_millis(1000 * allowance_scale()), async {
-            // Offers are deliberately nonblocking and can lose queue-lock
-            // contention. Await an accepted marker instead of assuming one.
-            while !progress.queue().offer("job ready") {
-                tokio::task::yield_now().await;
-            }
+            assert!(progress.queue().offer("job ready"));
             tokio::join!(out_ready.notified(), err_ready.notified());
         })
         .await

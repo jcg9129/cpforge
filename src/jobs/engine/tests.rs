@@ -2113,23 +2113,24 @@ fn event_overflow_delivers_final_report() {
 #[test]
 fn progress_drop_warning_is_frozen_at_e() {
     let f = Fixture::new();
-    let queue = crate::progress::ProgressQueue::default();
+    let queue = crate::progress::ProgressQueue::new(1);
     for _ in 0..129 {
         queue.offer(&"x".repeat(511));
     }
     let engine = test_engine(&f, "python", 1).progress(queue.clone());
     let report = runtime(run(engine, &mut Fake::default()));
-    // One initial overflow and the engine's progress line while still full.
-    assert_eq!(queue.close(), 2);
+    // One overflow plus all 128 queued progress lines detached at E. The
+    // engine's per-test result is lossless and never enters this count.
+    assert_eq!(queue.close(), 129);
     queue.offer("after E");
-    assert_eq!(queue.close(), 2);
+    assert_eq!(queue.close(), 129);
     assert!(
         report
             .data()
             .details
             .warnings
             .iter()
-            .any(|warning| matches!(warning.kind, WarningKind::ProgressDropped { lines: 2 }))
+            .any(|warning| matches!(warning.kind, WarningKind::ProgressDropped { lines: 129 }))
     );
 }
 
@@ -2473,4 +2474,219 @@ fn after_test_checks_intent_before_each_hook_and_keeps_primary_counts_separate()
     assert_eq!(data.result.counts.primary.planned, 1);
     assert_eq!(data.result.counts.hooks.started, 1);
     assert_eq!(data.result.counts.hooks.skipped, 2);
+}
+
+/// Stderr is held from before E through S and D. The gate is independent of
+/// the queue mutex, so engine finalization and document delivery can finish.
+struct HeldStderr {
+    writer: crate::progress::ProgressWriter,
+    release: std::sync::mpsc::Sender<()>,
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+}
+impl HeldStderr {
+    fn new(planned_tests: usize) -> Self {
+        use std::io::{self, Write};
+        use std::sync::{Mutex, mpsc};
+        struct Sink {
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+            bytes: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv_timeout(Duration::from_secs(300)).unwrap();
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (entered, waiting) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = crate::progress::ProgressWriter::new(
+            Sink {
+                entered: Some(entered),
+                release: gate,
+                bytes: bytes.clone(),
+            },
+            planned_tests,
+        )
+        .unwrap();
+        writer.queue().result("startup diagnostic");
+        waiting.recv_timeout(Duration::from_secs(10)).unwrap();
+        Self {
+            writer,
+            release,
+            bytes,
+        }
+    }
+    fn finish(self, lines: &[String]) -> String {
+        self.release.send(()).unwrap();
+        self.writer.finish_lines(lines).unwrap();
+        String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+    }
+}
+
+#[test]
+fn progress_drop_finality_across_e_s_d_matches_saved_stdout_and_events() {
+    use crate::transport::Delivery;
+    let f = Fixture::new();
+    let stderr = HeldStderr::new(2);
+    let queue = stderr.writer.queue();
+    // One overflow, plus 128 queued entries detached at E. The writer took
+    // only the startup result, so all offered progress must be counted.
+    for _ in 0..129 {
+        queue.offer(&"x".repeat(511));
+    }
+    let ready = ready(&f, "python", 2, &Tools);
+    let path = ready.dir.join("report.json");
+    let mut persistence = crate::jobs::persist::JobPersistence::new(&ready).unwrap();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap()
+    .progress(queue.clone());
+    let receiver = engine.events().subscribe().unwrap();
+    let mut delivery = Delivery::new(Vec::new(), false);
+    let report = runtime(async {
+        let mut fake = Fake::default();
+        let mut hooks = NoHooks;
+        let (report, delivered) = tokio::join!(
+            engine.run(&mut fake, &mut persistence, &mut hooks),
+            delivery.events(receiver, JobKind::Test, false)
+        );
+        delivered.unwrap();
+        report
+    });
+    assert!(stderr.bytes.lock().unwrap().is_empty());
+    assert_eq!(queue.close(), 129);
+    assert!(!queue.offer("after D"));
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let mut json = Delivery::new(Vec::new(), false);
+    json.report(&report).unwrap();
+    let stdout: serde_json::Value = serde_json::from_slice(&json.into_inner()).unwrap();
+    let events = delivery.into_inner();
+    let terminal: serde_json::Value = serde_json::from_slice(
+        events
+            .split(|b| *b == b'\n')
+            .rfind(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    let dropped = |doc: &serde_json::Value| {
+        doc["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["kind"] == "progress_dropped")
+            .unwrap()["lines"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(dropped(&saved), 129);
+    assert_eq!(dropped(&stdout), 129);
+    assert_eq!(dropped(&terminal["report"]), 129);
+    let text = stderr.finish(&[
+        "warning: 129 progress lines dropped".into(),
+        "summary".into(),
+    ]);
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines[0], "startup diagnostic");
+    assert!(lines[1].starts_with("t0  OK"));
+    assert!(lines[2].starts_with("t1  OK"));
+    assert_eq!(
+        &lines[3..],
+        &["warning: 129 progress lines dropped", "summary"]
+    );
+    assert_eq!(queue.close(), 129);
+}
+
+#[test]
+fn ten_thousand_execution_flood_keeps_ten_ordered_test_aggregates() {
+    let f = Fixture::new();
+    let ready = ready(&f, "python", 10, &Tools);
+    let mut iterations = Vec::new();
+    for test in ready.manifest.entries() {
+        for iteration in 1..=1000 {
+            iterations.push(Iteration {
+                role: Role::Command {
+                    test: Some(test.id.to_string()),
+                    iteration,
+                },
+                recipe: Recipe::TargetRun,
+                stdin: None,
+                depends_on_build: false,
+            });
+        }
+    }
+    let stderr = HeldStderr::new(10);
+    let queue = stderr.writer.queue();
+    let engine = Engine::new(
+        ready,
+        JobRequest::Iterations {
+            kind: CommandKind::Cmd,
+            iterations,
+            needs_build: false,
+            keep_going: true,
+        },
+    )
+    .unwrap()
+    .progress(queue.clone());
+    // An immediate sink double releases each reservation at enqueue. This
+    // fixture concerns stderr, so it must not retain 10 000 metadata bundles
+    // until W as MemoryPersistence intentionally does.
+    struct ImmediatePersistence;
+    impl Persistence for ImmediatePersistence {
+        fn enqueue(&mut self, _: PendingArtifacts) {}
+        fn settle<'a>(
+            &'a mut self,
+            executions: &'a mut [ExecutionReport],
+        ) -> JobFuture<'a, Vec<Warning>> {
+            Box::pin(async move {
+                persistence::unavailable(executions);
+                Vec::new()
+            })
+        }
+    }
+    let report = runtime(engine.run(
+        &mut Fake::default(),
+        &mut ImmediatePersistence,
+        &mut NoHooks,
+    ));
+    assert_eq!(report.data().executions.len(), 10_000);
+    assert_eq!(report.data().tests.len(), 10);
+    assert_eq!(report.data().aggregates.len(), 10);
+    assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
+    assert_eq!(queue.close(), 10_000);
+    assert!(
+        report
+            .data()
+            .details
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning.kind, WarningKind::ProgressDropped { lines: 10_000 }))
+    );
+    let text = stderr.finish(&["warning: 10000 progress lines dropped".into(), "OK".into()]);
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 13);
+    for (n, line) in lines[1..11].iter().enumerate() {
+        assert!(
+            line.starts_with(&format!("t{n}  OK  1000/1000 succeeded")),
+            "{line}"
+        );
+        assert!(line.contains("wall min/median/max"));
+    }
+    assert_eq!(
+        &lines[11..],
+        &["warning: 10000 progress lines dropped", "OK"]
+    );
+    assert_eq!(queue.close(), 10_000);
 }

@@ -440,6 +440,73 @@ mod execution {
         drop(blocked);
     }
 
+    #[cfg(feature = "storage-test-hooks")]
+    #[test]
+    fn blocked_raw_stderr_uses_separate_console_flush_and_final_diagnostic_clocks() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let w = Workspace::new(Some("fixture"));
+        let fixture = cpf_fixture::harness::fixture_path();
+        let argv = serde_json::to_string(&[
+            fixture.to_str().unwrap(),
+            // More than the held console pipe takes, so forwarding blocks, but
+            // less than that pipe plus the 1 MiB forwarding queue: the child
+            // is never back-pressured, exits 3 and its pipe reaches EOF.
+            "write:stderr:524288:x",
+            "exit:3",
+        ])
+        .unwrap();
+        w.write("cpforge.toml", &format!("schema = 1\n[languages.fixture]\nsources = ['main.txt']\nbuild = false\n[languages.fixture.run]\nargv = {argv}\n"));
+        w.write("problems/A/main.txt", "source\n");
+        let drain_file = w.path("console-drain");
+        let queued_file = w.path("stderr-queued");
+        let mut child = w
+            .command(&["run"])
+            .env("CPF_STORAGE_CONSOLE_DRAIN", &drain_file)
+            .env("CPF_STORAGE_STDERR_QUEUED", &queued_file)
+            .spawn()
+            .unwrap();
+        // Retain the reader without draining it: forwarding stalls, while the
+        // child's captured pipe can still reach EOF and the drain milestone.
+        let blocked = child.stderr.take().unwrap();
+        marker(&w, &drain_file, &mut child);
+        marker(&w, &queued_file, &mut child);
+        let stamp = |path: &Path| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(nanos) = fs::read_to_string(path).unwrap().parse::<u64>() {
+                    break UNIX_EPOCH + Duration::from_nanos(nanos);
+                }
+                assert!(Instant::now() < deadline, "incomplete timing milestone");
+                std::thread::yield_now();
+            }
+        };
+        let drain = stamp(&drain_file);
+        let tq = stamp(&queued_file);
+        let scale = if cfg!(target_os = "macos") {
+            4
+        } else if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            2
+        } else {
+            1
+        };
+        // Forwarding uses drain + 2 s; report settlement and delivery between
+        // that flush and t_q carry only their observation allowance here.
+        assert!(tq.duration_since(drain).unwrap() >= Duration::from_secs(2));
+        assert!(
+            tq.duration_since(drain).unwrap()
+                <= Duration::from_secs(2) + Duration::from_millis(100 * scale)
+        );
+        let output = wait(child);
+        let elapsed = SystemTime::now().duration_since(tq).unwrap();
+        assert!(elapsed >= Duration::from_secs(2));
+        assert!(elapsed <= Duration::from_secs(2) + Duration::from_millis(100 * scale));
+        status(&output, 1);
+        let (_, report) = w.report();
+        assert_eq!(report["result"]["verdict"], "nonzero_exit");
+        assert_eq!(raw(&report)["summary"]["execution"]["status"]["code"], 3);
+        drop(blocked);
+    }
+
     #[test]
     fn child_closing_stdin_can_finish_with_cpf_stdin_still_open() {
         let w = Workspace::new(Some("python"));

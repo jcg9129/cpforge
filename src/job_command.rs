@@ -362,13 +362,13 @@ impl JobCommand for TestRunCommand {
                 },
             )));
         }
+        if unchecked > 0 {
+            lines.push(crate::report::SummaryTemplate::Unchecked { count: unchecked }.render());
+        }
         lines.push(
             crate::report::summary(template, completed, data.result.cancellation.is_some())
                 .render(),
         );
-        if unchecked > 0 {
-            lines.push(crate::report::SummaryTemplate::Unchecked { count: unchecked }.render());
-        }
         lines
     }
 }
@@ -491,10 +491,20 @@ pub fn run_with_config(
             .enable_all()
             .build()
             .map_err(|e| Error::Infrastructure(format!("job runtime: {e}")))?;
-        let writer = ProgressWriter::new(io::stderr())
+        let writer = ProgressWriter::new(io::stderr(), tests.len())
             .map_err(|e| Error::Infrastructure(format!("stderr worker: {e}")))?;
-        for diagnostic in config.diagnostics() {
-            writer.queue().offer(&diagnostic.to_string());
+        let diagnostics = config.diagnostics();
+        for diagnostic in diagnostics
+            .iter()
+            .take(if diagnostics.len() > 64 { 63 } else { 64 })
+        {
+            writer.queue().result(&diagnostic.to_string());
+        }
+        if diagnostics.len() > 64 {
+            writer.queue().result(&format!(
+                "cpf: {} further configuration diagnostics",
+                diagnostics.len() - 63
+            ));
         }
         progress = Some(writer);
         check_cancel(&cancel)?;
@@ -1360,25 +1370,40 @@ fn execute(
 }
 
 fn final_warnings(report: &FinalizedReport) -> Vec<String> {
-    let mut lines: Vec<_> = report
-        .data()
+    use crate::jobs::engine::Warning;
+    // The report's `warnings` list (§4.10): engine warnings, then the job's
+    // own, then a late cancellation, at most 24, the rest counted. The final
+    // allowance of report contract §8 holds exactly these lines.
+    let data = report.data();
+    let render = |w: &Warning| {
+        wire::engine_warning(w, data.result.cancellation).map_or_else(
+            |e| format!("cpf: warning: {e}"),
+            |w| format!("cpf: warning: {} ({:?})", w.message, w.kind),
+        )
+    };
+    let late = |w: &&Warning| matches!(w, Warning::LateCancellation);
+    let mut lines: Vec<_> = data
         .warnings
         .iter()
-        .map(|w| {
-            wire::engine_warning(w, report.data().result.cancellation).map_or_else(
-                |e| format!("cpf: warning: {e}"),
-                |w| format!("cpf: warning: {} ({:?})", w.message, w.kind),
-            )
-        })
+        .filter(|w| !late(w))
+        .map(render)
+        .chain(
+            data.details
+                .warnings
+                .iter()
+                .map(|w| format!("cpf: warning: {}", w.message)),
+        )
+        .chain(data.warnings.iter().filter(late).map(render))
+        .take(24)
         .collect();
-    lines.extend(
-        report
-            .data()
-            .details
-            .warnings
-            .iter()
-            .map(|w| format!("cpf: warning: {}", w.message)),
-    );
+    let overflow = (data.warnings.len() + data.details.warnings.len()).saturating_sub(24);
+    let dropped = data
+        .details
+        .warnings_dropped
+        .saturating_add(overflow.min(u32::MAX as usize) as u32);
+    if dropped != 0 {
+        lines.push(format!("cpf: warning: {dropped} further warnings dropped"));
+    }
     match report.persistence() {
         ReportPersistence::Failed { message, .. } => lines.push(format!(
             "cpf: warning: report persistence failed: {message}"

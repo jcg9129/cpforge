@@ -44,7 +44,8 @@
 //! `config.load`, `selection.resolve` (planning, before admission);
 //! `supervisor.before_cancel_kill` (live root before orderly cancellation kill);
 //! `job.after_delivery` (after the final summary, while signals remain installed),
-//! `stderr.write` (before the first progress-writer write),
+//! `stderr.write` (before the first progress-writer write), `stderr.lock`
+//! (inside the stderr queue lock, at every offer while selected),
 //! `manifest.publish` (before publishing inputs/capture.json).
 //! Set `CPF_STORAGE_PANIC_AT=hook.execute` to panic in the executor of an
 //! admitted hook, before launching its child. Only test builds inspect it.
@@ -56,6 +57,9 @@
 //! exact leftover only on the fact's lock acquisition.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
+//! `CPF_STORAGE_STDERR_QUEUED=<path>` and `CPF_STORAGE_CONSOLE_DRAIN=<path>`
+//! receive the wall-clock nanoseconds of the final stderr batch enqueue (t_q)
+//! and of the raw console drain milestone, for subprocess timing fixtures.
 //! `CPF_STORAGE_CREATION_SOCKET=<Unix socket path>` holds OS creation in
 //! pre_exec: the child writes its native-endian i32 pid, then awaits one byte
 //! from the harness; EOF instead fails pre_exec, so the child exits without exec.
@@ -144,5 +148,35 @@ pub(crate) fn signal_observed() {
 pub(crate) fn panic_point(name: &'static str) {
     if std::env::var("CPF_STORAGE_PANIC_AT").is_ok_and(|value| value == name) {
         panic!("CPF-PANIC-AT {name}");
+    }
+}
+
+/// Debug milestone recorded just after the final stderr batch enqueue (t_q).
+/// It is outside the queue lock and never uses the human stderr sink.
+#[cfg(feature = "storage-test-hooks")]
+pub(crate) fn stderr_final_queued(queued_at: std::time::Instant) {
+    timing_milestone("CPF_STORAGE_STDERR_QUEUED", queued_at);
+}
+
+/// Debug origin of the raw console's independent forwarding-flush clock.
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn console_drain_started(at: std::time::Instant) {
+    timing_milestone("CPF_STORAGE_CONSOLE_DRAIN", at);
+}
+
+#[cfg(feature = "storage-test-hooks")]
+fn timing_milestone(variable: &str, at: std::time::Instant) {
+    if let Some(path) = std::env::var_os(variable) {
+        // Map the monotonic origin to wall time only for the subprocess
+        // observer. Policy continues to use the original monotonic deadline.
+        let wall = std::time::SystemTime::now() - at.elapsed();
+        let nanos = wall
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::fs::write(path, nanos.to_string()).expect("publish stderr milestone");
     }
 }

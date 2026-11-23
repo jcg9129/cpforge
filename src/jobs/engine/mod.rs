@@ -393,6 +393,7 @@ impl<'probe> Engine<'probe> {
 
     /// Attach the invocation's stderr queue before running. It is closed at E.
     pub fn progress(mut self, progress: crate::progress::ProgressQueue) -> Self {
+        progress.planned_tests(self.ready.manifest.entries().len());
         self.progress = Some(progress);
         self
     }
@@ -710,7 +711,7 @@ impl<'probe> Engine<'probe> {
                         },
                         &context,
                     );
-                    progress.offer(&format!(
+                    progress.result(&format!(
                         "{}  {}",
                         test_report.frozen.id,
                         report::render_label(&display)
@@ -934,6 +935,54 @@ impl<'probe> Engine<'probe> {
                 });
             }
         }
+        let aggregates = if kind == JobKind::Cmd {
+            aggregate(&executions)
+        } else {
+            Vec::new()
+        };
+        if let Some(progress) = progress.as_ref().filter(|_| kind == JobKind::Cmd) {
+            for test in &tests {
+                let first = test.first_execution as usize;
+                let last = first + test.execution_count as usize;
+                let primary: Vec<_> = executions[first..last]
+                    .iter()
+                    .map(|execution| execution.result.clone())
+                    .collect();
+                let verdict = report::job_verdict(&report::JobInput {
+                    kind,
+                    build: None,
+                    primary: &primary,
+                    tests: &[],
+                    selected_tests: 0,
+                    internal_before_freeze: None,
+                    internal_after_freeze: None,
+                });
+                let display = report::label(
+                    report::LabelSubject::Job(verdict.verdict),
+                    &report::DisplayContext::default(),
+                );
+                let group = aggregates
+                    .iter()
+                    .find(|group| group.test.as_deref() == Some(test.frozen.id.as_str()))
+                    .expect("command test aggregate");
+                let mut line = format!(
+                    "{}  {}  {}/{} succeeded",
+                    test.frozen.id,
+                    report::render_label(&display),
+                    group.succeeded,
+                    group.iterations
+                );
+                if let Some([min, median, max]) = group.wall {
+                    line.push_str(&format!(
+                        "; wall min/median/max {} / {} / {} s",
+                        min.as_secs_f64(),
+                        median.as_secs_f64(),
+                        max.as_secs_f64()
+                    ));
+                }
+                progress.result(&line);
+            }
+        }
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::Settlement);
         let settlement_warnings =
@@ -977,11 +1026,7 @@ impl<'probe> Engine<'probe> {
         details.hooks.truncate(32);
         details.warnings_dropped += details.warnings.len().saturating_sub(24) as u32;
         details.warnings.truncate(24);
-        let aggregates = if kind == JobKind::Cmd {
-            aggregate(&executions)
-        } else {
-            Vec::new()
-        };
+
         if let Some(target) = &mut details.target {
             if let Some(root) = executions
                 .iter()
