@@ -216,12 +216,15 @@ diagnose an absent `record.json`.
 - `setup_duration` (first setup step to end of creation) is recorded and is
   **outside** the deadline guarantee. The deadline timer starts when creation
   returns.
-- Force exit (§8.2) does not wait for a creation in progress. Narrowed
-  guarantee: a child that is not yet registered (its creation call
-  still running, or returned but not yet published in the registry) may
-  survive force exit on Unix, for an unbounded time; there is at most one per
-  job, since each job has one creation thread. On Windows it dies with its
-  job when `cpf` exits (kill-on-close).
+- The job does not wait for that kill path either: its orderly exit can come
+  first. A child registered at creation return is killed through its
+  signalling capability by orderly re-raising and by force exit (§8.2).
+- Neither orderly exit nor force exit (§8.2) waits for a creation in
+  progress. Narrowed guarantee: a child that is not yet registered (its
+  creation call still running, or returned but not yet published in the
+  registry) may survive the exit of `cpf` on Unix, for an unbounded time;
+  there is at most one per job, since each job has one creation thread. On
+  Windows it dies with its job when `cpf` exits (kill-on-close).
 
 ### 3.5 Inheritance
 
@@ -907,7 +910,12 @@ pub struct InstalledLimit {
   creation thread). Windows: the `SetConsoleCtrlHandler` callback (its own
   thread) sends the same message. No cancellation logic runs in a signal
   handler.
-- First notification: cancel the current job. Any later notification ≥ 100 ms
+- First notification: cancel the current job. On Unix, when cancellation
+  then decides the exit status, `cpf` kills every registered run through its
+  signalling capability (§3.1.6) immediately before re-raising the signal
+  (report contract §5.3), as force exit does; this covers a run transferred during committed creation whose
+  creation thread has not yet run its kill path (§3.4). Any later
+  notification ≥ 100 ms
   after the first: **force exit** — take the live-run registry lock (never
   held across creation or any blocking call), kill every registered run
   through its signalling capability (§3.1.6), terminate per report contract
@@ -1104,8 +1112,8 @@ rejected; real Ctrl-C and second Ctrl-C (after CLI integration).
   `method`.
 - A stalled stdout may block final transport after supervision has finished;
   persistence is bounded separately.
-- Force exit does not wait for an in-progress creation. On Unix an
-  unregistered child may survive force exit for an unbounded time, at most
+- Neither orderly exit nor force exit waits for an in-progress creation. On
+  Unix an unregistered child may survive `cpf` for an unbounded time, at most
   one per job (§3.4).
 - Hosted Linux CI allowances are the Linux allowances ×2 and macOS/Windows
   CI allowances ×4, an assumption about hosted runners; policy deadlines are

@@ -44,6 +44,8 @@ use crate::storage::prune::PrunePolicy;
 use crate::tests_store::TestStore;
 use crate::transport::{self, Delivery, MachineArgs, MachineMode};
 
+mod warnings;
+
 /// Command-specific policy, evaluated before job registration. Test selection
 /// must return stable catalog ids; the shared pipeline freezes that exact list.
 pub trait JobCommand {
@@ -1394,10 +1396,8 @@ fn final_warnings(report: &FinalizedReport) -> Vec<String> {
     // allowance of report contract §8 holds exactly these lines.
     let data = report.data();
     let render = |w: &Warning| {
-        wire::engine_warning(w, data.result.cancellation).map_or_else(
-            |e| format!("cpf: warning: {e}"),
-            |w| format!("cpf: warning: {} ({:?})", w.message, w.kind),
-        )
+        wire::engine_warning(w, data.result.cancellation)
+            .map_or_else(|e| format!("cpf: warning: {e}"), |w| warnings::line(&w))
     };
     let late = |w: &&Warning| matches!(w, Warning::LateCancellation);
     let mut lines: Vec<_> = data

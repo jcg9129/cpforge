@@ -180,6 +180,8 @@ impl Workspace {
             .env_remove("CPF_STORAGE_CRASH_AT")
             .env_remove("CPF_STORAGE_SIGNAL_READY")
             .env_remove("CPF_STORAGE_CREATION_SOCKET")
+            .env_remove("CPF_STORAGE_RUN_WAITING")
+            .env_remove("CPF_STORAGE_BARRIER_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -307,7 +309,11 @@ impl Running {
     }
     #[cfg(feature = "storage-test-hooks")]
     fn barrier(&self, name: &str) {
-        assert_eq!(self.barriers.recv_timeout(self.remaining()).unwrap(), name);
+        let reached = self
+            .barriers
+            .recv_timeout(self.remaining())
+            .unwrap_or_else(|error| panic!("waiting for barrier {name}: {error}"));
+        assert_eq!(reached, name);
     }
     #[cfg(feature = "storage-test-hooks")]
     fn release(&mut self) {
@@ -408,7 +414,11 @@ fn test_reaps_background_descendants() {
             "unverified" => {
                 assert!(summary["execution"]["cleanup"]["reason"].as_str().is_some());
                 assert!(notes.iter().any(|note| note == "cleanup_unverified"));
-                assert!(String::from_utf8_lossy(&output.stderr).contains("cleanup not verified"));
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .any(|line| line == "cpf: warning: cleanup not verified for 1 run")
+                );
                 assert!(
                     report["warnings"]
                         .as_array()
@@ -586,9 +596,17 @@ fn second_sigint_kills_every_live_job_tree_before_exiting() {
     for job in JOBS {
         let w = Workspace::new(job, true);
         let mut command = w.command(job, true);
-        command.env("CPF_STORAGE_PAUSE_AT", "supervisor.before_cancel_kill");
+        command
+            .env("CPF_STORAGE_PAUSE_AT", "supervisor.before_cancel_kill")
+            .env("CPF_STORAGE_RUN_WAITING", w.path("run-waiting"));
         let mut child = Running::spawn(command);
         let identities = w.identities(&mut child);
+        // Identity files can precede creation's reply. Cancellation in that
+        // interval returns Transferred (§3.4), and the CLI may re-raise the
+        // first signal before the creation thread reaches the kill barrier.
+        // Establish that this live root belongs to the executor instead.
+        let pid = identities[0].pid.to_string();
+        child.until(|| fs::read_to_string(w.path("run-waiting")).ok().as_ref() == Some(&pid));
         let job_dir = w.jobs().pop().unwrap();
         assert!(matches!(
             cpforge::storage::job::probe(&job_dir),
@@ -619,6 +637,92 @@ fn second_sigint_kills_every_live_job_tree_before_exiting() {
             cpforge::storage::job::ProbeOutcome::Acquired(_)
         ));
     }
+}
+
+#[cfg(feature = "storage-test-hooks")]
+fn release_barrier(w: &Workspace, name: &str) {
+    fs::write(w.path(&format!("{name}.release")), b"go").unwrap();
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn first_sigint_during_creation_kills_the_registered_tree_before_reraising() {
+    for reach_kill in [false, true] {
+        let w = Workspace::new(Job::Cmd, true);
+        let mut command = w.command(Job::Cmd, true);
+        command
+            .env(
+                "CPF_STORAGE_PAUSE_AT",
+                "supervisor.after_registration,supervisor.before_cancel_kill,job.after_delivery",
+            )
+            .env("CPF_STORAGE_BARRIER_DIR", &w.0);
+        let mut child = Running::spawn(command);
+        child.barrier("supervisor.after_registration");
+        let identities = w.identities(&mut child);
+        child.signal(libc::SIGINT);
+        child.barrier("job.after_delivery");
+        assert_eq!(
+            w.report()["executions"][0]["coverage"]["kind"],
+            "transferred"
+        );
+        if reach_kill {
+            release_barrier(&w, "supervisor.after_registration");
+            child.barrier("supervisor.before_cancel_kill");
+        }
+        // The creation thread holds the registered root on either side of its
+        // cancellation kill (§3.4) while orderly exit proceeds: first before
+        // supervisor.before_cancel_kill (the closed barrier channel of an
+        // earlier flake), then at it (the surviving tree of another).
+        assert!(identities.iter().all(Identity::is_live));
+        release_barrier(&w, "job.after_delivery");
+        if !reach_kill {
+            assert_eq!(
+                child.barriers.recv_timeout(child.remaining()),
+                Err(mpsc::RecvTimeoutError::Disconnected),
+                "creation is held before supervisor.before_cancel_kill"
+            );
+        }
+        let output = child.wait();
+        assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
+        // Orderly re-raising kills every registered run first (§8.2).
+        assert_all_gone(&identities, Duration::from_secs(2));
+    }
+}
+
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn second_signal_kills_registered_tree_during_transferred_creation() {
+    let w = Workspace::new(Job::Cmd, true);
+    let mut command = w.command(Job::Cmd, true);
+    command
+        .env(
+            "CPF_STORAGE_PAUSE_AT",
+            "supervisor.after_registration,supervisor.before_cancel_kill,job.after_delivery",
+        )
+        .env("CPF_STORAGE_BARRIER_DIR", &w.0);
+    let mut child = Running::spawn(command);
+    child.barrier("supervisor.after_registration");
+    let identities = w.identities(&mut child);
+    child.signal(libc::SIGINT);
+    child.barrier("job.after_delivery");
+    assert_eq!(
+        w.report()["executions"][0]["coverage"]["kind"],
+        "transferred"
+    );
+    release_barrier(&w, "supervisor.after_registration");
+    child.barrier("supervisor.before_cancel_kill");
+    let first = Instant::now();
+    while first.elapsed() < Duration::from_millis(120) {
+        std::thread::yield_now();
+    }
+    assert!(identities.iter().all(Identity::is_live));
+    // Keep job.after_delivery held: orderly re-raising must not mask whether
+    // force exit swept the capability retained by the creation/cleanup owner.
+    // A different forcing signal additionally distinguishes these exit paths.
+    child.signal(libc::SIGTERM);
+    let output = child.wait();
+    assert_eq!(output.status.signal(), Some(libc::SIGTERM), "{output:?}");
+    assert_all_gone(&identities, Duration::from_secs(2));
 }
 
 #[cfg(feature = "storage-test-hooks")]

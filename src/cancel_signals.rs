@@ -134,6 +134,10 @@ impl CancelSignals {
         if status == ExitCode::Cancelled {
             if let Some(source) = source {
                 if cfg!(unix) && source != CancelSource::Api {
+                    // A run transferred during committed creation (E §3.4) is
+                    // registered before its creation thread runs the kill
+                    // path. Do not let the re-raise outrun that kill.
+                    crate::supervisor::force_kill_active();
                     terminate_source(source);
                 }
             }

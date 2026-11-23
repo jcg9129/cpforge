@@ -43,10 +43,15 @@
 //! `command.between_iterations` (after the first command job execution);
 //! `config.load`, `selection.resolve` (planning, before admission);
 //! `supervisor.before_cancel_kill` (live root before orderly cancellation kill);
+//! `supervisor.after_registration` (registered root before creation replies);
 //! `job.after_delivery` (after the final summary, while signals remain installed),
 //! `stderr.write` (before the first progress-writer write), `stderr.lock`
 //! (inside the stderr queue lock, at every offer while selected),
 //! `manifest.publish` (before publishing inputs/capture.json).
+//! Multiple names may be selected with commas. With `CPF_STORAGE_BARRIER_DIR`,
+//! each selected barrier awaits a file named `<name>.release` in that directory
+//! instead of stdin (hard deadline: 20 s). This keeps independent threads and
+//! raw console stdin from consuming one another's release bytes.
 //! Set `CPF_STORAGE_PANIC_AT=hook.execute` to panic in the executor of an
 //! admitted hook, before launching its child. Only test builds inspect it.
 //! Fact warning injection: `CPF_STORAGE_FACT_TEST_HOOK=post_commit_sync_failure`
@@ -57,6 +62,8 @@
 //! exact leftover only on the fact's lock acquisition.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
+//! `CPF_STORAGE_RUN_WAITING=<path>` publishes the pid when the executor starts
+//! waiting for a root: fixture identity files alone do not establish this.
 //! `CPF_STORAGE_STDERR_QUEUED=<path>` and `CPF_STORAGE_CONSOLE_DRAIN=<path>`
 //! receive the wall-clock nanoseconds of the final stderr batch enqueue (t_q)
 //! and of the raw console drain milestone, for subprocess timing fixtures.
@@ -121,16 +128,37 @@ pub(crate) fn barrier(name: &'static str) {
     #[cfg(feature = "storage-test-hooks")]
     {
         use std::io::{Read, Write};
-        if std::env::var("CPF_STORAGE_PAUSE_AT").is_ok_and(|value| value == name) {
+        if std::env::var("CPF_STORAGE_PAUSE_AT")
+            .is_ok_and(|value| value.split(',').any(|selected| selected == name))
+        {
             println!("CPF-PAUSED {name}");
             std::io::stdout().flush().expect("flush storage barrier");
-            std::io::stdin()
-                .read_exact(&mut [0_u8; 1])
-                .expect("release storage barrier");
+            if let Some(directory) = std::env::var_os("CPF_STORAGE_BARRIER_DIR") {
+                let release = std::path::PathBuf::from(directory).join(format!("{name}.release"));
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                while !release.exists() {
+                    assert!(std::time::Instant::now() < until, "release barrier {name}");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            } else {
+                std::io::stdin()
+                    .read_exact(&mut [0_u8; 1])
+                    .expect("release storage barrier");
+            }
         }
     }
     #[cfg(not(feature = "storage-test-hooks"))]
     let _ = name;
+}
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn run_waiting(pid: u32) {
+    if let Some(path) = std::env::var_os("CPF_STORAGE_RUN_WAITING") {
+        std::fs::write(path, pid.to_string()).expect("publish root wait readiness");
+    }
 }
 
 /// Acknowledges a handled first signal on the control thread, never in the OS

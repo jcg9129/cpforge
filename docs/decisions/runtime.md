@@ -230,6 +230,17 @@ not revoke it.
   terminates. It does not wait for a creation in progress (§3.4). It is the
   path where a CLI job intentionally abandons its final report; crashes can
   also prevent a report. Records already persisted remain.
+- Cancellation during committed creation returns `Transferred` (§3.4) while
+  the creation thread still holds the root, possibly on either side of its
+  cancellation kill. Orderly exit does not wait for that thread, so the
+  orderly re-raise first kills every registered run, as force exit does. A
+  fixture can publish its whole tree before creation replies, so force-exit
+  tests that need a live supervised root wait until the executor owns it
+  (`CPF_STORAGE_RUN_WAITING`), not only for the fixture's identity files.
+  `tests/cli_signals.rs::first_sigint_during_creation_kills_the_registered_tree_before_reraising`
+  holds creation before and at the kill barrier;
+  `::second_signal_kills_registered_tree_during_transferred_creation` holds
+  orderly exit until the forcing signal.
 - Dropping a public run future publishes cancellation and transfers any live
   ownership. Cleanup can publish a frozen `RootOutcome` through a ticket, but
   does not own a persistence queue or storage path. The engine enqueues records
@@ -342,7 +353,7 @@ boundary, alongside equal fds, threads and service counters and no root zombies.
 | R6 | kqueue success vs error receipt | Live queue registration with a per-run injected error receipt; polling retains exit status | `src/supervisor/sys/macos.rs::receipts_are_acknowledgements_and_exit_events_are_strictly_validated`; `tests/supervisor_linux.rs::live_kqueue_error_receipt_falls_back_to_polling_and_preserves_exit_status` † | n/a | V (live registration receipt seam †) | n/a |
 | R7 | `WAIT_FAILED` (injected) | — | none | n/a | n/a | pending |
 | R8 | Cancellation before commit, during OS creation, after commit | Cancellation returns while the creation gate is held, including inside OS creation; cleanup kills and reaps after gate release (§1.2) | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::cancel_inside_os_creation_returns_then_cleanup_kills_and_reaps` †, `::cancel_after_commit_returns_before_creation_then_cleanup_reaps` †, `::cancellation_is_persistent_and_mid_run_cancellation_kills`; `tests/job_engine_linux.rs::cancel_during_executor_creation_keeps_the_runtime_responsive` †, `::cancel_inside_os_creation_persists_transferred_record_and_report` †, `::cancel_before_run_mkdir_keeps_the_runtime_responsive` †, `::cancel_before_recipe_completion_keeps_the_runtime_responsive` †; `src/jobs/engine/tests.rs::cancellation_before_admission_skips_without_allocating`, `::cancellation_after_admission_produces_a_not_started_record` | V | V | P/E (before/after admission only) |
-| R9 | Cancellation and force exit during a blocked creation (injected) | Cancellation returns during committed creation for roots and connected pairs. Registry primitive kills an existing root without waiting for gated creation; real second SIGINT terminates cpf while its sole OS creation remains held, then the harness closes its end of the seam, so the unregistered child exits without exec | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::force_exit_registry_primitive_does_not_wait_for_blocked_creation` † (before and after commit), `::session_cancel_and_drop_between_root_commits_release_both_roots` †, `::session_cancel_inside_os_creation_returns_then_cleanup_reaps_both` †; `tests/cli_signals.rs::second_sigint_forces_exit_while_os_creation_is_still_held` † | V (real CLI force exit during pre_exec; at most one unregistered survivor) | V (same) | pending |
+| R9 | Cancellation and force exit during a blocked creation (injected) | Cancellation returns during committed creation for roots and connected pairs. Registry primitive kills an existing root without waiting for gated creation; real second SIGINT terminates cpf while its sole OS creation remains held, then the harness closes its end of the seam, so the unregistered child exits without exec | `tests/supervisor_linux.rs::cancel_before_commit_returns_while_creation_is_blocked` †, `::force_exit_registry_primitive_does_not_wait_for_blocked_creation` † (before and after commit), `::session_cancel_and_drop_between_root_commits_release_both_roots` †, `::session_cancel_inside_os_creation_returns_then_cleanup_reaps_both` †; `tests/cli_signals.rs::second_sigint_forces_exit_while_os_creation_is_still_held` †, `::first_sigint_during_creation_kills_the_registered_tree_before_reraising` †, `::second_signal_kills_registered_tree_during_transferred_creation` † | V (real CLI force exit during pre_exec; at most one unregistered survivor) | V (same) | pending |
 | R10 | Drop of the public future in every §3.2 state | Creation, Running, Terminating, observable-exit, reaped capture, Frozen transfer and Finalized no-op tested; dropped runs publish in-memory ticket outcomes (§3.2) | `tests/supervisor_linux.rs::drop_before_commit_never_creates_a_child` †, `::drop_after_commit_kills_and_transfers_the_created_child` †, `::dropped_owner_is_killed_and_reaped`, `::cancelled_wait_future_transfers_ownership`, `::dropped_exit_transfers_full_outcome_and_cloneable_ticket`, `::cancelled_wait_ticket_records_sigkill_even_before_first_poll`, `::dropping_a_terminating_future_preserves_the_trigger_and_notes_cancellation`, `::dropping_a_paused_wait_reconciles_an_already_exited_root`, `::dropping_capture_wait_freezes_at_transfer_cutoff_without_releasing_a_stalled_worker`, `::dropping_frozen_future_transfers_the_fixed_capture_and_records_cancellation` †, `::dropping_finalized_future_does_not_transfer_or_change_the_outcome` † | V | V | pending |
 | R11 | Root exit with descendants holding stdout / stderr / neither | = S1–S3 | = S1–S3 | V | V | pending |
 | R12 | Late `OutputBudget` after root exit is still a violation | budget counts observed bytes until EOF | `tests/supervisor_linux.rs::capture_late_budget_breach_after_root_exit_is_still_a_violation` | V | V | pending |
@@ -526,9 +537,9 @@ portable-layer behaviors above are the Windows behavior currently evidenced.
 
 ## 4. Residual risks and caveats
 
-- **Unregistered child on force exit (Unix).** Force exit does not wait for a
-  creation in progress. A child whose `spawn` is still running, or has
-  returned but is not yet in the registry, can survive force exit for an
+- **Unregistered child at exit (Unix).** Neither orderly exit nor force exit
+  waits for a creation in progress. A child whose `spawn` is still running,
+  or has returned but is not yet in the registry, can survive `cpf` for an
   unbounded time. There is at most one per job, because each job has one
   creation thread (§3.4, §11). R9 combines a real second SIGINT with a
   socket-held pre_exec. It verifies prompt force-exit status while the only

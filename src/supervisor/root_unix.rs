@@ -539,11 +539,15 @@ pub(in crate::supervisor) fn spawn_prepared(
         gate.before_registration(pid);
     }
     sys::register_observer(&mut root, pid, opts);
+    #[cfg(feature = "storage-test-hooks")]
+    crate::storage::crash::barrier("supervisor.after_registration");
     Ok(root)
 }
 
 pub(in crate::supervisor) async fn wait(mut root: Box<Root>, controls: RunControls) -> RootOutcome {
     let pid = root.pid() as i32;
+    #[cfg(feature = "storage-test-hooks")]
+    crate::storage::crash::run_waiting(pid as u32);
     let deadline = root.outcome().timing.create_end + controls.wall_deadline;
     root.controls = Some(controls.clone());
     let mut budget = root.captures.as_ref().unwrap().budget_receiver();
