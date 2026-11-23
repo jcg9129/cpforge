@@ -839,7 +839,8 @@ fn plan_invocation(
     } else {
         None
     };
-    let presentation = selected.as_ref().map(presentation).transpose()?;
+    let metadata = selected.as_ref().map(problem_metadata).transpose()?;
+    let presentation = metadata.as_ref().map(|m| m.presentation.clone());
     refusal.problem =
         selected
             .as_ref()
@@ -875,14 +876,24 @@ fn plan_invocation(
     if named
         .as_ref()
         .is_none_or(|p| p.needs_build.value || p.for_each_test.value)
-        && presentation
-            .as_ref()
-            .is_some_and(|r| r.problem_kind != "batch")
     {
-        return Err(Error::Config(format!(
-            "problem kind {:?}: build/test/run unsupported in this version",
-            presentation.as_ref().expect("presentation").problem_kind
-        )));
+        if let Some(presentation) = presentation.as_ref().filter(|r| r.problem_kind != "batch") {
+            return Err(Error::Config(format!(
+                "problem kind {:?}: build/test/run unsupported in this version",
+                presentation.problem_kind
+            )));
+        }
+        if let Some(key) = metadata.as_ref().and_then(|m| m.unsupported_check) {
+            return Err(Error::Config(format!(
+                "{}: {key}: build/test/run unsupported in this version",
+                selected
+                    .as_ref()
+                    .expect("problem metadata")
+                    .dir
+                    .join("problem.toml")
+                    .display()
+            )));
+        }
     }
     let needs_target = named.as_ref().is_none_or(|p| {
         p.needs_build.value
@@ -1164,7 +1175,12 @@ fn command_limit_errors(limits: &crate::config::Limits) -> Vec<String> {
     errors
 }
 
-fn presentation(selected: &Selected) -> Result<ReportPresentation, Error> {
+struct ProblemMetadata {
+    presentation: ReportPresentation,
+    unsupported_check: Option<&'static str>,
+}
+
+fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
     let path = selected.dir.join("problem.toml");
     let record = crate::storage::read_user_record(&path, 1, |document| {
         let kind = document.get("problem").and_then(|p| p.get("kind"));
@@ -1172,11 +1188,38 @@ fn presentation(selected: &Selected) -> Result<ReportPresentation, Error> {
             .map(|v| v.as_str().ok_or("problem.kind must be a string"))
             .transpose()?
             .unwrap_or("batch");
-        Ok::<_, String>(ReportPresentation {
-            problem_name: selected.identity.name().as_str().into(),
-            problem_kind: kind.into(),
-            target_name: None,
-            published_limits: None,
+        // design-checkers §10 scopes judging to [check]; role specs (§1,
+        // §2.3), answers (§3) and scores (§4) must never fall back to comparison,
+        // even with a default or incomplete value. Unknown metadata stays inert.
+        let unsupported_check = document.get("check").and_then(|check| {
+            if !check.is_table_like() {
+                return Some("check");
+            }
+            if check
+                .get("kind")
+                .is_some_and(|v| v.as_str() != Some("compare"))
+            {
+                return Some("check.kind");
+            }
+            [
+                ("checker", "check.checker"),
+                ("validator", "check.validator"),
+                ("interactor", "check.interactor"),
+                ("interactive", "check.interactive"),
+                ("answer", "check.answer"),
+                ("scoring", "check.scoring"),
+            ]
+            .into_iter()
+            .find_map(|(key, path)| check.get(key).map(|_| path))
+        });
+        Ok::<_, String>(ProblemMetadata {
+            presentation: ReportPresentation {
+                problem_name: selected.identity.name().as_str().into(),
+                problem_kind: kind.into(),
+                target_name: None,
+                published_limits: None,
+            },
+            unsupported_check,
         })
     });
     selection::record_result(record)
@@ -1505,7 +1548,10 @@ pub(crate) fn switch_hooks(selected: &Selected, config: LoadedConfig) -> ExitCod
             let mut ready = crate::jobs::prepare_command_job(
                 registered,
                 selected.root.clone(),
-                Some((problem_binding(selected), presentation(selected)?)),
+                Some((
+                    problem_binding(selected),
+                    problem_metadata(selected)?.presentation,
+                )),
                 &[],
             )
             .map_err(ready_error)?;

@@ -923,8 +923,15 @@ enabled = true                         # master switch, default true
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-Refused operations say "unsupported in this version". A grader-linked task
-whose local grader is one ordinary program (§6.2 file roles) is `batch`:
+Refused operations say "unsupported in this version".
+Until judging support is implemented, `build`, `run`, `test` and `cmd` with
+`needs_build` / `for_each_test` reject `problem.toml` keys `check.kind`
+(unless `"compare"`), `check.checker`, `check.validator`, `check.interactor`,
+`check.interactive` (including all children), `check.answer` and `check.scoring`
+(on presence, even with default values) as configuration planning errors
+before admission, saying "unsupported in this version".
+A grader-linked task whose local grader is one ordinary program (§6.2 file
+roles) is `batch`:
 the contestant implements an interface, but execution is batch. `multi-file`
 stays refused and is not reinterpreted. Unknown kind strings
 are preserved in `problem.toml`, never rewritten. `check` compares the
