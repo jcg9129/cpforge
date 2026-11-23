@@ -567,7 +567,10 @@ fn assert_warning_cap(late_cancellation: bool) {
         assert_eq!(data.details.warnings_dropped, u32::from(late_cancellation));
         assert_eq!(data.result.cancellation.is_some(), late_cancellation);
 
-        let json = wire::read::read_json(&wire::encode_report(&report).unwrap()).unwrap();
+        let json = crate::report::wire::read::read_json(
+            &crate::report::wire::encode_report(&report).unwrap(),
+        )
+        .unwrap();
         let warnings = json["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 24);
         assert_eq!(json["warnings_dropped"], u32::from(late_cancellation));
