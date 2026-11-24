@@ -454,20 +454,21 @@ stated; none waits for an unbounded event.
 - **Debug counters** (feature `storage-test-hooks`): live iterations,
   in-memory run records and encoded specs, pending persistence cells,
   queued artefacts, held reservations, and the **persistence tail**
-  (below). After R11 of any iteration the first four are 0, queued
-  artefacts are 0, and the reservations are the job's fixed ones plus the
-  persistence tail (§6.6).
+  (below). After R11 of any iteration the first four are 0; queued
+  artefacts and held reservations are the job's fixed ones plus the
+  persistence tail, which is empty unless a deadline was missed (§6.6).
 - **Persistence tail.** When an artefact misses its deadline (R8), E §6.2
-  marks the thread unavailable, fails every other pending artefact at once
-  (their reservations released at that refusal) and leaves only the write
-  in progress, whose reservation and measured bytes the thread keeps until
-  that write returns and its owner joins it (late completion, settled
-  exactly once). Since the thread is never replaced, this happens at most
-  once per job, and the tail is at most one artefact's metadata
-  reservation (≤ 1 MiB) plus its in-flight thread credit. Every later
-  enqueue fails at once with `worker_unavailable`, so later iterations,
-  saved ones included, reserve nothing for persistence beyond R5's
-  hand-over, which their refused artefacts return at once.
+  applies unchanged: the thread is marked unavailable, every still-pending
+  artefact gets `PersistError{Timeout}` at once, and the write in progress
+  together with the reservations of every queued, unwritten artefact stay
+  with the thread until that write returns and its owner joins it (late
+  completion, settled exactly once; unwritten reservations then released
+  uncommitted). The thread is never replaced, so this happens at most once
+  per job, and the tail is at most **one retiring iteration's batch**: ≤ 24
+  artefacts, their metadata reservations (≤ 8 MiB) and their queue
+  charges (≤ Q = 2 MiB, E §6.2). Every later enqueue fails at once with
+  `worker_unavailable`, so later iterations, saved ones included, add
+  nothing to it: their R5 hand-over is returned at the refusal.
 - Because R5–R8 complete before the next admission, at most one
   iteration's artefacts (≤ 24) are ever queued: the stress lifecycle does
   not rely on the persistence queue's headroom (E §6.2 Q). For the credit
@@ -537,9 +538,10 @@ At every instant after the builds, the job holds at most:
   runs' persisted metadata (≤ 8 × 384 KiB, so ≤ 60 MiB in all) and, while
   not promoted, its staged directory (§7.5), plus the one `keep`
   iteration;
-- persistence: ≤ 24 queued artefacts, all of the retiring iteration, plus
-  the persistence tail (§6.3: at most one in-flight write per job, ≤ 1 MiB
-  reserved);
+- persistence: ≤ 24 queued artefacts of the retiring iteration, or, after
+  a missed deadline, the persistence tail instead (§6.3: at most one batch
+  per job, ≤ 24 artefacts, ≤ 8 MiB of reservations, ≤ 2 MiB of charges),
+  which persists past later retirements until the blocked write returns;
 - aggregates of fixed size (report contract §4.14).
 
 None of these grows with the number of passing or counted-only
@@ -845,7 +847,7 @@ report contract §9.
 
 | Id | Fixture | Expected |
 |---|---|---|
-| ST-L01 | batch, 5 runs per iteration, 100 passing iterations; interactive, 8 runs, 100 passing iterations; then one batch iteration with an explicit hold schedule: the injected executor finalizes the records of `generator`, `validator` and `brute` at controlled-clock times 0, 1, 2 s while each run's resources (stderr sink and slot) stay held behind one shared barrier H; H is released at the candidate's `stress.run_admit` barrier, after the occupancy is sampled; the candidate's record is finalized at 3 s | admitted 100, retired 100, runs started 500 / 800; at every `stress.run_admit` barrier the live-iteration counter is 1 and no run of the next iteration exists; never more than 2 iteration runs executing at once; in the scheduled iteration the occupancy at the candidate's admission is exactly 3 held slots, the candidate takes the fourth, all four release within R6's 5 s after R1, the iteration retires normally, and the next iteration is admitted only after the occupancy is 0 |
+| ST-L01 | batch, 5 runs per iteration, 100 passing iterations; interactive, 8 runs, 100 passing iterations; then one batch iteration with an explicit hold schedule: the injected executor finalizes the records of `generator`, `validator` and `brute` at controlled-clock times 0, 1, 2 s while each run's resources (stderr sink and slot) stay held behind one shared barrier H; H stays closed until the candidate's admission has acquired its slot (the fourth); the harness then samples the occupancy and only after that releases H; the candidate's record is finalized at 3 s | admitted 100, retired 100, runs started 500 / 800; at every `stress.run_admit` barrier the live-iteration counter is 1 and no run of the next iteration exists; never more than 2 iteration runs executing at once; in the scheduled iteration the occupancy sampled after the candidate's slot acquisition and before H opens is exactly 4 (3 holders and the candidate), all four release within R6's 5 s after R1, the iteration retires normally, and the next iteration is admitted only after the occupancy is 0 |
 | ST-L02 | intent at `stress.iteration_admit` of k = 7 | stop `cancelled`, retired 7 (0…6), no directory `iterations/7.*`, verdict `cancelled`, cancellation status |
 | ST-L03 | intent at `stress.run_admit` of `7.candidate` (batch) and of the candidate pair (interactive) | the candidate `skipped{cancelled}`; class `cancelled` (S2/T2); disposition `keep`: `iterations/7.*` kept with persisted spec, record and `cleanup.log` of each admitted run; retired 8; no further admission |
 | ST-L04 | intent while `7.candidate` runs (scripted long run) | the run stopped (class `cancelled`), iteration `cancelled`, as ST-L03 |
@@ -856,7 +858,7 @@ report contract §9.
 | ST-L09 | removal failure injected at R10 of k = 5 (one entry of `iterations/5.candidate/cwd/`) | no iteration 6 admitted (admitted 6, retired 6), stop `cleanup_failed`, verdict `stress_cleanup_failed`, status 10, `cleanup_failed.paths` names exactly that entry, its bytes still retained; a later `cpf clean --apply` prunes the job |
 | ST-L10 | R6 deadline: `5.candidate`'s stderr writer stalled (controlled sink, released after 8 s) | the record is finalized with `write_stalled` on stderr (class unchanged), retirement waits 5 s [+ 100 ms] after R1, stop `cleanup_failed`, the run's directory listed; the job still reaches `JobFinished` |
 | ST-L11 | engine debug counters after every R11 in ST-L01 | live iterations, records, specs, pending cells, queued artefacts and the persistence tail 0; persistence never holds an artefact of an earlier iteration |
-| ST-L23 | persistence tail: `--keep-going`, every iteration failing; the controlled writer blocks the record write of `2.candidate` forever until released; 10 more iterations run, then the writer is released | iteration 2's deadline missed (`timeout`), every other pending artefact of it `timeout` at once; iterations 3–12 continue (saved, refs `worker_unavailable`, their failures still staged and promoted); after each later R11 queued artefacts 0 and reserved bytes = fixed + exactly the one blocked artefact's reservation; on release the late write is settled once (committed by its joining owner, never twice), and reserved bytes return to the fixed baseline |
+| ST-L23 | persistence tail: `--keep-going`, every iteration failing; the controlled writer blocks the **spec** write of `2.generator` (the first artefact of iteration 2) until released, so the other 14 artefacts of iteration 2 are queued behind it; 10 more iterations run, then the writer is released | iteration 2's artefacts all `timeout` at the missed deadline; iterations 3–12 continue (saved, refs `worker_unavailable`, failures still staged and promoted); after each later R11 the tail counters are exactly iteration 2's batch (15 artefacts held, their 5 MiB of metadata reservations and their queue charges) and nothing else is queued or reserved beyond the fixed part; on release the late write is settled once (committed by its joining owner, never twice), the 14 unwritten reservations are released uncommitted, and reserved bytes return to the fixed baseline |
 | ST-L12 | slow controlled writer (each artefact 200 ms), `--keep-going`, 25 failing iterations | every artefact of the 20 saved iterations published (no `queue_full`, `timeout`, `cancelled`), max queued artefacts ≤ 24 and of one iteration only; the 5 counted iterations enqueue nothing |
 | ST-L13 | counters: `stress.counters` sets runs-started to `u64::MAX − 3` before a batch iteration | stop `counter_limit` before that iteration, no run admitted, nothing wraps |
 | ST-L14 | time budget with `stress.clock`: T = 10 s, each iteration 3 s | admitted exactly 4 (checks at 0, 3, 6, 9 s), the fourth completes past T, stop `time_budget` |
