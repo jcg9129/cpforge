@@ -359,6 +359,28 @@ Runs with a borrowed workspace guard (§4.5).
    from the first attempt survive in the replay result.
 5. Publish (§4.2 steps 2–4).
 
+*(fetch, draft)* **Prepared form** (used by fetch step 6, §5.8.4, and by its
+step-2 size preflight). `prepare` runs steps 1–3 once and returns, without
+writing anything: the full baseline of step 1 (bytes, length, SHA-256,
+identity, file type, hard-link count), and either *unchanged* or the
+**exact output bytes** that would be published (after the formatting and
+line-ending preservation of step 2, i.e. the bytes step 5 writes, not a
+re-rendering). Size checks and any hash of the result use those bytes.
+`publish(prepared)` then performs steps 3 (temp), 4 and 5 with exactly those
+bytes: every validation (also every Windows retry) compares against the
+**retained** baseline, never a fresh one, and nothing is re-rendered.
+Dropping a prepared edit writes nothing (its temp exists only inside
+`publish`). `publish` of an *unchanged* result is not allowed (the caller
+returns as step 3 does). Outcomes and cleanup are those of steps 4–5: a
+`Conflict` removes the temp (or reports `Cleanup::Pending`) and returns;
+there is no built-in replay, and a caller that retries calls `prepare` again
+(new baseline, new bytes). `check` and the operations stay replayable and
+side-effect free; anything the caller does between `prepare` and `publish`
+(fetch's journal replacement) is the caller's, outside the callbacks. The
+**expected-hash** variant (fetch step 5) compares the step-1 SHA-256 with a
+given hash before applying any operation and returns `Conflict` on a
+difference; it is used without replay.
+
 **Guarantee, stated exactly:** *The tool aborts when the final validation
 observes bytes different from its baseline. This is not compare-and-swap;
 concurrent edits during validation or before successful replacement may be
@@ -849,8 +871,8 @@ There are no generation directories.
     (`expect_download`);
   - `[[metadata]]`: `field`, `old` (omitted when the field was absent),
     `new`;
-  - `[metadata_step]` (phase `"metadata"` only): `before_sha256`,
-    `after_sha256` (§5.8.4 step 6);
+  - `[metadata_step]` (phase `"metadata"` only): `after_sha256` (§5.8.4
+    step 6);
   - `[history]`: the body of the committed history record (§5.8.10) without
     `schema` and `outcome`: `fetched_at`, `url`, every `[[pair]]` and every
     `[[file]]`, including each `superseded` file with the hash of the
@@ -919,7 +941,8 @@ health), or `missing` (absent, not a regular file, or unreadable).
    **Size preflight**: the plan is refused (`record_too_large`, before step
    3) when the journal, the history record, the catalog after the step-5
    edit, or `problem.toml` after the step-6 edit rendered against its
-   current bytes would exceed 1 MiB (§9).
+   current bytes (the output bytes of a §4.4 prepared edit, then dropped)
+   would exceed 1 MiB (§9).
 3. **Journal**: publish `.cpforge/fetch/<p>/journal.toml` no-clobber (§4.3,
    synced) with phase `"files"` and every field of §5.8.2. A refetch
    publishes from the area directly; only creation stages.
@@ -935,10 +958,12 @@ health), or `missing` (absent, not a regular file, or unreadable).
    publication syncs the file before its rename and, on Unix, the directory
    after it (§4.3).
 5. **Commit the catalog** (not for creation). If the catalog base is
-   `absent`, the catalog is first created no-clobber as exactly
-   `schema = 1\n` (as §5.3; `Exists` → `Conflict`), and its expected
-   baseline is the hash of those bytes; otherwise the expected baseline is
-   the catalog base. Then one §4.4 edit of `tests.toml`, without the replay
+   `absent`: in a live transaction the catalog is first created no-clobber as
+   exactly `schema = 1\n` (as §5.3; `Exists` → `Conflict`); in a
+   reconciliation roll-forward a current file of exactly those bytes is
+   used as it is, without a second creation, and only a missing catalog is
+   created (`Exists` → `Conflict`). Either way the expected baseline is then
+   the hash of `schema = 1\n`; otherwise it is the catalog base. Then one §4.4 edit of `tests.toml`, without the replay
    wrapper, with two additions:
    - **Expected baseline**: the SHA-256 of the bytes read at §4.4 step 1 must
      equal the expected baseline, else `Conflict` (`base_changed`) before any
@@ -958,19 +983,25 @@ health), or `missing` (absent, not a regular file, or unreadable).
    `Conflict` or any other error leaves the catalog uncommitted (§4.1) and
    aborts (§5.8.8). As §4.4 states, an editor save between the last
    validation and the rename is not detected (the remaining race, §5.8.11).
-6. **Metadata** (refetch with a metadata diff only). Read `problem.toml`
-   (§4.4 steps 1–2). Not `valid`, or no longer bound to the identity → not
-   edited, finding `metadata_not_applied{reason}`, step 7. Otherwise apply the
-   per-field rule to each diff field: current = old → set new; current = new
-   → nothing; otherwise kept, finding `metadata_conflict{field}`. A document
-   left unchanged → step 7. A rendering above 1 MiB → `metadata_not_applied
-   {too_large}`, step 7. Otherwise **replace the journal** (§4.2) with
-   phase `"metadata"`, `before_sha256` = hash of the bytes read and
-   `after_sha256` = hash of the rendered bytes (crash point
-   `fetch.metadata_prepared`), then validate and publish (§4.4 steps 4–5).
-   A `Conflict` repeats step 6 once from the read (with a new journal
-   replacement); a second `Conflict`, a retryable error (I/O, Windows sharing
-   timeout) or a failed journal replacement → §5.8.8 (`metadata_pending`).
+6. **Metadata** (refetch with a metadata diff only). `problem.toml` not
+   `valid`, or no longer bound to the identity → not edited, finding
+   `metadata_not_applied{invalid | unbound}`, step 7. Otherwise `prepare`
+   the §4.4 edit (prepared form) applying the per-field rule to each diff
+   field: current = old → set new; current = new → nothing; otherwise kept,
+   finding `metadata_conflict{field}`. *Unchanged* → step 7. Output bytes
+   above 1 MiB → `metadata_not_applied{too_large}`, step 7. Otherwise
+   **replace the journal** (§4.2) with phase `"metadata"` and
+   `after_sha256` = SHA-256 of the prepared output bytes (crash point
+   `fetch.metadata_prepared`), then `publish` the prepared edit. A
+   `Conflict` repeats step 6 once (new `prepare`, new journal replacement).
+   Every other result maps as follows: a permanent refusal → not edited,
+   `metadata_not_applied{reason}`, step 7: `NotSingleRegularFile`
+   (`not_single_file`: a link, a non-regular file, more than one hard link),
+   `TooLarge`, `Encoding`, `Parse` or `Check` (`invalid`), `Operations`
+   (`unbound`), `LinkInPath`, `InvalidPath`, `PathTooLong`, `Unsupported`,
+   `CrossFilesystem`; a retryable failure → §5.8.8 `metadata_pending`: a
+   second `Conflict`, `Io` (including permission denied and the Windows
+   sharing timeout), a failed journal replacement.
 7. **Finish**: publish `txn-<txn>.toml` no-clobber from the journal's
    `[history]`; replace `status.toml`; remove the journal (unlink; Windows
    retries a sharing violation with the §4.2 step 3 backoff; then, on Unix,
@@ -1105,18 +1136,20 @@ workspace only.
      repaired.
   5. Marker *committed* (creation: step 6 is part of the directory) →
      metadata by phase, refetch only: `"files"` → step 6 (§5.8.4, per-field
-     rule); `"metadata"` → current `problem.toml` SHA-256 = `after_sha256`:
-     step 6 done, nothing; = `before_sha256`: step 6 not published, run it;
-     anything else: not edited, `metadata_not_applied{changed_since_crash}`
-     (the next refetch recomputes the diff from the current values). Then
+     rule; step 6 never started, so no publication can be repeated);
+     `"metadata"` → never edited by reconciliation: current `problem.toml`
+     SHA-256 = `after_sha256` → step 6 done; anything else (not yet
+     published, or published and since changed or exactly restored: the
+     hashes cannot tell these apart) → `metadata_not_applied{interrupted}`,
+     and the next refetch recomputes the diff from the current values. Then
      step 7; status `committed`, `recovered = true`.
   6. *Not committed*, refetch. *Present set* = planned files present as
      regular files with their planned hash. **Roll forward** (steps 5–7 with
      the step-5 expected baseline and rehash, outcome `committed`,
      `recovered = true`) only if the present set is every planned file and
      every base still matches (a base `absent` catalog also matches a file of
-     exactly `schema = 1\n`). Otherwise, or when the roll-forward's step 5
-     does not commit, **roll back**: history `rolled_back` derived from the
+     exactly `schema = 1\n`, which step 5 then reuses, §5.8.4). Otherwise,
+     or when the roll-forward's step 5 does not commit, **roll back**: history `rolled_back` derived from the
      journal (§5.8.2; written only when the present set is not empty),
      status `rolled_back`, journal removed. No file is ever deleted.
   7. *Not committed*, creation → never rolled forward (its staging is
@@ -1137,7 +1170,12 @@ history with outcome `conflict` or `failed` derived from the journal
 (§5.8.2), listing the files this txn published as `unreferenced` (written
 only when it published any), status, journal removal, area release. The
 published files stay as unregistered downloads. Before step 3 an abort
-writes only the status.
+writes only the status. An abort whose record cannot be written (other than
+`Exists`) persists no decision: the journal stays **undecided**, and the next
+reconciliation decides by rule 6, which may commit it. That is sound because
+nothing was committed and rule 6 rechecks everything: a conflict abort fails
+the base check, a `name_taken` or hash-mismatch abort lacks a planned file,
+and an abort after a transient step-5 error may legitimately roll forward.
 
 Every failure, live or during reconciliation, has one transition. "Kept"
 journals are decided again by the next reconciliation (§5.8.7); retries of
@@ -1150,13 +1188,14 @@ publication primitives (Windows ≤ 2 s, §4.2–§4.3) happen inside the step.
 | 5 | `Conflict` (baseline, precondition, rehash, validation), schema-only creation `Exists` | no | removed (abort) | `conflict` | `conflict` (`base_changed` / `edited_during_commit`) |
 | 5 | any other error (I/O, sharing timeout, `TooLarge`) | no | removed (abort) | `failed` | `failed` |
 | 3–7 | a committed publication with `Durability::Uncertain` or `Cleanup::Pending` | yes (that step) | continues | continues | warning |
-| 6 | not valid, unbound, too large | yes | continues to 7 | written | `committed`, `metadata_not_applied` |
-| 6 | second `Conflict`, I/O or sharing timeout, failed journal replacement | yes | kept | none | `committed`, `metadata_pending` |
+| 6 | not valid, unbound, too large, or a permanent edit refusal (the §5.8.4 step 6 list, e.g. a second hard link) | yes | continues to 7 | written | `committed`, `metadata_not_applied{reason}` |
+| 6 | second `Conflict`, `Io` (permission, sharing timeout), failed journal replacement | yes | kept | none | `committed`, `metadata_pending` (next: rule 5) |
 | 7 | history publication error | yes | kept | none | `committed`, `history_pending` |
 | 7 | history `Exists` (§5.8.7 rule 3) | yes | kept | blocked | `committed`, `history_blocked` |
 | 7 | status replacement error | yes | continues | written | warning of the command only |
 | 7 | journal unlink error after retries | yes | kept | written | `committed`, `journal_pending` (next reconciliation: rule 1) |
-| abort | history publication error | no | kept | none | `conflict`/`failed`, `abort_pending` (next: rule 6, writes `rolled_back`) |
+| abort | history publication error other than `Exists` | no | kept, **undecided** (no abort decision is persisted) | none | `conflict`/`failed`, `abort_unrecorded` (next: rule 6 decides afresh: roll forward if every planned file is present and every base matches, else roll back with `rolled_back`) |
+| abort | history `Exists` | no | kept | blocked | `conflict`/`failed`, `history_blocked` (next: rule 3) |
 | abort | journal unlink error | no | kept | written | `conflict`/`failed`, `journal_pending` (next: rule 2) |
 | reconciliation | undeterminable marker, blocked history, inconsistency | — | kept | unchanged | not replaced; reported by `fetch` (refusal) and `fsck` |
 
@@ -1773,59 +1812,110 @@ finalizes them (execution contract §6.2).
 | *(draft)* adopt / gitignore | old content | new content |
 | *(fetch, draft)* every fetch boundary | see the fetch crash matrix below | |
 
-*(fetch, draft)* **Fetch crash matrix** (the C5 gate; C7 and C8 for their
-scenarios). Scenarios: **C** creation with three pairs; **R** refetch with
-one `updated`, one `added` and one `kept_edited` pair and a title change;
-**M** metadata-only refetch; **A** refetch of a problem whose `tests.toml` is
-missing (schema-only creation in step 5); **X** refetch aborted by
-`name_taken` on the answer of its second pair; **K** contest of four
-members. Each cell is a kill of the real `cpf` binary at the point
-(`CPF_STORAGE_CRASH_AT`; `#i` is the occurrence, counted per process)
-followed by
-each of two reconcilers: (a) `cpf fetch` with the same parsed problem;
-(b) `cpf clean`, which reclaims the area without reconciling, then `cpf fsck
---apply` (so recovery never has the download area).
+*(fetch, draft)* **Fetch crash matrix** (the C5 gate; C6, C7 and C8 for
+their scenarios).
 
-| # | Crash point | Scenarios | Left by the kill | Reconciliation | History after it |
+*Scenarios*, each with a fixed initial workspace `W(S)` and parsed problem:
+**C** creation with three pairs; **R** refetch with one `updated`, one
+`added` and one `kept_edited` pair and a title change (`P = 6` planned files
+in publication order); **M** metadata-only refetch (title change, `P = 0`);
+**A** refetch of a problem whose `tests.toml` is missing (three `added`
+pairs, `P = 6`, schema-only creation in step 5); **X** as R, with the 4th
+planned file (answer of the second pair) created by the test at
+`fetch.before_publish#4` (`name_taken`, `k = 4`); **K** contest of four
+members.
+
+*Reference*: `Ref(S)` is the workspace after an uninterrupted run of `S` on
+`W(S)`. "Equal to `Ref`" means byte-equal after substituting the txn id (in
+the record's `txn`, `[fetch] txn` and each `download.txn`).
+
+*Crash points.* Fetch-scoped points count only what their name says:
+`fetch.before_publish#i` (planned file `i`'s temporary file written, before
+the key recheck and the publishing call) and `fetch.file_published#i` (after
+its publication and directory sync) count planned files 1…P;
+`fetch.catalog_validated` and `fetch.metadata_validated` sit after the last
+validation of steps 5 and 6, before the rename (the temp exists). The one
+primitive point used is `file_noclobber.linked` (Linux link fallback): every
+cell starts a fresh process on a workspace without a journal, so the journal
+is that process's first no-clobber file publication and planned file `i` is
+occurrence `#(i+1)`. Reconciliation points are the same names under
+`fetch_reconcile.`.
+
+*Reconcilers.* (a) `cpf fetch` with the same parsed problem, observed at the
+barrier `fetch.after_reconcile` (step 0, after reconciliation, before the
+new area is created): the cell's assertions are taken there; then the
+barrier is released and the **follow-up** fetch is asserted separately.
+(b) `cpf clean` (reclaims the area, does not reconcile), then `cpf fsck
+--apply`; assertions after it. Row 25 uses (a) only, asserted after the
+complete rerun.
+
+| # | Crash point | Scenarios | Left by the kill | Reconciliation | Expected after it |
 |---|---|---|---|---|---|
-| 1 | `fetch.area_created` (directory, no lease) | all | area without `lease` | area reclaimed; nothing else | none |
-| 2 | `fetch.prepared` | all | area with a free lease | as 1 | none |
-| 3 | `fetch.downloaded` | all | area with samples | as 1 | none |
-| 4 | `fetch.revalidated` | all | as 3, no journal, no status | as 1 | none |
-| 5 | `fetch.journal_published` | C R M A X | journal, nothing published | M: rolled forward (empty plan, bases match); C: rule 7; R A X: rolled back | M `committed`; others none |
-| 6 | `file_noclobber.before_publish#i` | R A X | journal, files 1…i−1, a temp in `tests/` | temp removed by recovery; rolled back | `rolled_back`, files 1…i−1 `unreferenced` (none for i = 1) |
-| 7 | `file_noclobber.linked#i` (Linux) | R | files 1…i, temp hard-linked to file i | temp removed, file i keeps its bytes; i last → as 9, else as 8 | as 8 or 9 |
-| 8 | `file_noclobber.after_publish#i`, `file_noclobber.directory_synced#i` | R A X | files 1…i | i < last: rolled back; i last: as 9 | `rolled_back`, files 1…i |
-| 9 | `fetch.files_published` | R A | every planned file | rolled forward | `committed` |
-| 10 | `fetch.catalog_created` | A | as 9 plus `schema = 1\n` | rolled forward (base `absent` matches) | `committed` |
-| 11 | step-5 `edit_toml.validated` | R M A | temp beside `tests.toml`, catalog old | temp removed; rolled forward | `committed` |
-| 12 | `fetch.catalog_committed` | R M A | committed, phase `"files"` | step 6 then 7 | `committed` |
-| 13 | `fetch.metadata_prepared` | R M | phase `"metadata"`, `problem.toml` = before | step 6 run, then 7 | `committed` |
-| 14 | step-6 `edit_toml.validated` | R M | as 13, temp beside `problem.toml` | temp removed; as 13 | `committed` |
-| 15 | `fetch.metadata_committed` | R M | `problem.toml` = after | step 6 not repeated; step 7 | `committed` |
-| 16 | `fetch.history_published` | C R M A | record and journal | finished (rule 1): status, journal removed, no edit | kept, not rewritten |
-| 17 | `fetch.status_replaced` | C R M A | as 16, new status | as 16 | kept |
-| 18 | `fetch.journal_unlinked` (before the directory sync) | C R M A | no journal, free area | area reclaimed | kept |
-| 19 | `fetch.journal_removed` | C R M A | as 18 | as 18 | kept |
-| 20 | `fetch.area_renamed` | C R M A | `.reclaim-<txn>` | deleted by recovery | kept |
+| 1 | `fetch.area_created` (directory, no lease) | C R M A X | area without `lease` | area reclaimed | none |
+| 2 | `fetch.prepared` | C R M A X | area with a free lease | as 1 | none |
+| 3 | `fetch.downloaded` | C R M A X | area with samples | as 1 | none |
+| 4 | `fetch.revalidated` | C R M A X | as 3, no journal, no status | as 1 | none |
+| 5 | `fetch.journal_published` | C R M A X | journal, nothing published | M: rolled forward; C: rule 7; R A X: rolled back (present set empty) | M: committed; others: none |
+| 6 | `fetch.before_publish#i`; R A: i = 1…6; X: i = 1…3 | R A X | journal, files 1…i−1, a temp in `tests/` | temp removed by recovery; rolled back | rolled back with files 1…i−1 (none for i = 1) |
+| 7 | `file_noclobber.linked#(i+1)`, i = 1…6 (Linux) | R | files 1…i, temp hard-linked to file i | temp removed, file i keeps its bytes; i < 6: as 8; i = 6: as 9 | as 8 or 9 |
+| 8 | `fetch.file_published#i`; R A: i = 1…5; X: i = 1…3 | R A X | files 1…i | rolled back | rolled back with files 1…i |
+| 9 | `fetch.file_published#6`, `fetch.files_published` | R A | every planned file | rolled forward | committed |
+| 10 | `fetch.catalog_created` | A | as 9 plus `schema = 1\n` | rolled forward, the file reused (§5.8.4 step 5) | committed |
+| 11 | `fetch.catalog_validated` | R M A | temp beside `tests.toml`, catalog old | temp removed; rolled forward | committed |
+| 12 | `fetch.catalog_committed` | R M A | committed, phase `"files"` | rule 5: step 6, step 7 | committed |
+| 13 | `fetch.metadata_prepared` | R M | phase `"metadata"`, `problem.toml` as in `W` | rule 5: `metadata_not_applied{interrupted}`; step 7 | committed, `problem.toml` as in `W` |
+| 14 | `fetch.metadata_validated` | R M | as 13, temp beside `problem.toml` | temp removed; as 13 | as 13 |
+| 15 | `fetch.metadata_committed` | R M | `problem.toml` = after | rule 5: step 6 done; step 7 | committed |
+| 16 | `fetch.history_published` | C R M A | record and journal | rule 1: status, journal removed, no edit | committed |
+| 17 | `fetch.status_replaced` | C R M A | as 16, new status | as 16 | committed |
+| 18 | `fetch.journal_unlinked` (before the directory sync) | C R M A | no journal, free area | area reclaimed | committed |
+| 19 | `fetch.journal_removed` | C R M A | as 18 | as 18 | committed |
+| 20 | `fetch.area_renamed` | C R M A | `.reclaim-<txn>` | deleted by recovery | committed |
 | 21 | `fetch.staged`, `dir_noclobber.staging_synced` | C | journal `create = true`, staging | staging removed; rule 7 | none |
-| 22 | `dir_noclobber.renamed`, `fetch.problem_published` | C | problem published, journal | rule 5 (no step 6), step 7 | `committed` |
-| 23 | `fetch.abort_recorded` | X | abort record and journal | rule 2: journal removed, no second record | `failed` kept |
-| 24 | `fetch_reconcile.catalog_committed`, `.metadata_prepared`, `.metadata_committed`, `.history_published`, `.rolled_back_recorded` (a kill inside reconciliation (b) of rows 9, 12, 8) | R M | partial reconciliation | a further reconciliation reaches the state of the uninterrupted one | as that row |
-| 25 | `fetch.member_finished#2`, `fetch.contest_created`, `fetch.membership_edited` | K | members committed so far; contest file; membership | a rerun lists every committed member in enumeration order | per member |
+| 22 | `dir_noclobber.renamed`, `fetch.problem_published` | C | problem published, journal | rule 5 (no step 6), step 7 | committed |
+| 23 | `fetch.abort_recorded` | X | `failed` record (files 1…3) and journal | rule 2: journal removed, no second record | aborted (`failed`, files 1…3) |
 
-Assertions in every cell, after the reconciler: the catalog, `problem.toml`
-and `contest.toml` bytes; every file of `tests/` with its SHA-256 (every
-pre-existing file unchanged: no test file is modified or deleted); the set
-of history records, a `committed` record byte-identical to the one of an
-uninterrupted run with the same parsed problem except for the txn id; the
-status outcome and `recovered`; no journal, nothing in `downloads/` or
-`staging/`, no `.cpf-tmp-` name left. With reconciler (a), a rolled-forward
-cell's own fetch is then `unchanged` and a rolled-back cell's fetch commits a
-new txn whose names skip the `unreferenced` ones. A second `cpf fsck --apply`
-leaves the workspace byte-identical. Every cell runs on Linux, macOS and
-Windows except row 7 (Linux only). A cell not listed for a scenario is
-unreachable in it; no other exclusion is allowed.
+*Kills inside reconciliation* (reconciler (b) killed, then a second `cpf
+fsck --apply`; only these combinations are reachable):
+
+| # | Reconciliation point | Reached from | Expected after the second reconciliation |
+|---|---|---|---|
+| 24a | `fetch_reconcile.catalog_created` | row 9 of A | committed (the file reused) |
+| 24b | `fetch_reconcile.catalog_validated`, `fetch_reconcile.catalog_committed` | row 9 of R and A, row 5 of M | committed |
+| 24c | `fetch_reconcile.metadata_prepared`, `fetch_reconcile.metadata_validated` | row 12 of R and M | as row 13 |
+| 24d | `fetch_reconcile.metadata_committed` | row 12 of R and M | committed |
+| 24e | `fetch_reconcile.history_published` | row 9 of R and A, row 12 of R and M, row 22 of C | committed |
+| 24f | `fetch_reconcile.rolled_back_recorded` | row 8 of R, A and X | as row 8 |
+
+| # | Crash point | Scenario | Rerun (reconciler (a) only) |
+|---|---|---|---|
+| 25 | `fetch.member_finished#2`, `fetch.contest_created`, `fetch.membership_edited` | K | every member committed; membership equal to `Ref(K)` |
+
+*Expected states*, compared in every cell together with: no journal, nothing
+in `downloads/` or `staging/`, no `.cpf-tmp-` name, every file of `W(S)`
+byte-unchanged (no test file is modified or deleted), and the status outcome
+with `recovered = true` wherever a journal was reconciled.
+
+- **none**: every record and file as in `W(S)` apart from `status.toml`;
+  no history record.
+- **committed**: catalog, `problem.toml`, `tests/` and the history record
+  equal to `Ref(S)` (row 13: `problem.toml` as stated).
+- **rolled back with files F**: catalog and `problem.toml` as in `W(S)`;
+  `tests/` = `W(S)` plus exactly F (with `Ref(S)`'s bytes); history record
+  `rolled_back` with `Ref(S)`'s `fetched_at`, `url` and `[[pair]]`, and as
+  `[[file]]` exactly F with `Ref(S)`'s paths and hashes, role
+  `unreferenced`; no record when F is empty.
+- **aborted**: as rolled back, with the abort's outcome kept.
+
+*Follow-up* fetch of reconciler (a): after committed → `unchanged`
+(byte-identical apart from `status.toml`); after row 13/14 → a committed
+metadata-only txn whose `problem.toml` equals `Ref(S)`'s; after none, rolled
+back or aborted → a committed txn whose catalog entries, pair outcomes, file
+hashes and roles equal `Ref(S)`'s, with each path the one §5.8.6 chooses
+given the files left (it skips every name of F and of X's user file). A
+second `cpf fsck --apply` after any cell changes nothing. Every cell runs on
+Linux, macOS and Windows except row 7 (Linux only). The tables list every
+gated cell; a cell not listed is unreachable.
 
 **Guarantee scope.** The matrix tests level 2 (§1): after a process kill the
 OS keeps every completed write, rename and unlink. Power loss (level 3) stays
@@ -1931,11 +2021,14 @@ contest fetch completes its membership.
   step-5 edit reads the catalog), `fetch.before_validation` (step-5 document
   rendered, before the first validation and rehash), `fetch.after_rehash`
   (after the last step-5 rehash, before the rename), `fetch.before_metadata`
-  (before the step-6 read), `fetch.before_history`, `fetch.before_unlink`.
-- **Fetch crash states:** every cell of the crash matrix, with its listed
-  assertions; a test per cell, named by row, scenario and reconciler.
-- **Journal completeness:** for R and M killed at `fetch.catalog_committed`
-  and at `fetch.files_published`, reconciler (b) runs with the download area
+  (before the step-6 `prepare`), `fetch.before_history`, `fetch.before_unlink`,
+  `fetch.after_reconcile` (step 0, after reconciliation, before the area is
+  created).
+- **Fetch crash states:** every cell of the crash matrix (row × scenario ×
+  `i` × reconciler), with its expected state and follow-up; one test per
+  cell, named by row, scenario, `i` and reconciler.
+- **Journal completeness:** for R killed at `fetch.files_published`, and R
+  and M killed at `fetch.catalog_committed`, reconciler (b) runs with the download area
   already reclaimed and the test adapter disabled (any adapter call fails the
   test): the history record is byte-identical (except txn) to the
   uninterrupted run's, including `fetched_at`, `url`, pair outcomes and the
@@ -1954,16 +2047,20 @@ contest fetch completes its membership.
     `downloaded{unreferenced}`;
   - a `problem.toml` tool field edited after `fetch.catalog_committed` →
     kept, `metadata_conflict{field}`;
-  - the title edited back to its old value, and separately to a third value,
-    after `fetch.history_published` and after `fetch.metadata_committed` →
-    `problem.toml` byte-identical to the edited file after reconciliation
-    (finished; or `after_sha256` mismatch → `metadata_not_applied
-    {changed_since_crash}`);
-  - the same edits after `fetch.metadata_prepared` →
-    `metadata_not_applied{changed_since_crash}`, file unchanged; the next
-    refetch then applies the per-field rule to the current values;
+  - after `fetch.history_published`, `fetch.metadata_committed` and
+    `fetch.metadata_prepared`, `problem.toml` (a) restored to its exact
+    `W(S)` bytes, (b) title edited to a third value, (c) left alone →
+    after reconciliation `problem.toml` is byte-identical to what the user
+    left in every case; the finding is none for `history_published`, and
+    for the other two `metadata_not_applied{interrupted}` except
+    `metadata_committed` (c) (step 6 done). The follow-up refetch then applies
+    the per-field rule to the current values;
   - the catalog edited (an `enabled` change) after `fetch.catalog_committed`
     → steps 6–7 still rolled forward, catalog untouched by reconciliation;
+  - for A killed at `fetch.catalog_created`: reconciliation reuses the
+    schema-only file (no `Exists`), commits, `tests.toml` equal to
+    `Ref(A)`; with that file edited by the user (a comment added) →
+    base mismatch, rolled back;
   - the catalog made `malformed` after `fetch.catalog_committed`, and
     separately after `fetch.files_published` → journal kept, `fetch` refused,
     `fsck` and `status` report `undetermined`; after the user repairs it,
@@ -1975,7 +2072,19 @@ contest fetch completes its membership.
   the primitive test hooks (permission denied, sync failure, cleanup
   failure) at the step: assert the committed state, journal, history and
   status of that row, then that the next reconciliation reaches the row's
-  stated successor. Windows, with real sharing violations (a handle opened
+  stated successor. Named cases: a second hard link to `problem.toml`
+  created at `fetch.before_metadata` → `metadata_not_applied
+  {not_single_file}`, journal removed, both names byte-unchanged; the same
+  at `fetch.catalog_committed` with reconciler (b) → the same finding; one
+  test per permanent refusal kind of §5.8.4 step 6 that a test can provoke
+  (`not_single_file`, `too_large`, `invalid`, `unbound`); abort-history
+  publication failing (permission denied on `.cpforge/fetch/<p>/`) after a
+  transient step-5 error with every planned file present and bases
+  unchanged → `abort_unrecorded`, journal kept, and after access is restored
+  the next reconciliation **commits** (rule 6); the same after a step-5
+  `Conflict` from an editor save → the next reconciliation rolls back; a
+  file planted as `txn-<txn>.toml` before an abort records → `history_blocked`
+  (rule 3). Windows, with real sharing violations (a handle opened
   without delete or write sharing, held by the test): on `tests.toml` through
   step 5 → after the ≤ 2 s backoff `failed`, catalog unchanged, history
   `failed`, and a rerun after release commits; on `problem.toml` through step
@@ -2075,6 +2184,13 @@ contest fetch completes its membership.
   `undetermined` journal, `cpf status` and `cpf test ls` report
   `fetch_incomplete` with that phase and leave the workspace byte-identical;
   a pending journal's files are candidates and never run.
+- **Prepared edit** (§4.4 prepared form, library helper subprocess as C4b):
+  on a CRLF `problem.toml` with comments, the prepared output bytes equal the
+  bytes finally published and their SHA-256 equals the journal's
+  `after_sha256`; a save between `prepare` and `publish` → `Conflict`, file
+  keeps the save, no temp left; on Windows, a save between retry attempts →
+  `Conflict` against the retained baseline; dropping a prepared edit leaves
+  the directory byte-identical; an *unchanged* result publishes nothing.
 - **Metadata:** an unavailable field is not written; a limit change with a
   contest record `limits` override → only `problem.toml` changes,
   `contest.toml` byte-identical. Size: a `problem.toml` padded (a user
