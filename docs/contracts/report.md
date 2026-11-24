@@ -59,6 +59,14 @@ submit-prep` in stage mode, its verdicts `submit_version_mismatch` and
 `Submission` type (its §9.2, bound 17 KiB). Marked *(submission, draft)*;
 merged into schema 1 by the final reconciliation.
 
+**File-I/O amendment: draft.** Problems that declare `[config] io` (C
+§6.2): the collection outcome of the output file and its place in the
+batch derivations (§2.15, with §§2.1, 2.2, 2.4, 2.5, 2.11), labels (§2.8),
+the members `target.io` and `tests[].output_file`, the check kind
+`output_rejected`, the warning `io_scratch` (§§4.3, 4.6, 4.10), the size
+bound (§3.7) and fixtures (§9.8). Marked *(file I/O, draft)*; merged into
+schema 1 by the final reconciliation. Staging and collection are E §5.6.
+
 **Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
 problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
 draft)* judged problems (configuration contract §9.1): checkers and
@@ -180,7 +188,7 @@ outcome:
 | `job_not_eligible` | an `after_test` hook, and phase H does not run (§2.9) |
 | `submit_not_succeeded` | *(submission, draft)* job kind `submit`, for its submit stage (after a probe that failed or mismatched), artifact build, role builds and test executions (reduced by §2.3, §2.4, B2, B10 and I2 like `build_not_succeeded`, giving `skipped{submit_not_succeeded}` and `not_run{submit_not_succeeded}`): an earlier probe or submit stage of the job has a class other than `exited_zero`, the probe mismatched, or (for executions after the submit stage) the artifact failed the selection rule; a skipped submit stage is a primary execution like the others (§2.1 reconciliation) and never decides the verdict, the probe does (§2.7 rows 2–3a) (submission contract §§6.3–6.4) |
 | `input_not_validated` | *(judging, draft)* a solution, interactor or checker run of a test whose validator run has a final record that does not report the input valid (§2.11) |
-| `not_eligible` | *(judging, draft)* a checker run whose test's solution run is not eligible for checking (§2.11), or a follow-up checker after `CheckerSkipped{NotEligible}` (§2.12) |
+| `not_eligible` | *(judging, draft)* a checker run whose test's solution run is not eligible for checking (§2.11), *(file I/O, draft)* or whose output file was not collected (§2.15), or a follow-up checker after `CheckerSkipped{NotEligible}` (§2.12) |
 
 *(judging, draft)* Reasons apply in this order when several conditions hold:
 `cancelled`, *(submission, draft)* `submit_not_succeeded`, `build_not_succeeded`, `admission_closed`,
@@ -209,7 +217,11 @@ For an execution with a record, first matching row:
 | 6 | `Exited{code}`, `code ≠ 0` | `nonzero_exit{code}` |
 | 7 | `Exited{0}` | `exited_zero` |
 
-- **Consumed stream**: the stdout of a test run. A `Discard` breach on a
+- **Consumed stream**: the stdout of a test run; *(file I/O, draft)* for a
+  problem with `io.output` (C §6.2) stdout is not consumed (its output is
+  the output file, whose over-budget outcome raises the test class,
+  §2.15), while a `Kill` breach of it is still row 4 and its row-1 losses
+  are still infrastructure. A `Discard` breach on a
   stream that is not consumed changes no class (note `truncated_stdout` /
   `truncated_stderr`, decision D8). A `Kill` breach is always row 4.
 - `streams` lists every stream meeting row 4, stdout first; `stream` is its
@@ -288,6 +300,10 @@ Evaluated once per test, after its record (if any) is finalized:
    intent set later does not stop it (in-process, bounded, compare spec
    §1.3). No comparison of any kind, diagnostic included, is admitted after
    intent.
+   *(file I/O, draft)* 3a. **Output file** (problems with `io.output`):
+   a collection other than `collected` gives the collection check of
+   §2.15 (`output_rejected` or `check_error`) and nothing else runs, before
+   and whatever the answer state.
 4. **Answer state** (frozen manifest, S §7): `absent` →
    `unchecked{no_answer}`; nothing runs.
 5. **Comparison** (compare spec §1.1, answer validated first):
@@ -325,15 +341,20 @@ Over (coverage, class, check); first matching row. Every combination
 | `started` | `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
 | `started` | `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
 | `started` | any other | `not_admitted{cancelled}` | `cancelled` (E §6.4: comparison skipped by cancellation) |
-| `started` | `wall_deadline`, `output_budget`, `signal`, `nonzero_exit` | `unchecked`, `passed`, `failed`, `checker_failed`, `check_error` (all diagnostic) | the class |
+| `started` | `wall_deadline`, `output_budget`, `signal`, `nonzero_exit` | `unchecked`, `passed`, `failed`, `checker_failed`, `check_error`, *(file I/O, draft)* `output_rejected` (all diagnostic) | the class |
 | `started` | `exited_zero` | `check_error` | `infrastructure` |
 | `started` | `exited_zero` | `checker_failed` | `checker_failed` |
+| `started` | `exited_zero` | *(file I/O, draft)* `output_rejected` | `wrong_answer` |
 | `started` | `exited_zero` | `failed{reason ≠ incomplete_output}` | `wrong_answer` |
 | `started` | `exited_zero` | `unchecked` | `unchecked` |
 | `started` | `exited_zero` | `passed` | `passed` |
 
 *(judging, draft)* Further test verdicts, produced only by §§2.11–2.12:
 `presentation_error`, `scored`, `session_limit`, `idle`.
+
+*(file I/O, draft)* For a problem with `io.output` the Class column is the
+test class of §2.15 (equal to the run class unless the output file is too
+large).
 
 Orphans include: `exited_zero` with `failed{incomplete_output}` (an
 incomplete capture is a row-1 loss or a row-4 breach, §2.2), a `skipped`
@@ -447,6 +468,17 @@ role ("checker crashed: signal 11", "interactor: report invalid
 `CE` of a role build says "<role> build" and its cause. A judge's message
 is the judge's text, quoted and sanitized like every line (§8); it is never
 a summary template.
+
+*(file I/O, draft)* Qualifiers on a problem with `io.output`: `WA` after
+`output_rejected` says "no output file <name>", "output file <name> not
+found under that exact spelling", "output file <name> is a link"
+(respectively "a directory", "not a regular file") "output file <name>
+not readable" or "too many files in the working directory to find
+<name>"; `OLE` with stream `output_file` says "output file <name>:
+more than <budget> bytes"; a diagnostic collection check after another
+label is shown as "(no output file)" or the same texts in parentheses.
+`OK` and `WA` after a comparison name the output file instead of stdout.
+The job summary of such a problem adds "(file I/O)".
 
 *(judging, draft)* **Display profiles** (checkers design §6.6), selected by
 `[check] display` (C §9.1.1) and recorded in `target.check.display`: `cpf`
@@ -641,8 +673,9 @@ judge run's own §2.2 class.
 | B12 | s `not_started{cancelled_before_start}`, `transferred`, or class `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
 | B13 | c `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
 | B14 | s `exited_zero`; c `skipped{admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{admission_closed}` |
+| B14a | *(file I/O, draft)* s `exited_zero` (test class, §2.15); collection not `collected`; c `skipped{not_eligible}` | the collection check of §2.15: `output_rejected{reason}`, or `check_error{os_error}` for `not_collected` | `wrong_answer`, respectively `infrastructure` |
 | B15 | c `not_started{cancelled_before_start}`, `transferred`, or class `cancelled` | `unchecked{checking_interrupted}` | `cancelled` |
-| B16 | s class `wall_deadline`, `output_budget`, `signal` or `nonzero_exit` | c's outcome by B18–B37 with `diagnostic: true`, or `not_admitted{run_not_eligible}` when c is `skipped{admission_closed}`, `not_started` or `infrastructure` | the s class |
+| B16 | s class `wall_deadline`, `output_budget`, `signal` or `nonzero_exit` | c's outcome by B18–B37 with `diagnostic: true`, or `not_admitted{run_not_eligible}` when c is `skipped{admission_closed}`, `not_started` or `infrastructure`; *(file I/O, draft)* when the output file was not collected (c `skipped{not_eligible}`), the §2.15 collection check with `diagnostic: true` | the s class (*(file I/O, draft)* the test class) |
 | B17 | s `exited_zero`; c `not_started{≠ cancelled_before_start}` or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
 | B18 | `simple` c, `exited_zero`, cleanup not `unverified` | `passed` | `passed` |
 | B19 | `simple` c, `nonzero_exit{1}`, cleanup not `unverified` | `rejected{wrong_answer, checker}` | `wrong_answer` |
@@ -672,8 +705,9 @@ judge run's own §2.2 class.
 - `<class reason>` is the judge run's class token (`signal`,
   `wall_deadline`, `output_budget`) or `exit_code` for a `nonzero_exit`.
 - Every combination not listed (for example c `skipped{not_eligible}`
-  after an s with class `exited_zero`, or `skipped{input_not_validated}`
-  after a valid input) is an orphan: check and test verdict
+  after an s with class `exited_zero` whose output was collected or that
+  has no `io.output`, or `skipped{input_not_validated}` after a valid
+  input) is an orphan: check and test verdict
   `internal_error{invariant}` (§2).
 - A checker after a solution failure never yields success (B16); a
   checker failure is never `wrong_answer` and never a zero score (B20, B21,
@@ -813,6 +847,59 @@ are folded into `stress` (§4.14) and never become `tests[]` entries.
   admitted because a stop held are not partial coverage.
 - `result.counts` counts the builds (primary population) and zero tests;
   `by_verdict` is all zero. Iteration counts are in `stress`.
+### 2.15 File-based I/O *(file I/O, draft)*
+
+A problem that declares `[config] io` (C §6.2) is batch, never
+interactive, so §2.12 is unchanged. `io.input` alone changes no
+derivation (the solution's stdin is null, E §5.6; `target.io` records
+it). With `io.output`, each test's solution run s has a **collection
+outcome** (E §5.6), reported as `tests[].output_file` (§4.6), which enters
+the derivations of §§2.4, 2.5 and 2.11 in three ways:
+
+1. **Test class.** `tests[].class` is the **test class**: s's run class
+   (§2.2), except that a `too_large` collection raises a class
+   `exited_zero`, `nonzero_exit` or `signal` (each below `output_budget`
+   in E §6.4) to `{"kind":"output_budget","stream":…,"streams":[…]}`,
+   with `output_file` appended to `streams` after any stdout or stderr
+   breach and as `stream` when it is the only one. A class
+   `output_budget` (a `Kill` breach of stdout or stderr) keeps its
+   `stream` and gets `output_file` appended; `wall_deadline` is
+   unchanged. Every rule of §§2.4, 2.5 and 2.11 that reads s's class reads
+   the test class. `executions[].summary.class` stays the run class of the
+   record: a test can be `output_budget` while its execution entry says
+   `exited_zero`, and the report says so (`output_file.kind` is
+   `too_large`).
+2. **Collection check.** When s is eligible (§2.4 steps 1–2) and the check
+   is admitted under the cancellation arbitration (§2.4 step 3), a
+   collection other than `collected` decides the check without a
+   comparison and without a checker (for kind `checker`, c is
+   `skipped{not_eligible}`, §2.1, and B14a or B16 applies):
+
+   | Collection (`output_file.kind`) | Check | Test verdict after test class `exited_zero` |
+   |---|---|---|
+   | `missing` | `{"kind":"output_rejected","reason":"output_missing"}` | `wrong_answer` |
+   | `misnamed` | `output_rejected{output_misnamed}` | `wrong_answer` |
+   | `not_regular` (`link`, `directory`, `other`) | `output_rejected{output_not_regular}` | `wrong_answer` |
+   | `unreadable` | `output_rejected{output_unreadable}` | `wrong_answer` |
+   | `too_many_entries` (more than 65 536 entries before the name, E §5.6) | `output_rejected{output_dir_too_large}` | `wrong_answer` |
+   | `too_large` | `output_rejected{output_too_large}` | – (the test class is `output_budget`) |
+   | `not_collected` (`io`, `timeout`, `unstable`) | `check_error{os_error}` (`os_error` `null` except for `io`) | `infrastructure` |
+
+   Settled: a missing or rejected output file is `wrong_answer` with the
+   `output_rejected` reason (never presentation error, never a label of
+   its own).
+
+   After any other test class the check is **diagnostic** (`diagnostic:
+   true`) and the test class decides (§2.5, B16). The check is decided
+   before the answer state, so a missing output file is `wrong_answer`
+   also for a test without an answer (never `unchecked{no_answer}`): the
+   failure is known without one. A program that writes no output file
+   never passes, whatever the answer, the comparator or the checker.
+3. **Judged output.** After `collected`, the comparator's O is the
+   extracted file (compare spec §1.1) and the checker's `output` is a copy
+   of it (E §2.1); stdout is evidence only (`executions[].summary.stdout`,
+   `<run>/out/stdout`). A `not_attempted` collection (s not eligible) adds
+   nothing: the existing rows decide.
 
 ## 3. JSON encoding
 
@@ -968,15 +1055,17 @@ to check the arithmetic. Sizes in bytes.
 | **report header** | job 225, workspace `nsum(1024)` 2 191, problem 509, target 1 587, capture 13 311, fingerprints, build 6 664, result 1 784, fact 453, 32 × hook 244, 24 × warning 741, events, timing, persistence 448, scalars, keys | 53 645 | **64 KiB** |
 | **report** | header + Σ per planned execution (entry 8 851 + test 2 868 + aggregate 224 + 3 commas = 11 946) | | **64 KiB + 12 KiB × N** |
 | `Diagnostic` | file `nsum(256)` 655, key text, 2 × `u32`, message text | 1 237 | |
+| *(file I/O, draft)* `output_file` (`tests[]` member, key and comma) | `collected`: kind, `u64`, `hex64`, path 19 (`too_large` 83, others smaller) | 169 | |
+| *(file I/O, draft)* `target.io` (key and comma) | two distinct names of ≤ 255 bytes (never escaped, C §6.2), `stdin` `null_device`, keys | 562 | |
 | *(judging, draft)* message | `nsum(4096)` | 8 341 | |
 | *(judging, draft)* diagnostic | `nsum(1024)` | 2 197 | |
 | *(judging, draft)* **`judges[]` entry** | role, `u32`, profile, result 130 (`judge_failed`: kind, class, reason), message 8 341, stderr 2 197, report `{path, bytes, encoding}` 100, keys | 10 928 | **11 KiB** |
 | *(judging, draft)* **`validation`** | `u32`, profile, outcome, stderr 2 197, keys | 2 321 | **2.5 KiB** |
 | *(judging, draft)* session facts | ≤ 17 facts (32 reserved), each ≤ 512 bytes plus text ≤ 256 bytes after escaping (checkers design §6.1) | 13 056 | **16 KiB** (16 384) |
 | *(judging, draft)* **`session`** | policy, checking, mode, verdict 172, `decided_by`, facts 16 384, deadlines, 2 × direction 353, transcript 347, seeds, 2 bool, timing, idle 243, rerun, keys | 18 842 | **19 KiB** |
-| *(judging, draft)* **`tests[]` entry** of a shape | base 2 926 (the entry above with `score`, `validation`, `judges`, `session` null or empty) + v × `validation` + j × `judges[]` entry + s × `session` + `score` 26 | | **T = 3 KiB + v × 2.5 KiB + j × 11 KiB + s × 19 KiB** |
+| *(judging, draft)* **`tests[]` entry** of a shape | base 2 926 (the entry above with `score`, `validation`, `judges`, `session` null or empty) + v × `validation` + j × `judges[]` entry + s × `session` + `score` 26; *(file I/O, draft)* + o × `output_file` 169 | | **T = 3 KiB + v × 2.5 KiB + j × 11 KiB + s × 19 KiB + o × 192** |
 | *(judging, draft)* **`roles[]` entry** | role, profile, origin 709, build 6 664, capture 13 355 (§4.2 capture plus `content_sha256`), provenance 594, keys | 21 454 | **21 KiB** |
-| *(judging, draft)* **report header** | the header above 53 645 + `roles` 3 × 21 454 + `target.check` 630 + `fingerprints.judge` + `result.score` 173 + 4 `by_verdict` members, keys | 119 044 | **128 KiB** |
+| *(judging, draft)* **report header** | the header above 53 645 + `roles` 3 × 21 454 + `target.check` 630 + `fingerprints.judge` + `result.score` 173 + 4 `by_verdict` members, keys; *(file I/O, draft)* + `target.io` 562 (119 606) | 119 044 | **128 KiB** |
 | *(judging, draft)* **report** | header + Σ per planned execution (entry + comma ≤ 9 KiB) + Σ per test (T + comma) + Σ per aggregate (≤ 256) | | **B = 128 KiB + 9 KiB × N + T × N_t + 256 × N_a** |
 | **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 966 | **104 KiB** |
 | **event line** | max of: `run_finished` (summary + 99) 6 873; `output_chunk` (4 096 bytes → 5 464 base64 + 157) 5 621; others ≤ 400 | 6 873 | **7 KiB** (final envelope: report bound + 28, 29 with the line feed) |
@@ -998,10 +1087,15 @@ N_a the number of `aggregates[]` entries (≤ N), and T the per-test bound of
 the job's **shape**, which all its tests share: v = 1 iff a validator is
 declared, j the number of judges per test (0 for kind `compare`, 1 for kind
 `checker` or checking `interactor`, 2 for checking `checker` or
-`interactor+checker`), s = 1 iff the problem is interactive. Worst cases:
+`interactor+checker`), s = 1 iff the problem is interactive, *(file I/O,
+draft)* o = 1 iff the problem declares `io.output` (o and s are never
+both 1, C §6.2). Worst cases:
 kind `compare` at the cap, B = 128 KiB + 10 000 × (9 KiB + 3 KiB + 256) =
 125 571 072 B (119.8 MiB); 1 000 interactive tests with a validator and a
-follow-up checker (4 004 executions), B = 84 647 936 B (80.7 MiB). The comparator value is budgeted at 8 `dec`-sized members (the
+follow-up checker (4 004 executions), B = 84 647 936 B (80.7 MiB);
+*(file I/O, draft)* kind `compare` with `io.output` at the cap, B = 128 KiB
++ 10 000 × (9 KiB + 3 KiB + 192 + 256) = 127 491 072 B, 2 × B =
+254 982 144 B, below 256 MiB. The comparator value is budgeted at 8 `dec`-sized members (the
 float comparator has 6, compare spec §5.1). The capture manifest has an
 exact size computed before it is written (§4.2).
 
@@ -1125,6 +1219,15 @@ published_limits: {time_ms: u32?, memory_bytes: u64?}?, local_limits:
   `relay`, `direct`, `idle_us` `null` when the watchdog is off, seeds
   `none`, `env`, `argv`. A test job always has a non-null `check` (kind
   `compare` by default).
+- *(file I/O, draft)* `io` (member after `check`; object?): the file-based
+  I/O **applied** by this job, `{input: string?, output: string?, stdin:
+  token}`: the declared names exactly as configured (valid Unicode without
+  control characters, C §6.2; a missing field is `null`) and the
+  solution's stdin, `null_device` with `io.input`, `test_input` otherwise
+  (E §5.6). Non-null only in `test` jobs of a problem with `[config] io`;
+  `null` in every other job (`build`, `run`, `cmd`, `hook`), which ignore
+  `io` (C §6.2), even when the problem declares it. `cpf config show`
+  reports the declaration itself.
 - `compare`: `{"kind":"tokens"}`, `{"kind":"exact"}`, `{"kind":"lines"}` or
   `{"kind":"float","abs":dec?,"rel":dec?,"rel_base":token?,"combine":
   token?,"ulps":i64?,"int_exact":bool}` (compare spec §5.1, fully expanded);
@@ -1305,14 +1408,15 @@ entry (`program`, `spec`), named by `build.execution`.
 | `input_sha256` | `hex64` | of the frozen copy (S §7) |
 | `answer_sha256` | `hex64?` | `null` iff `absent` |
 | `executions` | object | `{first: u32, count: u32}`: contiguous plan-index range (test-major order, C §8.2) |
-| `class` | object? | the test's run class (`test` jobs); `null` without a record or for `cmd` |
-| `check` | object? | `null` for `cmd` and *(judging, draft)* for an interactive test (§2.12); else §2.4, §2.11: `{"kind":"passed"}`, `{"kind":"failed","fail":"wrong_answer","reason":token,"diag":Diag}`, `{"kind":"unchecked","reason":"no_answer"}`, `{"kind":"checker_failed","class":"test_data_error","reason":"invalid_answer","diag":Diag}`, `{"kind":"check_error","os_error":i32?}`, `{"kind":"not_admitted","reason":token}` (`run_not_eligible`, `cancelled`), `{"kind":"internal_error","invariant":token}` (underivable, §2); *(judging, draft)* `{"kind":"rejected","fail":token,"role":token}` (`wrong_answer`, `presentation_error`), `{"kind":"scored","raw":score,"scale":score,"role":token}`, `{"kind":"judge_failed","class":token,"role":token,"reason":token}`, and `unchecked` with the reasons `no_answer`, `checking_unverified`, `checking_interrupted` |
+| `class` | object? | the test's run class (`test` jobs); `null` without a record or for `cmd`; *(file I/O, draft)* the test class of §2.15 with `io.output` (`streams` may then hold `output_file`, ≤ 3 entries) |
+| `check` | object? | `null` for `cmd` and *(judging, draft)* for an interactive test (§2.12); else §2.4, §2.11: `{"kind":"passed"}`, `{"kind":"failed","fail":"wrong_answer","reason":token,"diag":Diag}`, `{"kind":"unchecked","reason":"no_answer"}`, `{"kind":"checker_failed","class":"test_data_error","reason":"invalid_answer","diag":Diag}`, `{"kind":"check_error","os_error":i32?}`, `{"kind":"not_admitted","reason":token}` (`run_not_eligible`, `cancelled`), `{"kind":"internal_error","invariant":token}` (underivable, §2); *(judging, draft)* `{"kind":"rejected","fail":token,"role":token}` (`wrong_answer`, `presentation_error`), `{"kind":"scored","raw":score,"scale":score,"role":token}`, `{"kind":"judge_failed","class":token,"role":token,"reason":token}`, and `unchecked` with the reasons `no_answer`, `checking_unverified`, `checking_interrupted`; *(file I/O, draft)* `{"kind":"output_rejected","reason":token}` (`output_missing`, `output_misnamed`, `output_not_regular`, `output_unreadable`, `output_too_large`, `output_dir_too_large`, §2.15) |
 | `diagnostic` | `bool` | the check was admitted after an unsuccessful class |
 | `verdict` | object? | `null` for `cmd`; `{"kind":<§2.5 token>}`, `{"kind":"not_run","reason":token}`, `{"kind":"internal_error","invariant":token}` (*(judging, draft)* invariant `internal_policy_error` for a session, §2.12); §2.5 tokens include `presentation_error`, `scored`, `session_limit`, `idle` |
 | `score` | `score?` | *(judging, draft)* §2.13; `null` without a points `scoring` or without a score |
 | `validation` | object? | *(judging, draft)* `null` without a validator; `{execution: u32, profile: token, outcome: token, stderr: nsum(1024)?}`, `outcome` `valid`, `invalid` (B6), `validation_failed` (B5), `validator_failed` (B7), `not_run` (B1–B4); `stderr`: the first 1 024 bytes of its stderr capture, `null` if none was stored |
 | `judges` | `[Judge; ≤2]` | *(judging, draft)* the test's checker (batch), or interactor then follow-up checker (interactive), in plan order; empty for kind `compare` |
 | `session` | object? | *(judging, draft)* `null` unless interactive; below |
+| `output_file` | object? | *(file I/O, draft)* `null` without `io.output` and for `cmd`; else the collection outcome of the solution run (E §5.6, §2.15): `{"kind":"collected","bytes":u64,"sha256":hex64,"path":rel}` (`path` `<run>/out/output`, ≤ 17), `{"kind":"missing"}`, `{"kind":"misnamed"}`, `{"kind":"too_many_entries"}`, `{"kind":"not_regular","type":token}` (`link`, `directory`, `other`), `{"kind":"unreadable","os_error":i32}`, `{"kind":"too_large","bytes":u64,"budget":u64}` (`bytes` the size observed, > `budget`; ≥ `budget` + 1 when it grew during the read), `{"kind":"not_collected","reason":token,"os_error":i32?}` (`io`, `timeout`, `unstable`; `os_error` `null` except for `io`), `{"kind":"not_attempted"}` |
 
 *(judging, draft)* `judge_failed`: `class` `declared_fail`,
 `protocol_unsupported`, `report_invalid`, `artefact_invalid`, `crashed`,
@@ -1498,6 +1602,7 @@ occurrence order, and count every omitted ordinary warning in
 | `tool_unpinned` | *(submission, draft)* none | submission contract §3.3: no version probe declared |
 | `clipboard` | *(submission, draft)* `outcome` (the `Submission.clipboard` object) | submission contract §9.3 |
 | `submit_test_dir` | *(submission, draft)* `detail: token` (`leftover`); the path is in `submission.external_dir` (within the 768-byte warning bound: 358 B) | submission contract §7.3 |
+| `io_scratch` | *(file I/O, draft)* `run: rid`, `detail: token` (`staged_input_kept`, `output_kept`, `partial_copy_kept`, `not_measured`: measurement and clearing of the run's `cwd/` were skipped because the output-file worker was transferred or `cwd/` no longer names H) | E §5.6 I/O scratch |
 
 ### 4.11 `persistence`
 
@@ -2746,6 +2851,53 @@ row allows it. Ids cite the design's normative statements one by one.
 | R-S07 | stalled-then-resumed stress case (portable, injected engine; §9.3): 10 000 iterations, `--keep-going`, 3 failing iterations, `stderr.write` blocked from the first iteration and released 1 s after t_q | stderr holds, in order, the start-up diagnostics, the stress result lines (each present exactly once, in the §8 order), the warnings with `progress_dropped.lines` > 0, the summary last; peak queued result bytes within the final allowance; Linux and macOS repeat it with real fixture programs |
 | R-S08 | `--events` on a stress job of 10 005 iterations with the consumer stalled, then released | `job_finished.seq` equals the number of earlier attempts; the gap equation holds; `iteration_run_*` events carry `irid`, none carries `rid` |
 | R-S09 | `--events=output` on a stress job past iteration 10 000; a `cwd_overflow` and a `judge_scratch` warning from iteration 10 003 | `output_chunk.run` = `"10003.candidate"` etc.; the warnings' `run` is that `irid`; each within its bound (event line ≤ 7 KiB, warning ≤ 768 B) |
+### 9.8 File-based I/O *(file I/O, draft)*
+
+Real rows run real programs through `cpf test` on Linux and macOS (the
+macOS runner's default case-insensitive APFS volume); on Windows the same
+command lines assert exit 10 before admission and no job directory.
+Injected rows use the execution-contract injection points and run on all
+three OSes where no process is needed. Each row asserts `tests[].check`,
+`tests[].verdict`, `tests[].class`, `tests[].output_file`, `target.io`,
+the coverage of every execution of the test, the counts (§4.8) and the
+status (§5.2); the configuration rows are C §11.
+
+| Id | Fixture | Expected |
+|---|---|---|
+| F-01 | `io = { input = "in.txt", output = "out.txt" }`; a C++ program that reads `in.txt`, writes the answer to `out.txt`, and also reads stdin and writes the number of stdin bytes it read to stderr | `passed`; `out/stderr` says 0; `target.io` `{input: "in.txt", output: "out.txt", stdin: "null_device"}`; `output_file` `collected` with the answer's bytes and SHA-256, `path` `<run>/out/output`; `cwd/` holds neither `in.txt` nor `out.txt` after the run |
+| F-02 | `io = { output = "out.txt" }`; the program reads stdin, writes `out.txt` | `passed`; `stdin: "test_input"` |
+| F-03 | `io = { input = "in.txt" }`; the program reads `in.txt`, writes stdout | `passed`; `output_file` `null`; stdout compared as without `io` |
+| F-04 | `io = { input = "in.txt", output = "out.txt" }`; the program reads only stdin (`while (cin >> x)`) and writes what it read to `out.txt` | it ends at once on end-of-file (well inside the deadline), `wrong_answer`; never blocks |
+| F-05 | output file and stdout: (a) correct answer in `out.txt` and 1 MiB of other bytes on stdout; (b) correct answer on stdout and no `out.txt`; (c) the answer in both | (a) `passed`, `executions[].summary.stdout.stored` = 1 048 576 and `out/stdout` holds those bytes; (b) `output_rejected{output_missing}`, `wrong_answer`, status 1; (c) `passed` |
+| F-06 | no output file, exit 0, with an answer and with an answerless test; no output file and exit 3 | `output_rejected{output_missing}`, `wrong_answer` for both (never `unchecked{no_answer}`); exit 3: `nonzero_exit`, the check `output_rejected` with `diagnostic: true` |
+| F-07 | declared `out.txt`, the program writes `OUT.TXT`; declared `résultat.txt` (NFC), the program writes the NFD spelling | `misnamed`, `output_rejected{output_misnamed}`, `wrong_answer` on Linux and on macOS alike (on macOS the other spelling would open) |
+| F-08 | `stdout_cap = 4096`; output files of 4 095, 4 096 and 4 097 bytes, each the correct answer as far as it goes | 4 095 and 4 096: `collected`, compared, `passed`; 4 097: `too_large{bytes: 4097, budget: 4096}`, test class `output_budget{stream: output_file}`, check `output_rejected{output_too_large}` diagnostic, `output_budget`, `executions[].summary.class` `exited_zero`, nothing in `out/output`; the reservation of `out/output` returned |
+| F-09 | an output file that grows past the bound between `fstat` and the read (injected read size) | `too_large{bytes: budget + 1}`, partial copy removed, `output_budget` |
+| F-10 | `out.txt` a symbolic link to a valid answer inside `cwd/`; to `/etc/hosts`; to a FIFO nobody writes | `not_regular{link}`, `output_rejected{output_not_regular}`, `wrong_answer` each; the collection's test-only operation log (an injection point recording every `openat`/`fstatat` with its name and flags) shows `fstatat(AT_SYMLINK_NOFOLLOW)` on `out.txt` and the confirming listing, and no open of `out.txt` or of any link target |
+| F-11 | `out.txt` a directory; a FIFO; a Unix-domain socket; a regular file replaced by a socket between the type check and the open (injected) | `not_regular{directory}`, `not_regular{other}` three times; `wrong_answer`; never blocks, never `infrastructure` |
+| F-12 | the program writes `out.txt` and sets its mode to `000`; the program sets the mode of its `cwd/` to `000` (CI user not root; a root runner skips with a recorded reason) | `unreadable{os_error: EACCES}`, `wrong_answer`, both |
+| F-13 | injected `EIO` on the read after a successful open; injected `ENOSPC` while writing `out/output` | `not_collected{io}`, `check_error{os_error}`, `infrastructure`, status 10; partial copy removed |
+| F-14 | empty `out.txt` with an empty answer; with answer `1` | `collected{bytes: 0}`, `passed`; `wrong_answer` with a comparator `diag` |
+| F-15 | kind `checker`: a `testlib` checker that accepts iff its `output` file equals its `answer` byte for byte, with the answer written to `out.txt` and garbage on stdout; then no `out.txt` | `passed` (the checker received the file, not stdout); then the checker `skipped{not_eligible}`, B14a, `wrong_answer`; with exit 1 and no `out.txt`, B16 with the diagnostic collection check, `nonzero_exit` |
+| F-16 | a `testlib` validator with `io.input`; the validator exits 3 on one input | the validator reads its own staged `input` (E §2.1) on stdin; the valid test `passed`; the other B5, `validation_failed`, the solution `skipped{input_not_validated}` and never admitted, so nothing is staged for it |
+| F-17 | `cwd_bytes = 1 MiB`; the program writes a correct `out.txt` and 2 MiB of other files; a 2 MiB staged input with a correct small `out.txt` | the first: collected before clearing, `passed`, then `CwdOverflow` (`retention` warning); the second: no `CwdOverflow` (the staged input is not counted) |
+| F-18 | the program deletes `in.txt`; replaces it by a directory; by a symbolic link to `/etc/hosts`; renames it to `x.txt` | `passed` each when the output is correct; no warning; the link removed as an entry (its target untouched); the directory and `x.txt` left as program output; the staged input reservation released in every case |
+| F-19 | the program overwrites `in.txt`; two tests; the same job run twice | the frozen `inputs/<id>.in` and `input_sha256` unchanged; each run starts with the frozen bytes |
+| F-20 | injected `ENOSPC` while staging `in.txt`; `job_bytes` computed by the test from the plan so that freezing, the report reservation and the first run's reservations without the staged copy fit and with it (the frozen input's size more) do not | `not_started{setup}`, `infrastructure`, nothing started; `not_started{retention_budget}` for the first solution run (freezing succeeded), later runs `skipped{admission_closed}` |
+| F-21 | injected removal failure for the staged input and for the collected original; repeated on every test of a job whose `job_bytes` fits only a few kept copies; an unchanged staged input deleted by the program | `io_scratch` warnings `staged_input_kept`, `output_kept`; verdict unchanged; the staged size excluded from the `cwd_bytes` measurement; the job's charged bytes still include each kept staged copy (accounting interface counters), so a later run is `not_started{retention_budget}` and charged bytes never exceed `job_bytes`; the program-deleted copy is released |
+| F-22 | cancellation intent set after the solution's record and before its check | `output_file` `collected` (collection is not a check), check `not_admitted{cancelled}`, `cancelled` |
+| F-23 | cleanup `unverified` (injected) with a correct `out.txt` | `passed`, "cleanup not verified" |
+| F-24 | stdout `Kill` breach (`stdout_cap = 4096`, 8 KiB on stdout) with a correct `out.txt`; stdout with `on_exceed = "discard"` and the same | `output_budget{stream: stdout}` (`Kill` still stops); with `Discard`, note `truncated_stdout` and `passed` |
+| F-25 | `io = { input = "in.txt", output = "out.txt" }`; a program that renames `cwd/` to `old/` inside its run directory and creates a new `cwd/` holding a different `out.txt` before exiting | the `out.txt` of the directory it was started in (now `old/`) is judged (H, E §5.6); the staged `in.txt` is removed from `old/` through H and its charge released (accounting counters); measurement and clearing skipped with `io_scratch` `not_measured`; no H outstanding afterwards (descriptor count at quiescence) |
+| F-26 | raw `cpf run`, `cpf cmd` with `for_each_test` and `cpf build` on an `io` problem | nothing staged (an empty `cwd/`), stdin as for those commands, no collection, `target.io` `null` and no `output_file`; `cpf config show` still shows `config.io` |
+| F-27 | worst-case sizes: `target.io` with the distinct 255-byte names `é` × 127 + `a` and `é` × 127 + `b` and `io.input` (562 bytes with key and comma), every `output_file` variant at its maximum, `tests[].class` `output_budget` with 3 streams | each ≤ its §3.7 row; kind `compare` with `io.output` at the cap reserves 254 982 144 B |
+| F-28 | `io` on an interactive problem; `cpf stress` on an `io` problem; Windows `cpf test` on a valid `io` problem | 7 at `config.io`; 7 (stress contract); 10 before admission, no job directory |
+| F-29 | a barrier-controlled descendant (survives the root; cleanup `unverified` injected): (a) renames `out.txt` to `OUT.TXT` between the pathname observation and the confirming listing, and keeps it; (b) replaces `out.txt` by a new file (another inode) at the same point; (c) renames `out.txt` to `OUT.TXT` at the same point and back to `out.txt` right after the listing; (d) after extraction, puts a new file (another inode) at `out.txt` and appends to the accepted inode | (a) no byte-equal entry in the listing → `misnamed` on Linux and macOS alike; (b) inode mismatch → next attempt, then `collected` with the new file's bytes; (c) `misnamed`, decided by attempt 1's listing (a spelling outcome is never retried); (d) `out/output` and its `sha256` unchanged by both changes; the barrier points are recorded by the test-only operation log |
+| F-30 | (real, Linux and macOS) `cwd/` with 65 537 entries created by the program and no `out.txt`; (stub listing, all OSes) a listing order with `out.txt` at position 65 537, and at position 65 536 | real: `too_many_entries`, `output_rejected{output_dir_too_large}`, `wrong_answer` (deterministic: the name is absent, so the bounded read is cut off without finding it); stub: `too_many_entries` at 65 537, `collected` at 65 536 |
+| F-31 | `stdout_cap = 4096` (deadline: the run's sink finalisation deadline, 5 s from the drain milestone): (a) a stub filesystem stalling the confirming listing, with cancellation intent set during the stall; (b) the same stall without intent; (c) a stalled extraction write; (d) the output-file worker refused at admission (thread credits exhausted) | (a) `output_file` `not_collected{timeout}` recorded by the deadline, but intent preceded the check: check `not_admitted{cancelled}`, verdict `cancelled` (§2.4 step 3); (b), (c) `not_collected{timeout}`, `check_error`, `infrastructure`; in (a)–(c) the record is finalized by the deadline, the worker is transferred, removes its partial copy itself when the stub releases it, and only then do the credit and reservations return (counters); the cleanup poller performs no file operation (test-only operation log); the `cwd/` step is skipped with `io_scratch` `not_measured`; (d) `not_started{cleanup_capacity}` or `not_started{worker}`, infrastructure |
+| F-32 | `stdout_cap = 4096`; a file of 4 000 bytes at the `fstat` that a barrier-controlled descendant grows to 8 192 bytes before the copy ends; the same with an injected failure to remove the partial copy | the operation log shows the 1-byte probe read into memory after 4 096 copied bytes; the extracted copy's on-disk length never exceeds 4 096 (accounting counter maximum) and the job's charged bytes never exceed the reservation; `too_large{bytes: 4097, budget: 4096}`, `output_budget`; with the removal failure, `io_scratch` `partial_copy_kept` and the 4 096 bytes stay charged until the job's owner is released |
+| F-33 | a stub filesystem blocking the staged-input write, cancellation intent set during it; the same block released after the job ended | the run `not_started{cancelled_before_start}` (published without waiting for the creation thread, E §3.4), later runs `skipped{cancelled}`, the report produced; the staged file and its charge stay with the creation thread until it returns and removes the file, or until the job's owner is released; nothing else touches it |
+| F-34 | wrongly spelled `OUT.TXT` (for `out.txt`) as a symbolic link, as a directory, as a mode-`000` regular file; a mode-`000` `out.txt` renamed to `OUT.TXT` between the pathname observation and the confirming listing | `misnamed` in every case on Linux and on macOS (case-insensitive APFS), never `not_regular` or `unreadable`; the link is never followed and nothing is opened |
 
 ## 10. Amendments to other documents
 
@@ -2934,6 +3086,32 @@ theirs in place):
   compiler's file accesses and captures no build trace.
 - **S §6.1** (layout), also add `<run-id>/judge/report`, `judge/tout`
   "extracted judge artefacts (execution contract §2.1), outside `cwd/`".
+- *(file I/O, draft)* **S §2** (Shared `cwd`), replace "file-based I/O
+  problems with a shared `cwd` are rejected in the CLI foundation. In this
+  version every file-I/O problem is rejected, regardless of `cwd`
+  (configuration contract §6.2)" by "a file-based I/O problem with a shared
+  `cwd` is a configuration error (configuration contract §6.2); file-based
+  I/O always runs in the run's own `cwd/` (execution contract §5.6)".
+- *(file I/O, draft)* **S §6.1** (layout), add `<run-id>/out/output` "the
+  extracted output file of a file-based I/O problem (execution contract
+  §5.6), outside `cwd/`".
+- *(file I/O, draft)* **S §6.4**, in the per-job accounting list replace
+  "file-I/O copies into `cwd/`" by "the staged input in `cwd/` and the
+  extracted output file `out/output` of file-based I/O runs (execution
+  contract §§5.4, 5.6)"; in "Child output" add: "For a file-based I/O
+  run, `cwd/` is measured only after the output file was collected and
+  the I/O scratch removed (execution contract §5.6); the staged input
+  never counts."
+- *(file I/O, draft)* **S §10** (tests), replace "Shared `cwd`: never
+  measured or cleared; every file-I/O problem, including one with shared
+  `cwd`, is rejected (configuration contract §6.2)" by "Shared `cwd`: never
+  measured or cleared; a file-based I/O problem with a shared `cwd` is
+  refused (configuration contract §11)".
+- *(file I/O, draft)* **Design §6.2** (Supervisor), after "files a program
+  writes itself are only monitored best-effort (no quota promise)" add:
+  "the one exception is the declared output file of a file-based I/O
+  problem, which cpf reads back under the stdout cap (a read bound, not a
+  write quota; execution contract §5.6)".
 
 ## 11. Decisions
 

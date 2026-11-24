@@ -23,6 +23,16 @@ An empty answer is present. "Complete" is decided by the execution contract
 exactly as long as the budget is not evidence of truncation. Completeness is
 also kept as separate metadata in the record.
 
+*(file I/O, draft)* **Input selection.** O is the solution run's stdout
+capture, except for a problem that declares `io.output` (configuration
+contract §6.2): O is then the collected output file (`<run>/out/output`,
+execution contract §5.6) and stdout is not compared. A collected file is
+complete by construction (it was read to end-of-file within the read
+bound), so the "no" column never applies to it; a file that was not
+collected (any collection outcome other than `collected`) is never compared, and its outcome is decided before
+this table (report contract §2.15). Comparators are unchanged: they see
+the file's bytes exactly as they see captured stdout bytes.
+
 ### 1.2 Bytes, whitespace, tokens
 
 - Comparators work on bytes; they never decode or lossily convert input. The

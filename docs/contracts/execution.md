@@ -63,6 +63,12 @@ here). A helper run is an ordinary supervised run outside any job plan:
    The host then closes its creation queue, which hands the thread and its
    credit to the cleanup poller (§3.3). Orderly exit and force exit treat
    the helper like any run (§3.4, §8.2).
+**File-I/O amendment: draft.** Staging of the input file into a solution
+run's `cwd/`, the stdin of such a run, collection of the output file under
+the capture caps, its reservations and scratch removal (§5.6), and the
+checker's `output` for such a problem (§2.1). Amended content is marked
+*(file I/O, draft)*. The declaration is configuration contract §6.2 `io`;
+the verdicts and report members are report contract §2.15.
 
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
@@ -122,6 +128,8 @@ pub struct ResolvedExecutionSpec {
     pub deadline_group: Option<GroupRef>,// sessions only (§9a); otherwise always None
     pub limits: Vec<LocalLimit>,         // validated and normalised before spawn (§7.2)
     pub measure: Vec<MetricKind>,
+    pub stage_input: Option<StagedInput>,   // (file I/O, draft) §5.6; None outside file-based I/O
+    pub output_file: Option<OutputFileSpec>,// (file I/O, draft) §5.6
 }
 
 pub struct StreamPolicy {
@@ -193,9 +201,13 @@ wiring, not isolation: a judge can read other paths.
   (`<run>/out/stdout`, as frozen), and, for the follow-up checker of a
   session, a copy of the interactor's `tout` read as below. A batch problem
   with file-based I/O (configuration contract §6.2 `io`) stages the
-  solution's collected output file instead; that selection, and every other
-  interaction of file-based I/O with judging, is defined with file-based
-  I/O itself. Interactive problems refuse file-based I/O for the solution
+  solution's collected output file instead: *(file I/O, draft)* with
+  `io.output` the checker's `output` is a copy of `<run>/out/output`, the
+  solution run's extracted output file (§5.6), never its stdout; with
+  `io.input` alone it is the stdout capture as above. A checker is
+  admitted only when that file was collected (report contract §2.15);
+  `input` is the frozen input in every case. Validators are unaffected by
+  `io`. Interactive problems refuse file-based I/O for the solution
   (checkers design §9).
 - **Declared assets** (checkers design §2.4): the role spec's `assets`
   (configuration contract §9.1.2) are staged into the private directory at
@@ -493,6 +505,13 @@ diagnose an absent `record.json`.
   Windows waiter, one sink worker per `File`/`Forward` stream, the stdin
   forwarder in raw mode. Unix observers need no thread (pidfd / kqueue, or
   polling, §4.1).
+  *(file I/O, draft)* A solution run with `io.output` (§5.6) also gets,
+  at admission, an **output-file worker**, credited and created like a
+  sink worker, with the same failure (`NotStarted{CleanupCapacity}` or
+  `NotStarted{Worker}`) and transfer rules: a transferred output-file
+  worker completes its own blocking operations (its partial copy
+  included) before reporting to the cleanup service, whose poller only
+  receives the completion and releases the credit and reservations.
 - **Admission:** before entering `Creating`, a run reserves atomically and
   without blocking one cleanup slot (with its transfer-queue entry) and its
   thread credits, then creates its workers. Reservation failure →
@@ -791,7 +810,9 @@ says so when cleanup is unverified.
   unread pipe contents are lost under the same entry.
 - **Capture frozen** when, per stream, the reader has stopped and either the
   worker has written and closed everything queued, or the **sink finalisation
-  deadline** passed. A worker still blocked then records
+  deadline** passed. *(file I/O, draft)* With `io.output` the output-file
+  stream (§5.6) is one of the streams: frozen when it has an outcome, or
+  `NotCollected{Timeout}` at the same deadline. A worker still blocked then records
   `CaptureLoss::WriteStalled`; `stored` is the snapshot of bytes it had
   confirmed written; the file is never used for comparison or reported
   complete; worker, file, lease and storage reservation are transferred and
@@ -862,6 +883,19 @@ contract §6, not a reservation ceiling):
   session's resources-released milestone it is converted like a stream
   reservation. Direct mode writes no transcript and reserves nothing for
   it.
+- *(file I/O, draft)* **File-based I/O** (§5.6): at a solution run's
+  admission, together with its stream reservations, the job reserves the
+  exact size of the frozen input when `io.input` is declared (the staged
+  copy) and the run's stdout budget when `io.output` is declared (the
+  extracted output file, `<run>/out/output`). Refusal is
+  `NotStarted{RetentionBudget}` like any admission reservation, so a
+  collection never fails for budget. The staged input's charge follows
+  §5.6 (kept until its removal is confirmed, the program removed it, or
+  the job's owner is released); the output reservation is converted at
+  the run's resources released (the extracted length retained, the rest
+  returned; for a transferred output-file worker, when it returns,
+  §§3.3, 5.6). A checker's `output` copy of the extracted file is
+  judge staging (above).
 - At **resources released** the reservation is converted: bytes actually on
   disk become retained, the rest is returned. A stalled writer keeps its full
   stream reservation until it returns (a directory lease alone does not
@@ -882,6 +916,9 @@ contract §6, not a reservation ceiling):
   artifacts, job reports) are governed by the storage contract; storage MUST
   reserve them through the same interface before creating them.
 - Files a program writes itself are outside any quota guarantee.
+  *(file I/O, draft)* The collected output file is no exception to this:
+  its bound (§5.6) limits what cpf reads and retains, not what the program
+  writes to disk.
 
 ### 5.5 Default budgets and deadlines
 
@@ -909,6 +946,270 @@ contract §6, not a reservation ceiling):
 | Raw final-diagnostic wait (raw mode), from the enqueue instant of the summary line; separate from the console flush deadline (report contract §8) | 2 s (*fixed*) |
 | Event transport | 8 MiB total incl. backing buffers and terminal slot; `OutputChunk` ≤ 4 KiB (§9) |
 | Retained tool data | 1 GiB per job, 4 GiB per workspace `runs/` (storage contract enforces) |
+
+### 5.6 File-based I/O *(file I/O, draft)*
+
+A batch problem may declare `io = { input?, output? }` (configuration
+contract §6.2). The rules below apply to the **solution run of each test
+of `cpf test`** on such a problem and to nothing else (builds, judges,
+raw `cpf run`, `cpf cmd` and hooks ignore `io`). The configuration
+guarantees that the run's `cwd` is its own fresh `cwd/` (storage contract
+§7; a shared `cwd` is refused) and that the problem is not interactive.
+Windows refuses every job command before admission (report contract
+§5.2), so these rules run on Linux and macOS only.
+
+**Design.** File-based I/O adds no lifecycle of its own. Staging the
+input is a preparation step of the run's creation thread (§3.4), with its
+cancellation and ownership rules; collecting the output is one more
+**capture stream** of the run, handled by a credited **output-file
+worker** with the sink workers' admission, finalisation-deadline and
+transfer rules (§§3.3, 5.1–5.2); removing the I/O scratch is part of the
+existing post-run `cwd/` measurement step (storage contract §6.4). Reason:
+each of those steps already has an owner, and the first two already have
+a bound and a transfer rule (the cleanup service already receives
+completions from transferred workers); a separate worker would need its
+own. The post-run `cwd/` measurement step has **no bound today** (for any
+run, not only file-based I/O); that is a pre-existing gap of the storage
+and execution contracts, tracked separately, which file-based I/O neither
+widens nor closes.
+
+**Spec.** The job puts the declaration into the run's
+`ResolvedExecutionSpec` (§2), so the supervisor reads no configuration:
+`stage_input: Option<StagedInput { name: OsString, source: PathBuf }>`
+(the frozen input) and `output_file: Option<OutputFileSpec { name:
+OsString, budget: u64 }>` (`budget` = the stdout budget, *fixed* equal).
+Both are part of `spec_digest` and `spec.json`.
+
+**Directory handle H.** One descriptor per run with `io`, opened on
+`cwd/` without following links (`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`)
+by the creation thread during preparation (after admission, before
+staging and before process creation, §3.4). Staging, collection and the
+scratch unlinks work only relative to H (`openat`, `fstatat` with
+`AT_SYMLINK_NOFOLLOW`, `unlinkat`, directory reads), never through a path
+string, so they always address the directory the program was started in,
+even if the program renames or replaces `cwd/`. Owner and lifetime, one
+owner at a time:
+
+1. the **creation thread**, from opening until preparation ends. If the
+   process is not created it removes the staged file and closes H itself
+   before reporting the outcome; if its creation is abandoned (§3.4,
+   staging handoff below) H stays with it and is closed when it returns;
+2. at process creation H passes to the run's **output-file worker** when
+   `io.output` is declared, otherwise directly to the **job**, with the
+   run's other post-run state;
+3. the output-file worker hands H to the **job** together with the
+   output-file outcome when the stream freezes normally; when the worker
+   is **transferred** (below) H goes with it, the worker closes H before
+   reporting to the cleanup service, and the job never receives it;
+4. the **job** uses H in the post-run `cwd/` step (below) and closes it at
+   the end of that step; when the step is skipped it closes H at once.
+
+H is part of the run's descriptor accounting: at most one per admitted
+run (so at most 4 at a time, §3.3) plus one per abandoned creation (at
+most one per job, §3.4); it is counted by the §10.2 leak checks, which
+require no H outstanding at a quiescence point.
+
+**Staging the input** (`io.input`), a preparation step of the creation
+thread (§3.4: "staging for cwd"). It creates `cwd/<input>` exclusively
+(`O_CREAT | O_EXCL | O_NOFOLLOW`, mode `0644` before the umask) and
+fills it by reflink or byte copy from the test's frozen input
+(`inputs/<test-id>.in`, storage contract §7), with the exact size
+reserved at admission (§5.4). The copy is the program's to use: it may
+read, modify, rename or delete it; the frozen copy and the
+`input_sha256` of the report are unaffected, and each later run (another
+test, a later job) gets a fresh copy. Outcomes follow §3.4 unchanged: an
+I/O error makes the run `NotStarted{Setup}` (infrastructure); cancellation
+is observed at the step boundaries before and after staging
+(`NotStarted{CancelledBeforeStart}`). **Handoff:** the creation thread
+owns the staged file, its writer and its charge until preparation ends.
+If preparation ends without process creation, the creation thread removes
+the partial or complete staged file itself before it reports the
+outcome. If cancellation returns while a staging write is blocked (§3.4:
+cancellation never waits for the creation thread), the run's outcome is
+published without it, the staged file and its charge stay with that
+creation thread, and they are settled only when it returns (it then
+removes the file) or when the job's owner is released; nothing else
+touches the file meanwhile. When the process is created, the staged file
+becomes I/O scratch of the run (below).
+
+**stdin.** With `io.input` the run's stdin is `StdinSource::Null`. Without
+it (only `io.output`) stdin is the frozen input file as for every batch
+run. Reason for null rather than the same bytes: the declaration says
+where the program reads, and a judge that offers only the file gives the
+program an empty or closed stdin; a program that still reads stdin then
+reads end-of-file at once and fails visibly (a wrong or missing output),
+never passes locally by reading the stream the judge will not provide,
+and never blocks. A judge that offers both is modelled by declaring
+`output` alone.
+
+**stdout.** With `io.output` stdout keeps its policy and budget (§5.5,
+configuration contract `stdout_cap`): it is captured to `out/stdout` as
+evidence, and a `Kill` breach still stops the program, but it is **not a
+consumed stream** (report contract §2.2): it is never compared, never
+staged for a checker, and a `Discard` breach on it is a note. Its
+infrastructure losses (`WriteError`, `WriteStalled`, `PipeRead`,
+`NoEofBeforeDrainDeadline`) stay infrastructure (report contract §2.2 row
+1), unchanged. With `io.input` alone stdout is the judged output as
+usual.
+
+**Collecting the output** (`io.output`): the **output-file stream**.
+The run has one more capture worker, the **output-file worker**, credited
+and created at admission like a sink worker (§3.3; admission failure
+`NotStarted{CleanupCapacity}` or `NotStarted{Worker}` as for every
+worker). It starts collecting when the run's cleanup has a result (so no
+contained process remains to write; an `Unverified` cleanup is allowed,
+as for stdout, §6.4: the collection snapshots the bytes once) and only
+when the run started, its status is not `Unknown`, its cleanup is not
+`Incomplete` and it was not stopped by cancellation (`stop_trigger ≠
+Cancelled`); otherwise the stream is `NotAttempted`. A capture loss found
+later still makes the run infrastructure (report contract §2.2), and the
+collected file is then not judged. The collection is part of **capture freezing** (§5.2):
+the capture is frozen only when the output-file stream has an outcome
+too, and the record (§6.1 `output_file`) is finalized after it.
+**Bound:** the stream shares the run's **sink finalisation deadline**
+(5 s from the drain milestone, §5.5). A collection without an outcome at
+that deadline is `NotCollected{Timeout}` (the analogue of `WriteStalled`:
+never judged); the worker, the directory handle, the opened file, the
+partial copy and the output reservation are **transferred** exactly as
+for a stalled sink worker (§5.2): the worker finishes or fails its own
+blocking operations, removes its partial copy itself, and then reports to
+the cleanup service, whose poller only receives the completion and
+releases the credit, the lease and the reservation (§3.3); the poller
+never performs file operations. A copy the worker could not remove stays
+charged until the job's owner is released. Cancellation intent does not
+stop the collection (it is capture, not a check); whether its outcome is
+judged is decided by the check's arbitration (report contract §2.4 step
+3).
+
+**Collection steps.** Each directory read lists at most **65 536**
+entries through the handle (*fixed*; the program may keep adding
+entries). An attempt (at most **3**, *fixed*):
+
+1. **Pathname observation** (no open yet): `fstatat(cwd, <output>,
+   AT_SYMLINK_NOFOLLOW)` gives a type and inode, or an error. When it is
+   a regular file, `openat(cwd, <output>, O_RDONLY | O_NOFOLLOW |
+   O_NONBLOCK | O_CLOEXEC)` and `fstat` on the handle follow; the handle
+   counts only if it is regular with the same device and inode. A
+   symbolic link, directory, FIFO, socket or device is **never opened**:
+   a FIFO is never waited on, a socket never connected, a link never
+   followed, wherever it points.
+2. **Confirming listing L**, one bounded directory read made **after**
+   step 1. It records the entry whose name is **byte-equal** to the
+   declared name (UTF-8) with its inode number, whether an entry has the
+   same storage contract §2.1 collision key (`OUT.TXT` for `out.txt`, an
+   NFD spelling of an NFC name), and whether the read was cut off at the
+   bound. A listing error: `EACCES` (the program removed its own
+   permissions on `cwd/`) → `Unreadable`; any other → `NotCollected{Io}`.
+3. **Decision.** Spelling first, for every outcome:
+   - no byte-equal entry: cut off → `TooManyEntries`; a key-equal entry
+     → `Misnamed`; neither → `Missing` (step 1's result is discarded, so
+     a case-insensitive lookup of another spelling never decides);
+   - a byte-equal entry whose inode equals step 1's: by step 1's type, a
+     link → `NotRegular{Link}`, a directory → `NotRegular{Directory}`, a
+     FIFO, socket or device → `NotRegular{Other}`; a regular file with a
+     handle → **accepted**; a regular file whose open failed with
+     `EACCES` or `EPERM` → `Unreadable` (the program's own file in its
+     own directory, like a judge's report);
+   - a byte-equal entry and step 1 failed with `EACCES` (no search
+     permission on `cwd/`, a directory-level condition independent of
+     spelling) → `Unreadable`;
+   - a byte-equal entry and step 1 failed with `ENOENT`, `ELOOP` or
+     `ENXIO`, or its inode differs (a rename or replacement between the
+     two observations) → next attempt;
+   - any other error in step 1 → `NotCollected{Io}`.
+
+   Guarantee: **every outcome except `Missing`, `Misnamed` and
+   `TooManyEntries` rests on a directory read, made after the pathname
+   observation, that listed the observed inode under the exact declared
+   spelling**; the other three rest on that read not listing the exact
+   spelling. A case- or normalisation-insensitive filesystem (APFS)
+   therefore gives the outcome a case-sensitive one gives, also for links,
+   directories and unreadable files spelled differently. After 3 attempts
+   without a decision → `NotCollected{Unstable}` (a surviving descendant
+   kept renaming or replacing the file, or the filesystem lists inode
+   numbers inconsistent with `st_ino`). Everything after acceptance reads
+   the accepted handle: a later rename, or a new file put at the name,
+   changes nothing; a write to the same inode before the copy ends is part
+   of the snapshot.
+4. **Size.** With `b` the budget, a `st_size` above `b` on the accepted
+   handle → `TooLarge{size}` without reading. Otherwise the worker copies
+   at most `b` bytes from the handle into the extracted copy (step 5);
+   when exactly `b` bytes were copied it reads **one more byte into
+   memory only** (never written): a byte → `TooLarge{size: b + 1}` (the
+   file grew while read), and the partial copy is removed. The copy on
+   disk never exceeds the `b` bytes reserved. A file shorter than
+   `st_size` at the time of the read is collected with the bytes read. An
+   empty file is collected with 0 bytes: it is an output, unlike a
+   missing file.
+5. **Extraction.** The bytes are written to `<run>/out/output` (a
+   tool-created file outside `cwd/`, created exclusively, flushed and
+   closed, not fsynced) and hashed (SHA-256) while written →
+   `Collected{bytes, sha256}`; the copy's bytes become retained and the
+   rest of the reservation is returned when the run's resources are
+   released (§5.4). A read error on the accepted handle, or a create,
+   write or close error on the copy → `NotCollected{Io(errno)}`; the
+   partial copy is removed by the worker (a failed removal: `io_scratch`
+   warning `partial_copy_kept`, the bytes stay charged until the job's
+   owner is released).
+
+There is **no truncated comparison**: a `TooLarge` file is never
+extracted or judged, as a stdout `Kill` breach stops the program and a
+budget breach on a consumed stream is an output-budget outcome. The read
+bound is the cap of the stream it replaces; the program's own write is
+not limited (§5.4 last bullet; design §6.2): a program can fill the disk
+through its output file as through any file, before `cwd_bytes` clears
+`cwd/` after the run. No write-time limit (`RLIMIT_FSIZE`) is installed:
+it would apply to every file the program writes and turn the breach into
+a signal.
+
+Outcomes, as recorded (`RunRecord.output_file`, §6.1; report contract
+§4.6 `output_file`):
+
+| Outcome | Whose | Judged as (report contract §2.15) |
+|---|---|---|
+| `Collected{bytes, sha256}` | – | the output O of the comparator or the checker's `output` |
+| `Missing`, `Misnamed`, `NotRegular{Link \| Directory \| Other}`, `Unreadable`, `TooManyEntries` | the program | no output: `wrong_answer` after an otherwise successful run |
+| `TooLarge{size}` | the program | output budget, stream `output_file` |
+| `NotCollected{Io(errno) \| Timeout \| Unstable}` | cpf (or an unobservable survivor) | check error: `infrastructure` after an otherwise successful run |
+| `NotAttempted` | – | none (the run's class decides) |
+
+**I/O scratch and `cwd/` measurement.** After the record is finalized,
+the job's existing post-run `cwd/` step (storage contract §6.4: measure,
+and beyond `cwd_bytes` clear with `CwdOverflow`) runs with three
+additions and no other change to its thread or bounds: (a) before
+measuring it unlinks through H, without following links, the staged
+input (`cwd/<input>` when that name
+is a regular file or a link; a directory or nothing at the name is left
+alone) and, after a `Collected` outcome, the original `cwd/<output>` (the
+extracted copy is the evidence); (b) the path-based measurement and
+clearing run only if `cwd/` in the run directory is still the directory
+H names (same device and inode by `fstatat(AT_SYMLINK_NOFOLLOW)` and
+`fstat(H)`); otherwise (the program renamed or replaced `cwd/`) they are
+skipped with an `io_scratch` warning `not_measured` and both directories
+are left to pruning; (c) H is closed at the end of the step. Because the
+record is finalized only
+after the output-file stream has an outcome, a clearing of `cwd/` never
+turns a valid output file into `Missing`. When the output-file worker was
+**transferred**, the step is skipped for that run (it would race the
+worker on the same directory): no measurement, no clearing, no
+`CwdOverflow`, an `io_scratch` warning `not_measured`; the directory is
+left to pruning. The staged input is tool-created and never counts
+towards `cwd_bytes`; whatever the program wrote, a renamed staged copy
+included, counts. A failed removal is an `io_scratch` warning
+(`staged_input_kept`, `output_kept`) that never changes a verdict; the
+staged input's recorded size is then excluded from the measurement. The
+step's own duration and its behaviour on a stalled filesystem are those
+of the existing measurement (storage contract §6.4), which file-based
+I/O does not change.
+
+**Staged-input charge.** The staged input stays charged to the job (§5.4)
+until cpf's removal of it is confirmed, or until the `cwd/` step finds
+that the name no longer holds a regular file (the program removed,
+renamed or replaced the copy; from then on those bytes are program
+output, outside the quota, §5.4 last bullet), or, when neither happens
+(a failed removal, a skipped step, an abandoned creation), until the
+job's owner is released (storage contract §6.4). Repeated failures can
+therefore refuse later admissions but never exceed `job_bytes`.
 
 ## 6. Outcome model
 
@@ -951,6 +1252,7 @@ pub struct RunRecord {
     pub execution: Execution,
     pub stdout: StreamCapture,
     pub stderr: StreamCapture,
+    pub output_file: Option<OutputFileCapture>, // (file I/O, draft) §5.6 outcome; None without io.output
     pub measurements: Vec<Measurement>,
     pub limits: Vec<InstalledLimit>,         // §7.2
     pub supervisor_errors: Vec<SupervisorError>, // ≤ 16, deduplicated: Register, Wait, PipeRead, Kill,
@@ -1180,7 +1482,9 @@ after every other row).
   verified".
 - A pass requires `Exited{0}`, no violation, stdout complete, no supervisor
   error, cleanup `Confirmed` or `Unverified`, and a comparison that ran and
-  matched.
+  matched. *(file I/O, draft)* With `io.output` (§5.6) "stdout complete"
+  is replaced by "no stdout infrastructure loss and the output file
+  `Collected`", and the comparison runs over the collected file.
 - Comparison after an unsuccessful execution is diagnostic only.
 - **Cancellation arbitration**: cancellation records
   **intent** only (flag and time) and stops admission; it never writes a
@@ -1516,6 +1820,19 @@ rejected outside a session; real Ctrl-C and second Ctrl-C (after CLI integration
 retirement deadline, release after removal, per-iteration settlement,
 cancellation between and during iterations, plateau ceilings) are stress
 contract §10.1.
+*(file I/O, draft)* Every §5.6 outcome with a real program on Linux and
+macOS (report contract §9.8), a program that renames `cwd/` and creates a
+new `cwd/` holding a different output file before exiting (collection and
+scratch removal use the directory the program was started in, through the
+handle, and judge the file written there), an output file that grows
+during the bounded read (injected read size), a barrier-controlled
+descendant that renames or replaces the output file between the pathname
+observation and the confirming listing, a stalled listing and a stalled
+extraction write at the sink finalisation deadline (the worker transferred,
+its partial copy removed by itself, the poller only settling credit and
+reservations; the `cwd/` step skipped), an output-file worker refused at
+admission, and cancellation during a blocked staged-input write (§5.6
+handoff).
 
 ## 11. Guarantee caveats and rationale
 

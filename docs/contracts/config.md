@@ -42,6 +42,12 @@ archive contract (`archive.md` §3.1). Marked *(archive, draft)*.
 placeholders (§5.2) and the `submit-prep` row of §9; the submission
 contract (`submit.md`) holds their semantics. Marked *(submission,
 draft)*.
+**File-I/O amendment: draft.** The problem `[config] io` declaration
+(§6.2) is accepted for batch problems: name rules, the run-directory and
+kind conditions, the commands it applies to, and its fixtures (§11). It
+replaces the gate-1 rejection of every `io`. Amended content is marked
+*(file I/O, draft)*. Staging and collection are execution contract §5.6;
+verdicts and report members are report contract §2.15.
 
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
@@ -98,7 +104,7 @@ and the problem record, not to configuration.
 | `config.sources` | array of paths | 3 | §6.2 |
 | `config.support_files` | array of paths | 3 | §6.2 file roles |
 | `config.solution_files` | array of paths | 3 | §6.2 file roles, §6.5 |
-| `config.io` | table `{ input?, output? }` | 3 | reserved file-I/O declaration; §6.2 |
+| `config.io` | table `{ input?, output? }` | 3 | file-based I/O declaration; §6.2 *(file I/O, draft)* |
 | `config.entry` | non-empty string | 3 | §6.4; overrides the language's `entry` |
 | `config.compare` | comparator value | 3 | |
 | `config.build`, `config.run` | stage table | 3 | precedence row 5 |
@@ -628,24 +634,75 @@ and limits.
   (storage contract §7) and every `{sources}` / `{source}` expansion names
   the copy; outside the amendment they are read in place. Test data is
   always frozen.
-- **Reserved file-I/O declaration:** problem `[config]` alone (layer 3) accepts
-  `io = { input = "<name>", output = "<name>" }`. Both fields are optional,
-  but at least one is required; unknown fields are errors. Each name is one
-  relative portable component under storage contract §§2–2.1, validated by
-  the same portable-component rules on every platform. These are literal
-  names, without placeholder expansion or config-relative path resolution.
-  Phase 1 validates the table shape, string types and names, with ordinary
-  diagnostics and invalid markers naming the file, key and source location
-  (§§3.1–3.2). A valid, present `io` is rejected in phase 2 with the dedicated
-  diagnostic **"file-I/O problems are not supported in this version"** at
-  `config.io`. This applies to every command that loads that problem's
-  configuration, whether or not a language is resolved, and with any `cwd`,
-  shared or otherwise. It is a configuration error (exit 7), before job
-  admission; no job directory or sequence allocation occurs. Read-only
-  `cpf config show`, `cpf config check` and `cpf doctor` report it like any
-  other phase-2 error (exit 7). Configuration errors precede an unsupported
-  execution-platform refusal (report contract §5.2); a valid configuration
-  still refuses job execution on Windows with exit 10 before admission.
+- *(file I/O, draft)* **File-based I/O declaration:** problem `[config]`
+  alone (layer 3) accepts `io = { input = "<name>", output = "<name>" }`
+  for a program that reads its input from a file and writes its output to
+  a file in its working directory. In the user and workspace layers `io`
+  is an unknown key.
+  - **Phase 1** (shape and names, ordinary diagnostics and invalid markers
+    naming the file, key and source location, §§3.1–3.2): a table; both
+    fields optional, at least one present; unknown fields are errors; each
+    value a string that is one relative **portable component** (storage
+    contract §2.1): no `/`, `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*`, no
+    `.` or `..`, no U+0000–U+001F or U+007F, not ending in `.` or U+0020,
+    not a reserved device name, not starting with `.cpf-`, 1–255 bytes.
+    The names are literals: no placeholder expansion, no config-relative
+    resolution. The same rules apply on every platform, so a problem that
+    is valid on Linux is valid on macOS and Windows.
+  - **Input and output must differ** (phase 1): the two names are compared
+    by the storage contract §2.1 **collision key** (Unicode canonical
+    caseless matching) on **every** platform, not only on the
+    case-insensitive ones: `a.txt`/`A.txt`, `é`/`e`+U+0301 and `ß`/`ss`
+    are refused on Linux too ("`io.input` and `io.output` name the same
+    file on some filesystems"). Reason: with one file for both, a program
+    that writes nothing leaves its input in place and the input would be
+    judged as its output; and a problem must not change validity between
+    hosts.
+  - **No further reserved names.** The solution's working directory is a
+    fresh, empty directory of its own (storage contract §7) in which cpf
+    creates only the staged input; the judge file names `input`,
+    `output`, `answer`, `tout`, `report` (execution contract §2.1) live in
+    the judges' own private directories, so they are valid `io` names.
+  - **Phase 2** (effective configuration; every command that loads the
+    problem's configuration, `cpf config show`, `cpf config check` and
+    `cpf doctor` included, exit 7, before admission; no job directory or
+    sequence allocation):
+    1. an `io` on a problem whose effective kind (§9) is `interactive` is
+       an error (§9.1.6; checkers design §9);
+    2. an `io` with a **shared `cwd`** is an error: the solution's run
+       stage, composed for the target (the language's `run`, the selected
+       profile's `run` when a profile is selected, the problem's `[config]
+       run`, §2.1), must have the default `cwd = { selector = "run" }`;
+       a `cwd` selector `problem` or `workspace`, or a `cwd` path, is
+       refused at `config.io` with a related location at the `cwd` that
+       made it shared ("file-based I/O needs the run's own directory").
+       `cpf config check` applies the rule to the run stage of every
+       profile of the problem's language. Reason: cpf never writes, measures,
+       clears or deletes anything in a shared `cwd` (storage contract §2),
+       so it could neither stage the input there nor tell an output file
+       of this run from one left by an earlier run or another job.
+    Without a resolved language there is no run stage and rule 2 does not
+    apply.
+  - **Where it applies** (settled). `io` changes only the **solution runs
+    of `cpf test`** on a batch problem (kinds `compare` and `checker`, §9.1):
+    execution contract §5.6 stages the input file and collects the output
+    file, report contract §2.15 judges the collected file. `cpf build`,
+    raw `cpf run` and `cpf cmd` (with or without `for_each_test`) ignore
+    `io`: they stage nothing and collect nothing, and their stdin and
+    stdout follow their own rules (§8.1; execution contract §8.1).
+    `cpf stress` refuses a problem that declares `io` with a configuration
+    error (exit 7) before admission (specified with stress).
+  - **stdin and stdout.** With `io.input` the solution's stdin is null; with
+    `io.output` its stdout is still captured under its `stdout_cap` but is
+    never compared or passed to a checker; the output file is the judged
+    output and is read under the same `stdout_cap` (execution contract
+    §5.6). A problem whose judge offers the input on stdin as well as in
+    the file declares `output` alone.
+  - **Platforms.** Configuration errors precede an unsupported
+    execution-platform refusal (report contract §5.2); a valid
+    configuration with `io` still refuses job execution on Windows with
+    exit 10 before admission, like every job command, while `cpf config
+    show` and `cpf config check` accept it (exit 0).
 - `multi-file` is a problem kind (§9), unrelated to several source files.
 
 ### 6.3 Artifacts
@@ -1324,8 +1381,9 @@ otherwise.
   io`, §6.2) is a phase-2 error whatever the version's `io` support
   (checkers design §9). File-based I/O of a batch solution, including
   which output a checker or comparator receives, is defined with `io`
-  itself (§6.2); nothing here restricts it, so the checkers design §9
-  capability matrix holds as written.
+  itself (§6.2; *(file I/O, draft)* a checker receives the collected
+  output file, execution contract §§2.1, 5.6); nothing here restricts it,
+  so the checkers design §9 capability matrix holds as written.
 
 #### 9.1.7 `interactor-test` declaration
 
@@ -1456,14 +1514,34 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   `env = { X = false }`; `limits = {}`; overlay keys vs a command named
   `linux`; nesting refused; a later generic value over an earlier platform
   value.
-- Reserved file-I/O: valid problem `io` with input only, output only or both
-  → phase-2 diagnostic at `config.io`, exit 7 for build/run/test and read-only
-  inspection; shared `cwd` → the same rejection; no job directory and unchanged
-  job-seq. Separators, `..`, `:`, device names, trailing dots/spaces, wrong types,
-  unknown nested keys or an empty table → phase-1 diagnostics with provenance,
-  without a derived unsupported-I/O error. User/workspace `io` → unknown key.
-  Windows: configuration errors → 7 before the platform refusal; otherwise
-  job commands → 10 before admission (report contract §5).
+- *(file I/O, draft)* File-based I/O (each case on Linux, macOS and
+  Windows, the expected result being the same on all three):
+  - valid problem `io` with input only, output only or both → accepted;
+    `cpf config show --origin` shows `config.io` with exactly the declared
+    fields and problem-layer provenance, `--json` as an object
+    `{"input":…,"output":…}` with the absent field omitted; `cpf config
+    check` exit 0; `input = "input"`, `output = "output"` accepted;
+  - `input` equal to `output`; `a.txt`/`A.txt`; `résultat.txt` in NFC
+    against NFD; `ß`/`ss` → phase-1 error at `config.io`, on Linux as well;
+    `in.txt`/`out.txt` accepted;
+  - `a/b`, `a\b`, `..`, `.`, `c:x`, `con`, `NUL.txt`, `COM¹.txt`, `x.`,
+    `x `, `.cpf-x`, a U+007F, a 256-byte name, `input = 1`, `io = {}`,
+    `io = { input = "a", extra = "b" }`, `io = "a"` → phase-1 diagnostics
+    with provenance, and no phase-2 diagnostic derived from them; a
+    255-byte name (`é` × 127 + `a`) accepted;
+  - `io` in the user or workspace layer → unknown key;
+  - `io` with a run stage `cwd` selector `problem`, selector `workspace`,
+    `cwd = { path = "x" }`, and the same `cwd` set only in a profile's run
+    stage (refused with that profile selected and by `config check`,
+    accepted for `cpf test` without the profile) → phase-2 error at
+    `config.io` with the related `cwd` location, exit 7 for `build`, `run`,
+    `test` and `config check`; no job directory, job-seq unchanged;
+  - `io` with `[problem] kind = "interactive"` and with `[check] kind =
+    "interactive"` → phase-2 error (§9.1.8);
+  - `io` without a resolved language → valid (`config check` 0);
+  - Windows: an `io` configuration error → 7 before the platform refusal;
+    a valid one → `config show`/`check` 0, `cpf test` 10 before
+    admission (report contract §5).
 - Validation: a stage completed across layers; a wrong type in an overridden
   layer still reported; an inactive Windows limit on Linux accepted.
 - *(organisation, draft)* `status.values`: user `["wa"]` alone → effective
