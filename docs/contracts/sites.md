@@ -207,10 +207,15 @@ feature (§10.1).
 
 ### 3.4 Timeouts and budget
 
-- **Connect timeout 10 s** (all connection attempts of one wire request
-  together, TCP and TLS, through the proxy if any). **Attempt timeout
-  30 s**: from the start of the wire request to the last body byte, the
-  connect time included. Either expiry is a `timeout` outcome (§5).
+- **Attempt start** `t_start`: the instant of the reservation write (§4.2
+  step 6). It is recorded in the permit state as `pending.since` and is the
+  one origin of the attempt timeout and of crash recovery (§4.2 step 4).
+- **Attempt timeout 30 s**, from `t_start` to the last body byte: the wait
+  between reservation and sending, the connection attempts and the
+  transfer all count. A request not yet written at `t_start + 30 s` is
+  never written. **Connect timeout 10 s** (all connection attempts of one
+  wire request together, TCP and TLS, through the proxy if any), inside
+  the attempt. Either expiry is a `timeout` outcome (§5).
 - **Per-invocation network budget**: **200 wire requests** (every hop,
   retry, conditional request and enumeration counted) and **15 min of
   network time**. The time budget is one absolute monotonic **deadline**
@@ -218,10 +223,12 @@ feature (§10.1).
   15 min. Cache reads in `--offline` mode cost nothing.
 - Every wait and transfer is bounded by `D`: lock acquisition gives up at
   `min(start + 120 s, D)`; a spacing or retry wait that would end after
-  `D` is not started; an attempt's timeout is `min(30 s, D − start)`.
+  `D` is not started; an attempt ends at `min(t_start + 30 s, D)`.
 - **Rechecks** immediately before the reservation (§4.2 step 6) and again
-  immediately before sending: 200 wire requests already sent, or now ≥
-  `D`, → `network{budget}`, no request. A request is never sent after `D`.
+  immediately before sending: 200 wire requests already sent, now ≥ `D`,
+  or now ≥ `t_start + 30 s`, → `network{budget}` (or `network{timeout}`
+  for the last), no request. A request is never sent after `D` or after
+  its attempt deadline.
 - An exhausted budget fails the logical request in progress and every later
   one of the invocation, each classified `network{budget}`.
 
@@ -251,10 +258,11 @@ the counts of wire requests, hops and retries it used.
   milliseconds on the wall clock:
   - `next_allowed_at_ms`: no wire request to `h` before it;
   - `written_at_ms`: the wall clock when this state was written;
-  - `pending` (optional) with `since_ms`: an attempt whose outcome is not
-    yet known. `pending = "request"` from the reservation until the
-    response headers are written; `pending = "body"` from then until the
-    outcome write (§4.2).
+  - `pending` (optional) with `since_ms` = the attempt start `t_start`
+    (§3.4): an attempt whose outcome is not yet known. `pending =
+    "request"` from the reservation until the header write; `pending =
+    "body"` from then until the outcome write (§4.2). `since_ms` never
+    changes within an attempt.
 
   Valid only when `written_at_ms ≤ next_allowed_at_ms ≤ written_at_ms +
   1 h + 92 s` (the largest persisted cooldown, the fallback `F` of §4.2
@@ -278,76 +286,94 @@ the counts of wire requests, hops and retries it used.
 
 ### 4.2 Protocol of one wire request
 
-Instants (wall clock, ms): `t_send` just before the request is written,
+Instants (wall clock, ms): `t_start` the reservation (§3.4), `t_send` just
+before the request is written (`t_start ≤ t_send < t_start + 30 s`),
 `t_headers` when status line and headers are complete, `t_end` when the
-attempt ends (last body byte read, or the error). Every expiry is computed
-once from its instant and written as an absolute time.
+attempt ends (last body byte read, or the error; `t_end ≤ t_start + 30 s`).
+Every expiry is computed once from its instant and written as an absolute
+time. **Every write** of the state sets `written_at = now` and includes
+the term `now + spacing` in its `max`, so `written_at ≤ next` always holds;
+`pending.since` (when present) is `t_start ≤ written_at`. With the bounds
+below every write satisfies the validity rule of §4.1.
 
 1. Budget check (§3.4).
 2. Acquire `<h>.lock`. An I/O error, an unsupported lock, or a known
    network filesystem (§4.4) → fail closed: `network{permit}`, no request.
 3. Read `<h>.next`: absent → `next = 0`; malformed or outside its validity
-   rule (§4.1) → `next = now + F`; `too_new` → `network{permit_state}`,
-   never replaced; unreadable (I/O) → `network{permit}`. Either failure:
-   release, no request.
-4. **Recover and adjust** (on the values read; written at step 5 or 6):
+   rule (§4.1) → `next = now + F` and the state is marked **changed**;
+   `too_new` → `network{permit_state}`, never replaced; unreadable (I/O) →
+   `network{permit}`. Either failure: release, no request.
+4. **Recover and adjust** (on the values read; a change marks the state
+   **changed**):
    - *Unfinished attempt* (a `pending` record: its holder died, since no
-     one else holds the lock): `next = max(next, since + F)`, **`F` = 30 s
-     (attempt timeout) + 60 s** = 90 s. For `pending = request` no server
-     cooldown was received: if the site wants a longer pause it answers
-     the next request with `429`/`Retry-After`, which is honoured, so the
-     cost is at most one extra request. For `pending = body` the header
-     cooldown `E_h` is already in `next`; `F` covers the unknown body
-     classification (a challenge persists 60 s). The record is then
-     dropped.
+     one else holds the lock): `pending = request` → `next = max(next,
+     since + F)`, **`F` = 30 s (attempt timeout) + 60 s** = 90 s, so the
+     fallback ends at least 60 s after the attempt's latest possible end.
+     No server cooldown was received: if the site wants a longer pause it
+     answers the next request with `429`/`Retry-After`, which is
+     honoured, so the cost is at most one extra request. `pending = body`
+     → the header cooldown `E_h` is already in `next`; `next = max(next,
+     since + F)` covers the unknown body classification (a challenge
+     persists 60 s after `t_end ≤ since + 30 s`). The record is dropped.
    - *Clock rollback*: `now < written_at − 1 s` means the wall clock moved
      back. The remaining duration as of the write is kept:
      `next = now + (next − written_at)`.
-5. `next − now > 60 s` → write the adjusted state if step 4 changed it,
-   release, `rate_limited{retry_at = next}`, no request. Otherwise wait
-   until `next` while holding the lock (monotonic sleep, bounded by §3.4;
-   cancellable: cancellation sends nothing, writes the adjusted state if
+5. `next − now > 60 s` → write the state if it is **changed** (step 3 or
+   4), release, `rate_limited{retry_at = next}`, no request. Otherwise
+   wait until `next` while holding the lock (monotonic sleep, bounded by
+   §3.4; cancellable: cancellation sends nothing, writes the state if
    changed, and ends the command with the cancellation status, report
-   §5.3).
-6. **Reserve**: budget recheck (§3.4); write `next = max(next, now +
-   spacing)`, `written_at = now`, `pending = {request, since = now}`. A
-   failed write → release, `network{permit}`, no request.
-7. Budget recheck; send the one wire request (§2.2) and read the response
-   **while holding the permit**. At `t_headers`, the header cooldown
-   expiry `E_h = t_headers + d_h` (§5, preprocessing) is written: `next =
-   max(next, E_h)`, `pending = {body, since = t_headers}`, **before** the
-   body is read. For a `200`, the body is classified by the adapter's
-   marker table (§8.2) **before** step 8, still under the permit; a
-   challenge or login result sets the body expiry `E_b = t_end + 60 s`.
+   §5.3). A changed state not written here is written by step 6.
+6. **Reserve** at `t_start = now`: budget recheck (§3.4); write `next =
+   max(next, t_start + spacing)`, `pending = {request, since = t_start}`.
+   A failed write → release, `network{permit}`, no request.
+7. Budget and attempt-deadline recheck; send the one wire request (§2.2)
+   and read the response **while holding the permit**. At `t_headers`,
+   before any other await or I/O, the **header write**: `next = max(next,
+   E_h, t_headers + spacing)` with `E_h = t_headers + d_h` (§5,
+   preprocessing; the term is absent when there is no `d_h`), `pending =
+   {body, since = t_start}`; only then is the body read. For a `200`, the
+   body is classified by the adapter's marker table (§8.2) **before**
+   step 8, still under the permit; a challenge or login result sets the
+   body expiry `E_b = t_end + 60 s`.
 8. **Outcome write**: `next = max(next, E_h, E_b, t_end + spacing, t_end +
-   backoff)` (each term present only when §5 gives it), `written_at = now`,
-   no `pending`.
+   backoff)` (each term present only when §5 gives it), no `pending`.
 9. Release the lock.
 
+- **Bounds of a write**: `next ≤ written_at + 1 h + F + spacing` (the
+  largest `E_h`, the fallback and the spacing term), the validity bound of
+  §4.1.
 - **Spacing survives a delayed send**: step 8 always adds `t_end +
   spacing`, so the next request to `h` starts no earlier than spacing
-  after the previous one ended, however long the holder took between
-  reservation and sending. A holder that dies leaves `pending` (step 4).
+  after the previous one ended; and a send delayed past `t_start + 30 s`
+  never happens (§3.4), so `since + F` always covers a dead attempt.
 - **Monotonic extension.** Every write is `max(old, new)` on the values
   read under the lock; a shorter later cooldown never shortens a longer
   one. Only the rollback rule of step 4 lowers the absolute `next`, and it
   keeps the remaining duration.
-- **Write failure after sending** (step 7 or 8, temporary write or rename
-  failed): the previous state stays, with its `pending` record; the
-  outcome is classified as §5 says; the invocation refuses every further
-  wire request to `h` (`network{permit}`); the next process recovers by
-  step 4.
-- **Cancellation during an attempt** stops the transfer. After
-  `t_headers`, step 8 runs with the known terms (`E_h`, `t_end +
-  spacing`). Before `t_headers`, step 8 runs with `since + F` (the same
-  fallback as a dead attempt, no `pending` left). Then the command ends
-  with the cancellation status.
-- **Crash windows**: killed after step 6 or between `t_send` and the
-  header write → the next process waits until `since + F` (no server
-  cooldown was received; a longer one is announced again on the next
-  request); killed after the header write → `E_h` persists, plus
-  `t_headers + F` for the unknown body.
-  A kill releases the OS lock with the process.
+- **Write failure after sending** (header write or outcome write:
+  temporary write or rename failed, after 3 tries within 1 s): the
+  previous state stays, with its `pending` record. A **known cooldown that
+  could not be persisted** (`E_h` or `E_b`) is honoured fail-closed within
+  the invocation: the outcome is classified as §5 says, every further wire
+  request of the invocation to `h` is refused (`network{permit}`), and the
+  command reports `cooldown_not_persisted{host, retry_at}` with the known
+  expiry. The next process sees only `pending` and applies `since + F`;
+  the server's longer cooldown then comes back on its next request (at
+  most one extra request, the rationale of step 4).
+- **Cancellation during an attempt** stops the transfer. After the header
+  write, step 8 runs with the known terms (`E_h`, `t_end + spacing`).
+  Before it, step 8 runs with `since + F` and, when headers had already
+  arrived, `E_h` (no `pending` left). Then the command ends with the
+  cancellation status.
+- **Crash windows**: killed after step 6 and before `t_headers` → the next
+  process waits until `since + F`; killed after the header write → `E_h`
+  persists, plus `since + F` for the unknown body. **Residual, accepted**:
+  a kill in the instant between `t_headers` and the completed header write
+  (header parsing and one state write, no other await or I/O) loses `E_h`;
+  the next process applies `since + F` and the site re-announces its
+  cooldown on the next request (at most one extra request, step 4's
+  rationale). A kill releases the OS lock with the process.
 - **Clocks.** `next` is wall-clock time so that processes share it; waits
   use the monotonic clock. A wall clock that jumps forward shortens a wait
   (accepted); one that jumps back is handled by step 4.
@@ -556,10 +582,12 @@ answer, published unchanged by fetch and read unchanged by comparators
 
 - **Positive recognition.** Each adapter has a **marker table** in its
   module: required markers (statement container, title element, limit
-  line) and, separately, login markers, challenge markers and
-  not-available markers. Body classification order (first match wins):
+  line) and, separately, login markers, challenge markers,
+  not-available markers and unknown-task markers. Body classification order (first match wins):
   challenge markers → `challenge`; login markers → `auth_required`;
-  not-available markers → `not_available`; every required marker → task
+  not-available markers → `not_available`; the adapter's unknown-task
+  markers (a site document saying the task does not exist, served with
+  `200`) → `not_found`; every required marker → task
   page (enumeration pages likewise with their own required markers);
   otherwise → `unrecognized`. It runs under the permit, before the outcome
   write (§4.2 step 7), so a challenge or login body persists its cooldown.
@@ -883,8 +911,8 @@ sent), `http.before_send` (after the reservation, before the request is
 written; a test may hold it), `http.after_headers` (headers received,
 before their write), `http.after_header_write`, `http.after_classify`
 (body classified, before step 8), `http.after_outcome_write` (step 8
-written, lock held). The hook records the instants `t_send`, `t_headers`,
-`t_end` of each attempt (wall clock, ms). State assertions read `<h>.next`
+written, lock held). The hook records the instants `t_start`, `t_send`,
+`t_headers`, `t_end` of each attempt (wall clock, ms). State assertions read `<h>.next`
 at a barrier or after the command, and compare with the expiry formula of
 §4.2 evaluated on the recorded instants, exactly (ms).
 
@@ -896,8 +924,13 @@ at a barrier or after the command, and compare with the expiry formula of
   process).
 - **Delayed send**: A held at `http.before_send` for 5 s (scaled) after its
   reservation, then completes; B's next arrival is ≥ A's `t_end` + spacing.
-- **Kill after reservation**: A killed at `http.after_reserve` or at
-  `http.after_headers`: the server counts ≤ 1 from A; B refuses
+  A held there past `t_start + 30 s` (scaled) → no request is written,
+  `network{timeout}`, the server counts 0 from that attempt. A held there
+  for 29 s (scaled) and killed → B refuses until A's `t_start + 90 s`,
+  which is ≥ the kill time + 60 s.
+- **Kill after reservation**: A killed at `http.after_reserve`, or at
+  `http.after_headers` (the accepted residual of §4.2): the server counts ≤ 1
+  from A; B refuses
   `rate_limited` with `retry_at` = A's `pending.since` + 90 s (scaled), 0
   requests; B's written state has no `pending`. Then the server answers
   B's request after that time with `429 Retry-After: 600` (scaled): B
@@ -905,11 +938,17 @@ at a barrier or after the command, and compare with the expiry formula of
   most one extra request).
 - **Kill after the header write**: `429 Retry-After: 120` (scaled), A
   killed at `http.after_header_write` → B refuses with `retry_at` =
-  `max(t_headers + 120 s, t_headers + 90 s)` (scaled).
+  `max(t_headers + 120 s, t_start + 90 s)` (scaled). The same with
+  `Retry-After: 3600`: B refuses until `t_headers + 1 h`.
+- **Header write validity**: at every `http.after_header_write` (a `200`
+  without cooldown received 5 s (scaled) after a reservation whose `next`
+  was `t_start + s`; a `429 Retry-After: 3600`) the state satisfies §4.1:
+  `written_at = t_headers ≤ next`, `pending.since = t_start ≤ written_at`,
+  `next ≤ written_at + 1 h + 92 s`; for the `200` `next = t_headers + s`.
 - **Body challenge**: a `200` whose body carries the challenge markers →
   at `http.after_outcome_write`, `next = max(t_end + 60 s, t_end + s)`
   (scaled), class `challenge`; killed at `http.after_classify` → B applies
-  `t_headers + 90 s`.
+  `t_start + 90 s`.
 - **Header cooldown independent of the body**: `429 Retry-After: 30` with a
   corrupt gzip body: at each `http.after_header_write`, `next ≥ t_headers +
   30 s`; the final state equals §4.2 step 8 on the last attempt; class
@@ -919,21 +958,29 @@ at a barrier or after the command, and compare with the expiry formula of
   transition `429 Retry-After: 120` refused → after the wait, a `503
   Retry-After: 5`: the second write's `next` = `max` of the first state and
   the second's terms, never below the first.
-- **Outcome write failure**: rename into the permit directory made to fail
-  at `http.after_headers` → the logical request classified by §5, every
-  later wire request of the invocation `network{permit}` with 0 requests;
-  the state on disk still holds `pending = request`; the next process
-  applies `since + 90 s`. A failed directory sync after a successful rename
+- **Header write failure with a known cooldown**: `429 Retry-After: 3600`
+  and every rename into the permit directory made to fail from
+  `http.after_headers` on → `rate_limited`, 3 write tries, the command
+  reports `cooldown_not_persisted{host, retry_at = t_headers + 1 h}`, every
+  later wire request of the invocation to that host `network{permit}` with
+  0 requests; the state on disk still holds `pending = request`; the next
+  process (renames working again) applies `t_start + 90 s`, its request
+  receives `429 Retry-After: 3600` again and persists it.
+- **Outcome write failure** without a cooldown (`200`, renames failing at
+  `http.after_classify`): success for this request, later requests to the
+  host in the invocation `network{permit}`, the next process applies
+  `t_start + 90 s`. A failed directory sync after a successful rename
   (injection hook) → warning only, the new state is in effect.
 - **Cancellation**: during the attempt after `t_headers` (`429
   Retry-After: 30`) → state `max(t_headers + 30 s, t_end + s)`, no
-  `pending`; before `t_headers` (headers delayed 5 s) → state `since +
+  `pending`; before `t_headers` (headers delayed 5 s) → state `t_start +
   90 s` (scaled), no `pending`; in each case the cancellation status.
 - **Lock failure**: `<h>.lock` is a directory, or the permit directory is
   read-only: `network{permit}`, 0 requests. Unreadable state: same.
   Malformed state, and a state outside its validity rule (`next =
-  written_at + 3 h`): refused with `retry_at` = read time + 90 s (scaled), state
-  rewritten. `too_new` state: `network{permit_state}`, file unchanged.
+  written_at + 3 h`): refused with `retry_at` = read time + 90 s (scaled);
+  the file read back after the refusal is valid and holds exactly that
+  `next`. `too_new` state: `network{permit_state}`, file unchanged.
 - **Filesystem**: each refused type of §4.4 through the filesystem-type
   injection hook → `network{permit_fs}`, 0 requests; the CI filesystem
   (ext4 or tmpfs, APFS, NTFS) is accepted.
@@ -1108,7 +1155,9 @@ task without example → 0 pairs, `no_samples`; interactive → `kind =
 `<pre>`, an output label followed by another label, an orphan `<pre>`
 inside an example block, two outputs for one input → each
 `parser_failure{pairing}`; login redirect → `auth_required`, 1 request;
-unknown id → `not_found`; section enumeration → members in list order,
+unknown id: `404` → `not_found`, and a `200` unknown-task document
+(synthetic, with the unknown-task markers and none of the required
+markers) → `not_found`, nothing published, not `unrecognized`; section enumeration → members in list order,
 labels equal native ids, `section` named; task in no section →
 `parser_failure{section}`; any contest URL → `unsupported`, 0 requests;
 `/problemset/view/<n>` and `/problemset/task/<n>/` normalize to the
