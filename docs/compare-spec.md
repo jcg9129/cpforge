@@ -23,7 +23,7 @@ An empty answer is present. "Complete" is decided by the execution contract
 exactly as long as the budget is not evidence of truncation. Completeness is
 also kept as separate metadata in the record.
 
-*(file I/O, draft)* **Input selection.** O is the solution run's stdout
+**Input selection.** O is the solution run's stdout
 capture, except for a problem that declares `io.output` (configuration
 contract §6.2): O is then the collected output file (`<run>/out/output`,
 execution contract §5.6) and stdout is not compared. A collected file is

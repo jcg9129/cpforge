@@ -15,39 +15,27 @@ implemented.
 is settled but not yet implemented. References labelled *workspace design* point to
 `../design-workspace.md`.
 
-**Organisation amendment: draft.** The workflow status vocabulary
-`[status] values` (§1.1, §7.5) for `cpf mark` (storage contract §5.9).
-Marked *(organisation, draft)*.
-
-**Judging amendment: draft.** The `problem.toml` table `[check]` (§9.1):
-judging kind, role specs and their capture, answer policy, scoring,
-display profile, interactive settings and the `interactor-test`
-declaration; run counts and the judged-test cap (§8.2); problem kinds
-(§9). Amended content is marked *(judging, draft)*. References labelled
+**Gate-2 additions.** The workflow status vocabulary `[status] values`
+(§1.1, §7.5) for `cpf mark` (storage contract §5.9). The `problem.toml`
+table `[check]` (§9.1): judging kind, role specs and their capture, answer
+policy, scoring, display profile, interactive settings and the
+`interactor-test` declaration; run counts and the judged-test cap (§8.2);
+problem kinds (§9). The `problem.toml` table `[stress]` (§9.2): generator
+and brute role specs, default budgets and the score threshold; stress
+plans (§8.2); the `cpf stress` row of §9; the stress contract
+(`stress.md`) uses it. The `[archive]` keys (§1.1, §7.6) of the archive
+contract (`archive.md` §3.1). The submit table `languages.<l>.submit` with
+its version probe, `submit.clipboard` and `submit.test_dir` (§1.1), the
+overlay site (§2), the submit-stage placeholders (§5.2) and the
+`submit-prep` row of §9; the submission contract (`submit.md`) holds their
+semantics. The problem `[config] io` declaration (§6.2), accepted for batch
+problems: name rules, the run-directory and kind conditions, the commands
+it applies to, and its fixtures (§11); it replaces the gate-1 rejection of
+every `io`. Staging and collection are execution contract §5.6; verdicts
+and report members are report contract §2.15. References labelled
 *checkers design* point to `../design-checkers.md`; *report contract*,
 *execution contract* and *storage contract* to the documents in this
 directory.
-
-**Stress amendment: draft.** The `problem.toml` table `[stress]` (§9.2):
-generator and brute role specs, default budgets and the score threshold;
-stress plans (§8.2); the `cpf stress` row of §9. Marked *(stress, draft)*;
-the stress contract (`stress.md`) uses it.
-
-**Archive amendment: draft.** The `[archive]` keys (§1.1, §7.6) of the
-archive contract (`archive.md` §3.1). Marked *(archive, draft)*.
-
-**Submission amendment: draft.** The submit table
-`languages.<l>.submit` with its version probe, `submit.clipboard` and
-`submit.test_dir` (§1.1), the overlay site (§2), the submit-stage
-placeholders (§5.2) and the `submit-prep` row of §9; the submission
-contract (`submit.md`) holds their semantics. Marked *(submission,
-draft)*.
-**File-I/O amendment: draft.** The problem `[config] io` declaration
-(§6.2) is accepted for batch problems: name rules, the run-directory and
-kind conditions, the commands it applies to, and its fixtures (§11). It
-replaces the gate-1 rejection of every `io`. Amended content is marked
-*(file I/O, draft)*. Staging and collection are execution contract §5.6;
-verdicts and report members are report contract §2.15.
 
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
@@ -87,24 +75,24 @@ and the problem record, not to configuration.
 | `compare` | comparator value | 1, 2 | compare spec §5.1; replace-as-unit |
 | `retention.{keep_jobs, job_bytes, workspace_bytes, cwd_bytes, build_bytes}` | §7.1 types | 1, 2 | §7.3 |
 | `workspace.ignore` | array of patterns | 1, 2 | §7.4 |
-| `status.values` *(organisation, draft)* | array of status names | 1, 2 | §7.5; replace-as-unit |
-| `archive.roots` *(archive, draft)* | array of root paths, ≤ 16 | 1, 2 | §7.6; replace-as-unit |
-| `archive.default_root` *(archive, draft)* | root path | 1, 2 | §7.6 |
-| `archive.layout`, `archive.contest_layout` *(archive, draft)* | layout string | 1, 2 | §7.6 |
-| `archive.keep`, `archive.discard` *(archive, draft)* | array of class names | 1, 2 | §7.6; replace-as-unit |
-| `archive.cleanup` *(archive, draft)* | `"trash"`, `"quarantine"`, `"delete"`, `"keep"` | 1, 2 | §7.6 |
-| `archive.on_existing` *(archive, draft)* | `"error"`, `"reuse-identical"`, `"new"` | 1, 2 | §7.6 |
-| `archive.profiles.<p>.{keep, discard, cleanup}` *(archive, draft)* | as the base keys | 1, 2 | §7.6; `<p>` a name (§1.1 names) |
-| `archive.quarantine.retention_days` *(archive, draft)* | integer 0–36 500 | 1, 2 | §7.6 |
-| `submit.clipboard` *(submission, draft)* | boolean | 1, 2 | default `false`; submission contract §9.3 |
-| `submit.test_dir` *(submission, draft)* | config-relative path | 1, 2 | base of the external test directory; default the OS temporary directory; submission contract §7.1 |
+| `status.values` | array of status names | 1, 2 | §7.5; replace-as-unit |
+| `archive.roots` | array of root paths, ≤ 16 | 1, 2 | §7.6; replace-as-unit |
+| `archive.default_root` | root path | 1, 2 | §7.6 |
+| `archive.layout`, `archive.contest_layout` | layout string | 1, 2 | §7.6 |
+| `archive.keep`, `archive.discard` | array of class names | 1, 2 | §7.6; replace-as-unit |
+| `archive.cleanup` | `"trash"`, `"quarantine"`, `"delete"`, `"keep"` | 1, 2 | §7.6 |
+| `archive.on_existing` | `"error"`, `"reuse-identical"`, `"new"` | 1, 2 | §7.6 |
+| `archive.profiles.<p>.{keep, discard, cleanup}` | as the base keys | 1, 2 | §7.6; `<p>` a name (§1.1 names) |
+| `archive.quarantine.retention_days` | integer 0–36 500 | 1, 2 | §7.6 |
+| `submit.clipboard` | boolean | 1, 2 | default `false`; submission contract §9.3 |
+| `submit.test_dir` | config-relative path | 1, 2 | base of the external test directory; default the OS temporary directory; submission contract §7.1 |
 | `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
 | `config.sources` | array of paths | 3 | §6.2 |
 | `config.support_files` | array of paths | 3 | §6.2 file roles |
 | `config.solution_files` | array of paths | 3 | §6.2 file roles, §6.5 |
-| `config.io` | table `{ input?, output? }` | 3 | file-based I/O declaration; §6.2 *(file I/O, draft)* |
+| `config.io` | table `{ input?, output? }` | 3 | file-based I/O declaration; §6.2 |
 | `config.entry` | non-empty string | 3 | §6.4; overrides the language's `entry` |
 | `config.compare` | comparator value | 3 | |
 | `config.build`, `config.run` | stage table | 3 | precedence row 5 |
@@ -114,7 +102,7 @@ strings without `.` or `/`), `sources` (array, §6.2 rules), `entry` (non-empty
 string), `artifacts` (§6.3; exactly one of `file = "<name>"` or `dir = true`
 with optional `required`), `template = { path }` (config-relative), `build`
 (stage table or `false`), `run` (stage table), `profiles.<p>` (table with
-optional `build`, a stage table or `false`, and `run`), *(submission, draft)*
+optional `build`, a stage table or `false`, and `run`),
 `submit` (the submit table: stage fields plus `version = { argv, expect }`,
 `test`, `judge`; submission contract §§3.2–3.3), platform overlays (§2).
 
@@ -143,18 +131,18 @@ digits, `-` and `_`, starting with a letter; `unix`, `linux`, `macos`,
 with overlay keys) but allowed as command names (§2).
 
 Keys from later designs (`check` outside `problem.toml`)
-are unknown keys in this version; *(submission, draft)* so is `config.submit`
-(a submission tool is a language setting). *(archive, draft)* `archive` is
+are unknown keys in this version; so is `config.submit`
+(a submission tool is a language setting). `archive` is
 no longer one of them: its keys are listed above; any other `archive.*` key
 is an unknown key.
 
-*(judging, draft)* `problem.toml` `[check]` is not a configuration layer:
+`problem.toml` `[check]` is not a configuration layer:
 it is a table of the problem record whose schema this contract owns
 (§9.1). It is read only from the selected problem's `problem.toml`, is
 validated in the phases of §3 with ordinary diagnostics (file
 `problem.toml`, key path `check.…`), and never appears in layers 1–3.
 
-*(stress, draft)* `problem.toml` `[stress]` is a table of the problem
+`problem.toml` `[stress]` is a table of the problem
 record in the same way (§9.2), with key path `stress.…`.
 
 ### 1.2 Discovery
@@ -191,7 +179,7 @@ record in the same way (§9.2), with key path `stress.…`.
   more specific source sets `NAME` again. `limits = {}` clears all
   limits. Deletion markers are valid only at these three places.
 - **Platform overlays** exist only at `languages.<l>`, `languages.<l>.build`,
-  `languages.<l>.run`, *(submission, draft)* `languages.<l>.submit`, `languages.<l>.profiles.<p>`, `commands.<c>`, `[run]`
+  `languages.<l>.run`, `languages.<l>.submit`, `languages.<l>.profiles.<p>`, `commands.<c>`, `[run]`
   and `[build]`. There the keys `unix`, `linux`, `macos`, `windows` are
   reserved sub-tables; elsewhere they are ordinary names (e.g. a command
   named `linux`). No nesting (`unix.linux` is an error). Within **one layer**
@@ -508,12 +496,12 @@ may still fail at spawn.
 | `{test_input}` | scalar | command with `for_each_test` |
 | `{test_answer}` | scalar | command with `for_each_test` and the test has an answer (else plan error for that test) |
 | `{iteration}` | scalar, 1-based | command with `repeat` |
-| `{submit_dir}` *(submission, draft)* | scalar | submit stage: the job's empty `submit/out/` |
-| `{submit_file}` *(submission, draft)* | scalar | submit stage, the target has exactly one solution source (a member of `sources` in the effective `solution_files`): `{submit_dir}` joined with its path |
-| `{solution_sources}` *(submission, draft)* | multi | submit stage: captured copies of the solution sources |
-| `{judge}` *(submission, draft)* | scalar | submit stage: `--judge`, else the submit table's `judge`, else the site name of a remote problem |
+| `{submit_dir}` | scalar | submit stage: the job's empty `submit/out/` |
+| `{submit_file}` | scalar | submit stage, the target has exactly one solution source (a member of `sources` in the effective `solution_files`): `{submit_dir}` joined with its path |
+| `{solution_sources}` | multi | submit stage: captured copies of the solution sources |
+| `{judge}` | scalar | submit stage: `--judge`, else the submit table's `judge`, else the site name of a remote problem |
 
-*(submission, draft)* The submit stage also accepts `{sources}`, `{source}`,
+The submit stage also accepts `{sources}`, `{source}`,
 `{entry}` and `{problem_id}`; `{problem_dir}`, `{workspace}`, `{artifact}`,
 `{artifact_dir}`, `{test_input}`, `{test_answer}` and `{iteration}` there are
 phase-2 errors; `{submit_file}` without a solution source and `{judge}`
@@ -634,7 +622,7 @@ and limits.
   (storage contract §7) and every `{sources}` / `{source}` expansion names
   the copy; outside the amendment they are read in place. Test data is
   always frozen.
-- *(file I/O, draft)* **File-based I/O declaration:** problem `[config]`
+- **File-based I/O declaration:** problem `[config]`
   alone (layer 3) accepts `io = { input = "<name>", output = "<name>" }`
   for a program that reads its input from a file and writes its output to
   a file in its working directory. In the user and workspace layers `io`
@@ -901,7 +889,7 @@ Ignore only changes visibility in `cpf status`; it never makes a file
 deletable (workspace design §2). `cpf ignore <pattern>` validates a pattern and prints
 the line to add; it never edits a configuration file.
 
-### 7.5 Workflow status vocabulary *(organisation, draft)*
+### 7.5 Workflow status vocabulary
 
 `[status] values = ["wa", "upsolve-later"]`, allowed in layers 1 and 2;
 an array, so a later layer replaces it whole (§2): a workspace array
@@ -920,7 +908,7 @@ determined. Readers (`ls`, `status`, `search`) never load it: a stored
 status outside the vocabulary is still a valid value. `cpf config show`
 shows the effective array with provenance like any array.
 
-### 7.6 Archive *(archive, draft)*
+### 7.6 Archive
 
 The `[archive]` table configures `cpf archive`, `cpf restore`, `cpf
 quarantine` and archived listing and search (archive contract §3.1). Layers
@@ -1009,7 +997,7 @@ repeat = 5
 - Planned runs = builds + tests × repeats + hooks, computed with checked
   arithmetic in phase 3; more than **10 000** is a plan error (execution contract §6.2
   report bound).
-- *(stress, draft)* **Stress plans** (`cpf stress`, stress contract §6.1):
+- **Stress plans** (`cpf stress`, stress contract §6.1):
   the planned runs are the builds only: the solution build and one role
   build per built role with a build stage, in the order solution, checker,
   validator, interactor, generator, brute (≤ 6). Iterations and their runs
@@ -1018,7 +1006,7 @@ repeat = 5
   judged-test cap below does not apply (a stress job has no tests), and the
   report reservation is the fixed 2 × B_S of report contract §3.7. No hook
   is planned for a stress job.
-- *(judging, draft)* **Judged plans** (`cpf test` on a problem with a
+- **Judged plans** (`cpf test` on a problem with a
   `[check]` role, §9.1). Every role run and role build is a planned run
   and counts towards the 10 000:
   - builds: the solution build (if the target has one) and one **role
@@ -1118,17 +1106,17 @@ enabled = true                         # master switch, default true
 | Operation | batch | answer | interactive | multi-file | unknown |
 |---|---|---|---|---|---|
 | list, show, switch to, `config show` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| build, raw `cpf run`; `cmd` with `needs_build` | ✓ | – | ✓ *(judging, draft)*: the solution target only; raw `cpf run` connects the solution to the console, without an interactor | – | – |
-| `cpf test` | ✓ | – | ✓ *(judging, draft)*: needs `[check] kind = "interactive"` (§9.1) | – | – |
+| build, raw `cpf run`; `cmd` with `needs_build` | ✓ | – | ✓: the solution target only; raw `cpf run` connects the solution to the console, without an interactor | – | – |
+| `cpf test` | ✓ | – | ✓: needs `[check] kind = "interactive"` (§9.1) | – | – |
 | `cmd` with `for_each_test` | ✓ | – | – (a test input is not a dialogue) | – | – |
-| *(stress, draft)* `cpf stress` (search, `--replay`, `--replay-binaries`) | ✓: needs `[stress]` (§9.2) | – | ✓: needs `[stress]`, `[check] kind = "interactive"` and `answer = "none"` | – | – |
+| `cpf stress` (search, `--replay`, `--replay-binaries`) | ✓: needs `[stress]` (§9.2) | – | ✓: needs `[stress]`, `[check] kind = "interactive"` and `answer = "none"` | – | – |
 | `check` against a recorded answer (design §5.4) | – | ✓ | – | – | – |
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| *(submission, draft)* `submit-prep` source copy / stage mode | ✓ / ✓ | – | ✓ / ✓ when interactive `cpf test` is supported (artifact test with the interactor) | – | – |
+| `submit-prep` source copy / stage mode | ✓ / ✓ | – | ✓ / ✓ when interactive `cpf test` is supported (artifact test with the interactor) | – | – |
 
 Refused operations say "unsupported in this version".
-*(judging, draft)* The **effective kind** is `interactive` when
+The **effective kind** is `interactive` when
 `[problem] kind = "interactive"` or `[check] kind = "interactive"`, else
 the `[problem] kind` (default `batch`). `[check]` is the execution-affecting
 declaration and the `[problem] kind` tool field is metadata (storage
@@ -1151,7 +1139,7 @@ are preserved in `problem.toml`, never rewritten. `check` compares the
 user-recorded candidate answer with the recorded reference; no build or run
 is involved.
 
-### 9.1 Judging: `[check]` *(judging, draft)*
+### 9.1 Judging: `[check]`
 
 `[check]` and its subtables live in `problem.toml`, beside `[config]`
 (§1.1). The storage record classification of `problem.toml` (storage
@@ -1382,7 +1370,7 @@ otherwise.
   io`, §6.2) is a phase-2 error whatever the version's `io` support
   (checkers design §9). File-based I/O of a batch solution, including
   which output a checker or comparator receives, is defined with `io`
-  itself (§6.2; *(file I/O, draft)* a checker receives the collected
+  itself (§6.2; a checker receives the collected
   output file, execution contract §§2.1, 5.6); nothing here restricts it,
   so the checkers design §9 capability matrix holds as written.
 
@@ -1416,7 +1404,7 @@ On Windows a judged `cpf test` with a valid configuration is refused with
 exit 10 before admission, after phases 1–2 and the early refusals and
 before phase 3 (report contract §5.2).
 
-### 9.2 Stress: `[stress]` *(stress, draft)*
+### 9.2 Stress: `[stress]`
 
 `[stress]` lives in `problem.toml` beside `[check]` (§1.1) and is owned by
 this contract like `[check]` (§9.1: not decoded by the storage record
@@ -1515,7 +1503,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   `env = { X = false }`; `limits = {}`; overlay keys vs a command named
   `linux`; nesting refused; a later generic value over an earlier platform
   value.
-- *(file I/O, draft)* File-based I/O (each case on Linux, macOS and
+- File-based I/O (each case on Linux, macOS and
   Windows, the expected result being the same on all three):
   - valid problem `io` with input only, output only or both → accepted;
     `cpf config show --origin` shows `config.io` with exactly the declared
@@ -1545,13 +1533,13 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     admission (report contract §5).
 - Validation: a stage completed across layers; a wrong type in an overridden
   layer still reported; an inactive Windows limit on Linux accepted.
-- *(organisation, draft)* `status.values`: user `["wa"]` alone → effective
+- `status.values`: user `["wa"]` alone → effective
   `["wa"]`; user `["wa"]`, workspace `["x"]` → `["x"]`; workspace `[]` →
   `[]`; `["solved"]`, `["wa", "wa"]`, `["Wa"]`, `["a-"]`, `[1]`, 33 elements,
   `status = { values = [], other = 1 }`, and `status.values` in a
   `problem.toml` `[config]` → phase-1 diagnostics with provenance (7 from
   `cpf config check`).
-- *(archive, draft)* `[archive]`: workspace `discard = ["tests:sample"]`
+- `[archive]`: workspace `discard = ["tests:sample"]`
   over user `discard = ["stress"]` → `["tests:sample"]`; `roots =
   ["rel/dir"]`, 17 roots, `layout = "{site}/{tags}"`, `"{site}//x"`,
   `"/{site}"`, `"{site}/.."`, `"{site"`, `keep = ["notes"]` with `discard =
@@ -1736,7 +1724,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   9 999 / 10 000 / 10 001 planned runs.
 - `config show` / `check`: no side effects, stable JSON, provenance, deferred
   values, unsupported kinds.
-- *(judging, draft)* **`[check]`** (each row: exact diagnostics with
+- **`[check]`** (each row: exact diagnostics with
   key path and provenance, exit status, and no job directory or sequence
   allocation for a refusal):
   - Kinds and roles: kind `checker` without `checker`, kind `compare` with
@@ -1796,7 +1784,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     without roles has `null`.
   - Windows: a valid judged `cpf test` → exit 10 before admission; a
     `[check]` phase-1 error → exit 7 first.
-- *(submission, draft)* Submit table: submission contract §14.1 (SB-C1–SB-C9):
+- Submit table: submission contract §14.1 (SB-C1–SB-C9):
   placeholders per stage, the probe's brace and pattern errors, overlay-only
   tables, `config.submit` unknown, `{submit_file}`/`{judge}` availability,
   the test-directory base inside the workspace; `config show` reports the mode.

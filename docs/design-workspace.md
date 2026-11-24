@@ -44,16 +44,16 @@ them belongs to cpf, whoever created it, and the documentation says so:
 | `<root>/.cpforge/facts/` | no | run facts (§3.2) |
 | `<root>/.cpforge/state.toml`, `lock` | no | S §3 |
 | `<root>/.cpforge/job-seq` | no | admission sequence (§3.2) |
-| `<root>/.cpforge/downloads/` *(fetch, draft)* | only by its lease protocol (storage contract §5.8.3) | download areas of running fetches |
-| `<root>/.cpforge/fetch/` *(fetch, draft)* | no | fetch journals, history and status (storage contract §5.8.2); moved with its problem by archive retirement |
-| `<root>/.cpforge/archive/` *(archive, draft)* | no: each transaction directory is removed by its own protocol | archive and restore transactions (archive contract §5.3, §7.3) |
-| `<root>/.cpforge/quarantine/` *(archive, draft)* | no: only `cpf quarantine purge --apply` | files displaced by archive cleanup; user content in a tool tree (archive contract §6.6) |
-| `<root>/.cpforge/submit/` | only unreferenced versions, by `cpf clean` | submission versions and their `current` reference (submission contract §8); *(submission, draft)* |
+| `<root>/.cpforge/downloads/` | only by its lease protocol (storage contract §5.8.3) | download areas of running fetches |
+| `<root>/.cpforge/fetch/` | no | fetch journals, history and status (storage contract §5.8.2); moved with its problem by archive retirement |
+| `<root>/.cpforge/archive/` | no: each transaction directory is removed by its own protocol | archive and restore transactions (archive contract §5.3, §7.3) |
+| `<root>/.cpforge/quarantine/` | no: only `cpf quarantine purge --apply` | files displaced by archive cleanup; user content in a tool tree (archive contract §6.6) |
+| `<root>/.cpforge/submit/` | only unreferenced versions, by `cpf clean` | submission versions and their `current` reference (submission contract §8); |
 
 There is **no** reserved or disposable path under `problems/` or
 `contests/`: builds and runs live in job directories (S §6.1). Every path
 outside the reserved trees is **protected**: no command deletes it
-automatically, whoever created it. *(archive, draft)* The one approved
+automatically, whoever created it. The one approved
 transaction that relocates protected paths is `cpf archive --apply`
 (archive contract): after a committed snapshot it moves the problem
 directory into `.cpforge/archive/<txn>/` and its cleanup sends files to the
@@ -259,7 +259,7 @@ schemas are ignored, as with the other tool-only record codecs.
   (initial feature release) — the same leases, lock and two-step rename-then-delete protocol,
   so active jobs are excluded through deletion by the existing mechanism. It
   never touches anything outside `.cpforge/runs/` and `.cpforge/cache/`,
-  *(submission, draft)* except the unreferenced submission versions under
+  except the unreferenced submission versions under
   `.cpforge/submit/` and the external test directories recorded by pruned
   `submit` jobs (submission contract §§7.4, 11.1); never `facts/`,
   `job-seq`, `lock`, `state.toml` or a referenced submission version.

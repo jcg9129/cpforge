@@ -1,6 +1,6 @@
 # Archive contract
 
-Status: v1, draft. Normative for the `archive` module: `cpf archive` (plan,
+Status: v1. Normative for the `archive` module: `cpf archive` (plan,
 snapshot, retirement, cleanup), the archive roots and their snapshots,
 `cpf quarantine`, `cpf restore`, and the archive side of `cpf ls --archived`
 and `cpf search`. It refines design §7a "Archive" and §11 (cleanup modes);
@@ -1800,7 +1800,7 @@ pre-archive file's bytes are found in at least one of them.
 
 ### 11.1 Storage (`storage.md`)
 
-Applied in this change, marked *(archive, draft)*: header note; §3 rows for
+Applied in this change: header note; §3 rows for
 `.cpforge/archive/`, `.cpforge/quarantine/`, `[problem] archived_at` and
 `origin`, the reserved-tree list and the archive exception to "never
 deleted"; §4.3 directory publication sources; §4.5 recovery (metadata

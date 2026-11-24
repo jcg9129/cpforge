@@ -7,26 +7,27 @@ mode, hooks, `repeat`, runs per job) is defined in `config.md`; result
 derivation, the report format, exit statuses and machine output are
 defined in `report.md` (the report contract).
 
-**Judging amendment: draft.** Judge roles and their profiles (§2.1), stages
-`Checker`, `Validator`, `Interactor` (§2), the reservations of judging runs
-(§5.4), the test precedence (§6.4) and the resolution of the connected-run
-items (§9a). Amended content is marked *(judging, draft)*. References
-labelled *checkers design* point to `../design-checkers.md`.
+It includes the judging additions (judge roles and their profiles §2.1,
+stages `Checker`, `Validator`, `Interactor` §2, the reservations of judging
+runs §5.4, the test precedence §6.4, the resolution of the connected-run
+items §9a), the stress additions (iterations and iteration runs §1, stages
+`Generator` and `Brute` §2, the one-live-iteration rule §3.3, byte release
+after confirmed removal §5.4, the retirement deadline §5.5, per-iteration
+persistence settlement §6.2, iteration events §9; the lifecycle itself is
+`stress.md` §6, the stress contract), the submission additions (stages
+`Submit` and `SubmitProbe` §2 and their defaults §5.5 for the `submit` job
+of the submission contract, `submit.md` §6; the helper operation
+`ClipboardHelper` §2 with the sink `Null`, the cleanup result `Released`
+and its root-exit rule §4.1 step 6, submission contract §9.3) and the
+file-I/O additions (staging of the input file into a solution run's
+`cwd/`, the stdin of such a run, collection of the output file under the
+capture caps, its reservations and scratch removal §5.6, and the checker's
+`output` for such a problem §2.1; the declaration is configuration
+contract §6.2 `io`, the verdicts and report members report contract
+§2.15). References labelled *checkers design* point to
+`../design-checkers.md`.
 
-**Stress amendment: draft.** Iterations and iteration runs (§1), stages
-`Generator` and `Brute` (§2), the one-live-iteration rule (§3.3), byte
-release after confirmed removal (§5.4), the retirement deadline (§5.5),
-per-iteration persistence settlement (§6.2) and iteration events (§9).
-The lifecycle itself is `stress.md` §6 (the stress contract). Amended
-content is marked *(stress, draft)*.
-
-**Submission amendment: draft.** Stages `Submit` and `SubmitProbe` (§2)
-and their defaults (§5.5), for the `submit` job of the submission contract
-(`submit.md` §6); the **helper operation** `ClipboardHelper` (§2) with the
-sink `Null`, the cleanup result `Released` and its root-exit rule (§4.1
-step 6), submission contract §9.3. Marked *(submission, draft)*.
-
-*(submission, draft)* **Helper operations** (the one normative statement
+**Helper operations** (the one normative statement
 of the `ClipboardHelper` lifecycle; the submission contract §9.3 refers
 here). A helper run is an ordinary supervised run outside any job plan:
 
@@ -63,12 +64,6 @@ here). A helper run is an ordinary supervised run outside any job plan:
    The host then closes its creation queue, which hands the thread and its
    credit to the cleanup poller (§3.3). Orderly exit and force exit treat
    the helper like any run (§3.4, §8.2).
-**File-I/O amendment: draft.** Staging of the input file into a solution
-run's `cwd/`, the stdin of such a run, collection of the output file under
-the capture caps, its reservations and scratch removal (§5.6), and the
-checker's `output` for such a problem (§2.1). Amended content is marked
-*(file I/O, draft)*. The declaration is configuration contract §6.2 `io`;
-the verdicts and report members are report contract §2.15.
 
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
@@ -83,7 +78,7 @@ honest weak guarantee to an unproven strong one.
   iteration, one custom command or hook invocation).
 - **Job:** a cancellable unit made of runs (`cpf test` = build + one run per
   test + comparisons). Jobs own cancellation and produce the final report.
-- *(stress, draft)* **Iteration:** the admission unit of a stress job
+- **Iteration:** the admission unit of a stress job
   (stress contract §1): one generated input and its ≤ 5 (batch) or ≤ 8
   (interactive) **iteration runs**, each an ordinary run of this contract
   identified by `<iteration>.<role>` instead of a report run id. Cumulative
@@ -114,8 +109,8 @@ someone else are documented limitations; this is not a sandbox.
 pub struct ResolvedExecutionSpec {
     pub stage: Stage,                    // Build | Run | Command | Hook | Checker | Validator
                                          // | Interactor (judging, §2.1) | Generator | Brute
-                                         // (stress, draft: stress contract §3.1)
-                                         // | Submit | SubmitProbe | ClipboardHelper (submission, draft)
+                                         // (stress contract §3.1)
+                                         // | Submit | SubmitProbe | ClipboardHelper
     pub program: PathBuf,                // resolved executable; shell mode already turned into program+args (configuration contract)
     pub args: Vec<OsString>,
     pub cwd: PathBuf,                    // absolute (storage contract decides which directory)
@@ -128,13 +123,13 @@ pub struct ResolvedExecutionSpec {
     pub deadline_group: Option<GroupRef>,// sessions only (§9a); otherwise always None
     pub limits: Vec<LocalLimit>,         // validated and normalised before spawn (§7.2)
     pub measure: Vec<MetricKind>,
-    pub stage_input: Option<StagedInput>,   // (file I/O, draft) §5.6; None outside file-based I/O
-    pub output_file: Option<OutputFileSpec>,// (file I/O, draft) §5.6
+    pub stage_input: Option<StagedInput>,   // §5.6; None outside file-based I/O
+    pub output_file: Option<OutputFileSpec>,// §5.6
 }
 
 pub struct StreamPolicy {
     pub sink: Sink,                      // File(PathBuf) | Forward(ConsoleStream) | Discard
-                                         // | Null (submission, draft: ClipboardHelper only)
+                                         // | Null (ClipboardHelper only)
                                          // | Connected(PeerRef) (reserved, §9a)
     pub budget: u64,                     // output budget on observed bytes, independent of sink
     pub on_exceed: Exceed,               // Kill | Discard
@@ -162,7 +157,7 @@ limit (configuration contract: 256 KiB) checked before the run is admitted.
 pair (§2.1, §9a); a plain run that requests them is rejected at validation
 (`NotStarted{Unsupported}`).
 
-### 2.1 Judge roles and profiles *(judging, draft)*
+### 2.1 Judge roles and profiles
 
 Judge roles (checkers design §1) are the **checker**, the **validator**
 and the **interactor**. Each run of a role is an ordinary
@@ -201,7 +196,7 @@ wiring, not isolation: a judge can read other paths.
   (`<run>/out/stdout`, as frozen), and, for the follow-up checker of a
   session, a copy of the interactor's `tout` read as below. A batch problem
   with file-based I/O (configuration contract §6.2 `io`) stages the
-  solution's collected output file instead: *(file I/O, draft)* with
+  solution's collected output file instead: with
   `io.output` the checker's `output` is a copy of `<run>/out/output`, the
   solution run's extracted output file (§5.6), never its stdout; with
   `io.input` alone it is the stdout capture as above. A checker is
@@ -505,7 +500,7 @@ diagnose an absent `record.json`.
   Windows waiter, one sink worker per `File`/`Forward` stream, the stdin
   forwarder in raw mode. Unix observers need no thread (pidfd / kqueue, or
   polling, §4.1).
-  *(file I/O, draft)* A solution run with `io.output` (§5.6) also gets,
+  A solution run with `io.output` (§5.6) also gets,
   at admission, an **output-file worker**, credited and created like a
   sink worker, with the same failure (`NotStarted{CleanupCapacity}` or
   `NotStarted{Worker}`) and transfer rules: a transferred output-file
@@ -526,7 +521,7 @@ diagnose an absent `record.json`.
   returns keeps its slot for the life of the `cpf` process; this is reported
   (`ReapTimeout`, `WriteStalled`), and further runs are refused once all
   slots are held.
-- *(stress, draft)* **Iterations.** A stress job admits its iteration runs
+- **Iterations.** A stress job admits its iteration runs
   one iteration at a time (stress contract §6.2): the first run of an
   iteration is not admitted before the previous iteration is retired, and
   retirement waits for every run of the iteration to reach resources
@@ -705,7 +700,7 @@ pub enum Cleanup {
     Confirmed,                                // no live member observed by the stated algorithm
     Incomplete { survivors: u32 },            // live members observed at the deadline
     Unverified { reason: UnverifiedReason },  // unavailable, failed, truncated, observer failed
-    Released,                                 // (submission, draft) ClipboardHelper exit without a stop trigger only (helper operations, step 5)
+    Released,                                 // ClipboardHelper exit without a stop trigger only (helper operations, step 5)
 }
 ```
 
@@ -810,7 +805,7 @@ says so when cleanup is unverified.
   unread pipe contents are lost under the same entry.
 - **Capture frozen** when, per stream, the reader has stopped and either the
   worker has written and closed everything queued, or the **sink finalisation
-  deadline** passed. *(file I/O, draft)* With `io.output` the output-file
+  deadline** passed. With `io.output` the output-file
   stream (§5.6) is one of the streams: frozen when it has an outcome, or
   `NotCollected{Timeout}` at the same deadline. A worker still blocked then records
   `CaptureLoss::WriteStalled`; `stored` is the snapshot of bytes it had
@@ -864,18 +859,18 @@ contract §6, not a reservation ceiling):
   `NotStarted{RetentionBudget}`, nothing stays reserved, the job admits no
   further runs. Before its first run the job also reserves the report bound
   of report contract §3.7 for `report.json` and its temporary file.
-- *(judging, draft)* **Report reservation**: exactly 2 × the report bound
+- **Report reservation**: exactly 2 × the report bound
   of the plan (report contract §3.7), in one reservation before the first
   run, held until report publication settles; never shared with another
   reservation and never taken lazily, so final-report headroom cannot be
   consumed by runs.
-- *(judging, draft)* **Judge staging and extraction**: each staged copy
+- **Judge staging and extraction**: each staged copy
   of §2.1 (the follow-up checker's `output` from the extracted `tout`
   included) and each extracted report or `tout` (§2.1, ≤ 64 KiB and
   ≤ 64 MiB) reserves its exact size before it is created; the bytes become
   retained at creation and are released when the judge-scratch removal is
   confirmed (extracted reports are never removed).
-- *(judging, draft)* **Transcripts**: at pair admission a relay-mode
+- **Transcripts**: at pair admission a relay-mode
   session reserves, per direction, 1 MiB of raw bytes plus 65 601 index
   records (65 536 records, 64 gap markers, the final record) of at most
   256 bytes each (every index record, error text included, is bounded to
@@ -883,7 +878,7 @@ contract §6, not a reservation ceiling):
   session's resources-released milestone it is converted like a stream
   reservation. Direct mode writes no transcript and reserves nothing for
   it.
-- *(file I/O, draft)* **File-based I/O** (§5.6): at a solution run's
+- **File-based I/O** (§5.6): at a solution run's
   admission, together with its stream reservations, the job reserves the
   exact size of the frozen input when `io.input` is declared (the staged
   copy) and the run's stdout budget when `io.output` is declared (the
@@ -900,7 +895,7 @@ contract §6, not a reservation ceiling):
   disk become retained, the rest is returned. A stalled writer keeps its full
   stream reservation until it returns (a directory lease alone does not
   preserve headroom).
-- *(stress, draft)* **Release after removal.** For an iteration run (§1)
+- **Release after removal.** For an iteration run (§1)
   the conversion above still happens at resources released. When the
   stress job then removes the iteration's scratch (stress contract §6.3
   R10) and the no-follow walker (storage contract §2) confirms the whole
@@ -916,7 +911,7 @@ contract §6, not a reservation ceiling):
   artifacts, job reports) are governed by the storage contract; storage MUST
   reserve them through the same interface before creating them.
 - Files a program writes itself are outside any quota guarantee.
-  *(file I/O, draft)* The collected output file is no exception to this:
+  The collected output file is no exception to this:
   its bound (§5.6) limits what cpf reads and retains, not what the program
   writes to disk.
 
@@ -928,26 +923,26 @@ contract §6, not a reservation ceiling):
 | Run stderr | 1 MiB, `Discard` |
 | Build / command / hook stdout and stderr | 1 MiB each, `Discard` |
 | Raw `cpf run` | 64 MiB per stream, `Kill` (stdout), `Discard` (stderr) |
-| Wall deadline when none configured | build 60 s, run 10 s, command 60 s, hook 30 s; *(submission, draft)* submit 60 s |
-| *(submission, draft)* Submit stage stdout and stderr | 1 MiB each, `Discard` (as a build) |
-| *(submission, draft)* Version probe | stdout 64 KiB `Kill`, stderr 64 KiB `Discard`, wall deadline 10 s (*fixed*) |
+| Wall deadline when none configured | build 60 s, run 10 s, command 60 s, hook 30 s; submit 60 s |
+| Submit stage stdout and stderr | 1 MiB each, `Discard` (as a build) |
+| Version probe | stdout 64 KiB `Kill`, stderr 64 KiB `Discard`, wall deadline 10 s (*fixed*) |
 | Deadline grace (§6.3) | 50 ms (*fixed*) |
 | Reap deadline, from kill request (or from root exit observed when no kill preceded it, i.e. the post-exit containment kill) | 2 s (*fixed*) |
 | Cleanup verification deadline, from root exit observed | 1 s (*fixed*) |
 | Drain deadline, from drain milestone | 500 ms (*fixed*) |
 | Sink finalisation deadline, from drain milestone | 5 s (*fixed*) |
-| *(stress, draft)* Retirement deadline, from the last record of an iteration finalized: every run of the iteration at resources released (stress contract §6.3 R6) | 5 s (*fixed*) |
+| Retirement deadline, from the last record of an iteration finalized: every run of the iteration at resources released (stress contract §6.3 R6) | 5 s (*fixed*) |
 | Persistence deadline, from the enqueue call (records: from record finalized; §6.2) | 5 s (*fixed*) |
 | Persistence queue credits Q (§6.2) | 2 MiB; charge 8 KiB + encoded length (record: 64 KiB bound) (*fixed*) |
 | Persistence credit wait limit, from the enqueue call | 1 s (*fixed*) |
-| Persistence credit budget B per job | 10 s + 4 ms × 3 × planned executions (*fixed* formula); *(stress, draft)* a stress job counts 6 + 8 × 21 = 174 executions |
+| Persistence credit budget B per job | 10 s + 4 ms × 3 × planned executions (*fixed* formula); a stress job counts 6 + 8 × 21 = 174 executions |
 | Human stderr final-drain deadline, from the final-batch enqueue instant t_q (not from delivery; rendering and lock acquisition before t_q are not covered); absolute, covers every write call, partial write and retry (report contract §8) | 5 s (*fixed*) |
 | Console flush deadline (raw mode), from drain milestone | 2 s (*fixed*) |
 | Raw final-diagnostic wait (raw mode), from the enqueue instant of the summary line; separate from the console flush deadline (report contract §8) | 2 s (*fixed*) |
 | Event transport | 8 MiB total incl. backing buffers and terminal slot; `OutputChunk` ≤ 4 KiB (§9) |
 | Retained tool data | 1 GiB per job, 4 GiB per workspace `runs/` (storage contract enforces) |
 
-### 5.6 File-based I/O *(file I/O, draft)*
+### 5.6 File-based I/O
 
 A batch problem may declare `io = { input?, output? }` (configuration
 contract §6.2). The rules below apply to the **solution run of each test
@@ -1252,7 +1247,7 @@ pub struct RunRecord {
     pub execution: Execution,
     pub stdout: StreamCapture,
     pub stderr: StreamCapture,
-    pub output_file: Option<OutputFileCapture>, // (file I/O, draft) §5.6 outcome; None without io.output
+    pub output_file: Option<OutputFileCapture>, // §5.6 outcome; None without io.output
     pub measurements: Vec<Measurement>,
     pub limits: Vec<InstalledLimit>,         // §7.2
     pub supervisor_errors: Vec<SupervisorError>, // ≤ 16, deduplicated: Register, Wait, PipeRead, Kill,
@@ -1349,7 +1344,7 @@ empty captures.
   warning, never the execution's evidence, result or course. The job's
   total credit waiting is ≤ B; with a stalled thread it is ≤ 1 s, because
   the first limit expiry makes the queue nonblocking.
-- *(stress, draft)* **Iteration runs** (§1) are an exception to "specs are
+- **Iteration runs** (§1) are an exception to "specs are
   enqueued at admission": an iteration run's spec is encoded and its size
   checked at admission (§2), and held in memory with the live iteration.
   At the iteration's retirement (stress contract §6.3), a **saved** or
@@ -1463,9 +1458,9 @@ grace** on one monotonic clock on every OS.
 
 Precedence (supersedes the list in design §6.3):
 
-`infrastructure` > `cancelled` > `wall deadline` > *(judging, draft)*
+`infrastructure` > `cancelled` > `wall deadline` >
 `session limit` > `idle` > `output budget` > `signal` > `nonzero exit` >
-`checker failure` > `wrong answer` > *(judging, draft)* `presentation
+`checker failure` > `wrong answer` > `presentation
 error` > `unchecked` > `pass`, where a judged or interactive test is
 derived by report contract §§2.11–2.12 and a job by §2.7 (a scored job
 after every other row).
@@ -1482,7 +1477,7 @@ after every other row).
   verified".
 - A pass requires `Exited{0}`, no violation, stdout complete, no supervisor
   error, cleanup `Confirmed` or `Unverified`, and a comparison that ran and
-  matched. *(file I/O, draft)* With `io.output` (§5.6) "stdout complete"
+  matched. With `io.output` (§5.6) "stdout complete"
   is replaced by "no stdout infrastructure loss and the output file
   `Collected`", and the comparison runs over the collected file.
 - Comparison after an unsuccessful execution is diagnostic only.
@@ -1627,7 +1622,7 @@ pub enum Event {
 }
 ```
 
-- *(stress, draft)* A stress job's iteration runs emit
+- A stress job's iteration runs emit
   `IterationRunStarted { seq, run: IterationRunId, stage, digest }` and
   `IterationRunFinished { seq, run: IterationRunId, summary }` instead of
   `RunStarted` / `RunFinished`, and the job emits `IterationStarted { seq,
@@ -1689,7 +1684,7 @@ This section fixes the constraints that the process supervisor must respect.
 - Nothing in §§3–6 assumes a run's stdin is a file or that its stdout ends in
   a sink owned by that run alone.
 
-*(judging, draft)* **Resolved by checkers design §5** (as implemented by
+**Resolved by checkers design §5** (as implemented by
 the session supervisor, runtime decision record §2.5); these replace the
 provisional items of earlier versions:
 
@@ -1816,11 +1811,11 @@ contract §9.2); budget breach plus an independent write error
 compatible outer job and inside one forbidding nesting; address-space limit
 with a lower inherited hard limit; `Connected` variants and `deadline_group`
 rejected outside a session; real Ctrl-C and second Ctrl-C (after CLI integration).
-*(stress, draft)* The iteration lifecycle cases (one live iteration,
+The iteration lifecycle cases (one live iteration,
 retirement deadline, release after removal, per-iteration settlement,
 cancellation between and during iterations, plateau ceilings) are stress
 contract §10.1.
-*(file I/O, draft)* Every §5.6 outcome with a real program on Linux and
+Every §5.6 outcome with a real program on Linux and
 macOS (report contract §9.8), a program that renames `cwd/` and creates a
 new `cwd/` holding a different output file before exiting (collection and
 scratch removal use the directory the program was started in, through the

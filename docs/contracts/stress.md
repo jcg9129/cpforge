@@ -1,6 +1,6 @@
 # Stress contract
 
-Status: draft. Normative for `cpf stress` (search, `--replay`,
+Status: v1. Normative for `cpf stress` (search, `--replay`,
 `--replay-binaries`), `cpf stress ls`, `cpf test add --from-stress`, the job
 engine's iteration lifecycle and saved failures. It is the stress amendment
 of the other contracts: the configuration table `[stress]` (configuration
@@ -8,7 +8,6 @@ contract §9.2), the iteration lifecycle rules of the execution contract
 (§§1, 2, 3.3, 5.4, 6.2, 9), the stress report, events, exit rows and human
 lines (report contract §§2.14, 3.7, 4.14, 4.15, 5, 7.3, 8, 9.7) and the
 saved-failure tree (storage contract §§3, 5.3, 5.5, 5.6, 6.1, 9, 10).
-Amended content in those documents is marked *(stress, draft)*.
 
 References labelled *E*, *S*, *C* and *report contract* point to
 `execution.md`, `storage.md`, `config.md` and `report.md`; *design* to
@@ -128,8 +127,7 @@ nothing. `--json` writes the document `stress_failures` (report contract
 ### 2.4 `cpf test add --from-stress <id>`
 
 Registers a saved failure's input as a test of the selected problem,
-by the S §5.3 `test add` transaction as amended (S §5.3 *(stress,
-draft)*): the input, and the answer iff the failure records one
+by the S §5.3 `test add` transaction as amended (S §5.3): the input, and the answer iff the failure records one
 (`answer` key of §7.3, present only when the brute answer rule held,
 §3.5), are read from the failure directory before the lock, verified
 against `failure.toml` while being captured, and published as
@@ -443,13 +441,13 @@ stated; none waits for an unbounded event.
 | R2 | derive the class, deciding role and reason (§4), under the verdict lock | no I/O |
 | R3 | **fold** into the aggregates (report contract §4.14): the class counter; first iteration and seed of the class; the first 16 diagnostics of the class (§9); per-role timing (count, min, max, total wall); for one of the first 20 failing iterations its failure ref (its `saved` outcome completed at R7, its record refs at R8); runs started; captured bytes (stored stdout and stderr of every run) | no I/O |
 | R4 | choose the **disposition**. In a replay job every class is `keep` (its one iteration is its evidence; no other disposition applies). In a search job: `save` (a failing class while fewer than 20 earlier iterations of the job had a failing class, §7.4: the save attempts are exactly the first 20 failing iterations, the same population as the report's failure refs, whatever their staging outcome); `count` (a failing class otherwise); `keep` (`infrastructure` or `cancelled`: the job stops, and the iteration stays in the job directory as evidence); `discard` (`passed`) | no I/O |
-| R5 | `save`, `keep`: enqueue, per run of the iteration, its spec, its record and its first `cleanup.log` (E §6.2, ≤ 24 artefacts, through the queue credits), each with its publication deadline measured from **this** enqueue call (E §6.2 *(stress, draft)*), never from its record's finalization; each run's metadata reservation passes to its artefacts. `discard`, `count`: nothing is enqueued and each run's metadata reservation is released unused | E §6.2 credit wait (≤ 1 s per artefact) |
+| R5 | `save`, `keep`: enqueue, per run of the iteration, its spec, its record and its first `cleanup.log` (E §6.2, ≤ 24 artefacts, through the queue credits), each with its publication deadline measured from **this** enqueue call (E §6.2), never from its record's finalization; each run's metadata reservation passes to its artefacts. `discard`, `count`: nothing is enqueued and each run's metadata reservation is released unused | E §6.2 credit wait (≤ 1 s per artefact) |
 | R6 | wait until every run of the iteration (a transferred one included) has reached **resources released** (E §1 milestone 4; the metadata reservation is settled by R5, §6.2) | the **retirement deadline**, 5 s (*fixed*) after R1; past it §6.4 applies, with the unreleased runs' directories as leftovers |
 | R7 | `save`: stage and promote the saved failure (§7.5) | the workspace lock bound (S §4.5, 10 s) plus bounded file work |
 | R8 | **settle** the artefacts of R5: wait until each has a result, published or `PersistError` (E §6.2) | the last accepted enqueue call + 5 s |
 | R9 | **evict**: drop the iteration's records, encoded specs, summaries, session records and pending persistence results. What remains is R3's aggregates and, for an iteration among the first 20 failing ones, its failure ref with the persisted paths of R8 | no I/O |
 | R10 | **remove scratch** with the no-follow walker (S §2): `discard`, `count`: every directory `iterations/<k>.<role>/` of the iteration, completely; `save`: everything in those directories except `spec.json`, `record.json`, `cleanup.log` (the moved files are already in the failure, §7.5); `keep`: nothing | bounded by the file count of one iteration |
-| R11 | **release**: once the removal of R10 is confirmed complete, release the retained bytes the job committed for the removed files (E §5.4 *(stress, draft)*); the iteration is retired: `iteration_finished` is offered (report contract §7.3) and a progress line (report contract §8) | no I/O |
+| R11 | **release**: once the removal of R10 is confirmed complete, release the retained bytes the job committed for the removed files (E §5.4); the iteration is retired: `iteration_finished` is offered (report contract §7.3) and a progress line (report contract §8) | no I/O |
 
 - **Debug counters** (feature `storage-test-hooks`): live iterations,
   in-memory run records and encoded specs, pending persistence cells,
@@ -727,7 +725,7 @@ so pruning cannot remove a staged failure before its promotion or report.
 One attempt per failure; no retry. A crash before the commit leaves the
 staged directory in the (now inactive) job directory, pruned with it, and
 nothing under `problems/`; after the commit the published directory is
-complete (S §10 *(stress, draft)* rows). Once published, cpf never
+complete (S §10 rows). Once published, cpf never
 modifies, renames or deletes a saved failure; the user may.
 
 ### 7.6 Readers (untrusted input)
@@ -961,7 +959,7 @@ Each kill asserts the recovered content, not only the status.
 
 ## 11. Amendments to other documents
 
-Applied with this contract, each marked *(stress, draft)* in place:
+Applied with this contract, in place:
 
 - **E** §1 (iteration, iteration run), §2 (stages `Generator`, `Brute`),
   §3.3 (one live iteration), §5.4 (release after confirmed removal), §5.5

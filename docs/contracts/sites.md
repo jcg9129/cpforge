@@ -1,6 +1,6 @@
 # Sites and HTTP contract
 
-Status: v1, draft. Normative for the `http` and `sites` modules and the
+Status: v1. Normative for the `http` and `sites` modules and the
 site-fixture CI job. It covers the HTTP client and its configuration, the
 request dispatcher, the cross-process request permit and cooldown, the
 response cache, the canonical sample bytes, the AtCoder and CSES adapters,
@@ -1250,8 +1250,8 @@ exactly 1 request. The problem-level and selection-level assertions of
 
 - Exit: every class of §8.3 → failure class `site`, exit 12 (report
   §5.1, §5.2, `../commands.md`); cancellation → report §5.3.
-- **`fetch` document** (schema 1, draft, completed with the report and commands amendments): `schema`,
-  `kind = "fetch"`, `selection` (`kind`, `identity`, `url`, member count),
+- **`fetch` document** (schema 1, report §6.1, which types it): `schema`,
+  `document = "fetch"`, `selection` (`kind`, `identity`, `url`, member count),
   `problems[]` (`identity`, storage status `outcome`, `failure` with
   `class`, `reason`, `http_status`, `retry_at` when present, `provenance`
   of §8.1, `warnings`, the storage findings, `txn`), `network`

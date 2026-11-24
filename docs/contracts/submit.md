@@ -1,6 +1,6 @@
 # Submission contract
 
-Status: draft. Normative for `cpf submit-prep`: the source-copy mode, the
+Status: v1. Normative for `cpf submit-prep`: the source-copy mode, the
 generic `submit` stage with its optional version probe, the artifact test
 in a directory outside the workspace, the submission versions under
 `.cpforge/submit/`, their `current` reference, staleness in `cpf status`,
@@ -9,8 +9,7 @@ implements design §6.7 with the narrowings of §1.2. References labelled
 *S*, *E*, *C* and *R* point to `storage.md`, `execution.md`, `config.md`
 and `report.md`; *sites* to `sites.md`; *workspace design* to
 `../design-workspace.md`; *checkers design* to `../design-checkers.md`.
-Text this contract adds to those documents is marked *(submission, draft)*
-there; §15 lists it.
+§15 lists the text this contract adds to those documents.
 
 MUST / MUST NOT / never are requirements.
 
@@ -127,7 +126,7 @@ The stage fields of C §4.1 (`argv` or `shell`, `cwd`, `env`, `env_remove`,
   `shell` (else "submit stage has no command"). A table that is
   overlay-only and inactive on the platform is absent (C §2).
 - Defaults when unset: `deadline_s` 60 s; stdout and stderr caps as for a
-  build (E §5.5 *(submission, draft)*).
+  build (E §5.5).
 - The problem layer has no `config.submit`: a submission tool is a
   language setting (design §6.7). `config.submit` is a phase-1 unknown key.
 
@@ -158,7 +157,7 @@ The stage fields of C §4.1 (`argv` or `shell`, `cwd`, `env`, `env_remove`,
 
 ### 3.4 Placeholders of the submit stage
 
-The C §5.2 table gains these rows *(submission, draft)*:
+The C §5.2 table gains these rows:
 
 | Placeholder | Kind | Available when |
 |---|---|---|
@@ -318,7 +317,7 @@ The lock is held from step 0 to step 6 only; no step starts a process.
 
 ### 6.1 Job
 
-A job of kind `submit` (R §1 *(submission, draft)*), with the ordinary
+A job of kind `submit` (R §1), with the ordinary
 admission, freeze and capture of S §§6.2, 7: tests are frozen (unless the
 artifact test is not planned), the captured files are copied into
 `inputs/src/`. Its report is a `job_report` with `command: "submit_prep"`
@@ -351,7 +350,7 @@ checked at §4.3 step 4.
 
 - The probe runs first; no other execution is admitted before its outcome
   is known. Mismatch or failure: every later planned execution is
-  `skipped{submit_not_succeeded}` (R §2.1 *(submission, draft)*; after
+  `skipped{submit_not_succeeded}` (R §2.1; after
   cancellation intent `skipped{cancelled}` takes priority, R §2.1 order); no
   external test directory is created.
 - The submit stage runs with its fresh `cwd/` (the default; a configured
@@ -429,13 +428,13 @@ known):
 
 ### 6.7 Verdict, publication, exit
 
-- `primary_verdict` (R §2.7 *(submission, draft)*): rows 1–3 as for every
+- `primary_verdict` (R §2.7): rows 1–3 as for every
   job; then `submit_version_mismatch` (the probe mismatched); then
   `submit_failed` (probe or submit stage failed, or `artifact_invalid`);
   then the `test`-job rows (`build_failed` for the artifact build or a
   role build, …, `no_tests`, `scored`, `passed`). A plan without the
   artifact test that reached a selected artifact is `succeeded`.
-- **Publication** happens at phase A (R §2.9 *(submission, draft)*), in
+- **Publication** happens at phase A (R §2.9), in
   place of fact publication. **Eligible** iff `primary_verdict` is
   `passed`, `scored` with a full aggregate, or `succeeded`; otherwise
   `not_attempted{not_eligible}`. `no_tests` and `unchecked` are not
@@ -456,13 +455,13 @@ known):
   before admission (exit 8, nothing run); phase A repeats it because the
   record can change meanwhile.
   Intent set after the cutoff never prevents or undoes the publication.
-- Outcomes (§9.2 `publication`) and their exit effect (R §5.2
-  *(submission, draft)*): `published{current: true}` none;
+- Outcomes (§9.2 `publication`) and their exit effect (R §5.2):
+  `published{current: true}` none;
   `published{current: false}` (step 6 not committed) → failure class
   `partial`, 9; `not_published` (step 5 not committed, lock `Busy`, I/O) →
   class `workspace`, 8; `not_attempted` none (the verdict decides).
 - Exit statuses of `cpf submit-prep` in stage mode: 0, 1, 3, 4, 5, 7, 8,
-  9, 10, 11, cancellation (R §5.5 *(submission, draft)*).
+  9, 10, 11, cancellation (R §5.5).
 
 ## 7. External test directory
 
@@ -532,7 +531,7 @@ The workspace is never renamed or hidden for the test (that would hide
 cpf's own job infrastructure, S §7); recovery of `D` goes through its
 owning job directory:
 
-- **Pruning** (S §6.3 step 3 *(submission, draft)*): before the no-follow
+- **Pruning** (S §6.3 step 3): before the no-follow
   deletion of `.reclaim-<job>`, if `submit/external.toml` exists in it,
   classify it (S §9):
   - `valid`: let `D = base/name`. Every component of `base` and `D` is
@@ -648,7 +647,7 @@ native, Windows without the verbatim prefix (S §2).
 
 ### 9.2 Machine output
 
-Common type `Submission` *(submission, draft)*:
+Common type `Submission`:
 
 | Member | Type | Meaning |
 |---|---|---|
@@ -670,8 +669,8 @@ Common type `Submission` *(submission, draft)*:
 | `external_dir` | object? | `{path: nsum(1024), state: token}` (`removed`, `leftover`); `null` when no `D` was created |
 
 Serialized bound 16 942 B ≤ **17 KiB** (17 408 B; the 16 file entries
-of 521 B dominate); the final schema reconciliation adds it to the report header
-and re-derives the reservation.
+of 521 B dominate); report §3.7 adds it to the header bound of a `submit`
+job and to the `submit` document.
 
 - **Source copy**, `--json`: the document `{"schema":1,"document":
   "submit","platform":…,"problem":pident,"submission":Submission,
@@ -750,7 +749,7 @@ Informative; cpf never requests it.
 ## 10. Staleness and `cpf status`
 
 For each listed problem, `status` reads `current` and its manifest and
-reports *(submission, draft)*:
+reports:
 
 | State | Condition |
 |---|---|
@@ -769,7 +768,7 @@ reports *(submission, draft)*:
 - Human output: `submission: <vid> (<mode>, tested|untested), current` or
   `… stale (main.cpp changed)`.
 - The status document's `Problem` gains `submit: {state: token, id:
-  string?, mode: token?, tested: bool?}` (R §6.1 *(submission, draft)*).
+  string?, mode: token?, tested: bool?}` (R §6.1).
 
 ## 11. Maintenance
 
@@ -811,7 +810,7 @@ removal is `clean`'s.
 ### 11.3 Leftover recovery, schema, gitignore, archive
 
 - Each `.cpforge/submit/<p>/` is a **metadata recovery location** (S
-  §4.5 *(submission, draft)*): `.cpf-tmp-` leftovers of a `current`
+  §4.5): `.cpf-tmp-` leftovers of a `current`
   replace are removed there. Staging leftovers are in `.cpforge/staging/`
   (removed by recovery as every staging entry). `.reclaim-<vid>` entries
   are deleted by recovery too.
@@ -1012,7 +1011,7 @@ seam: the same job plan, the same `D` lifecycle, the same checker.
 | SB-K4 | two solution files, `--copy` | `skipped{no_primary}`; 5 MiB primary → `skipped{too_large}` |
 | SB-K5 | `--copy` without a committed version (exit 8 path) | no helper started (spawn counter 0) |
 
-### 14.8 Wire (after the final schema reconciliation)
+### 14.8 Wire
 
 | Id | Case | Expected |
 |---|---|---|
@@ -1022,7 +1021,7 @@ seam: the same job plan, the same `D` lifecycle, the same checker.
 
 ## 15. Amendments to other documents
 
-Applied with this contract, marked *(submission, draft)*:
+Applied with this contract:
 
 - **C §1.1** rows `languages.<l>.submit`, `submit.clipboard`,
   `submit.test_dir`; the language table gains `submit`; the sentence
