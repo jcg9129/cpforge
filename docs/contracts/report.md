@@ -1438,14 +1438,14 @@ occurrence order, and count every omitted ordinary warning in
 | `recovery` | `paths: u32`, `first: nsum(128)?` | S §4.5 |
 | `persist` | `artefact: token` (`spec`, `record`, `cleanup_log`), `run: rid` (*(stress, draft)* or an `irid` for an iteration run, §3.2; the grammars are disjoint, so the warning bound still holds at 756 B), `error: PersistError` | E §6.2, final at W |
 | `durability` | `artefact: token`, `detail: token` (`uncertain`, `cleanup_pending`); *(stress, draft)* artefact `stress_failure` for a promoted saved failure | S §4.1 |
-| `retention` | `detail: token` (`cwd_overflow`, `workspace_over_target`), `run: rid?`, `bytes: u64` | S §6.4 |
+| `retention` | `detail: token` (`cwd_overflow`, `workspace_over_target`), `run: rid?` (*(stress, draft)* or an `irid`), `bytes: u64` | S §6.4 |
 | `cleanup_unverified` | `runs: u32` | E §4.4 |
 | `fact` | `outcome` (§4.9 fact outcome) | S §6.5 |
 | `hook` | `name: ident`, `outcome` (§4.9 hook outcome) | C §8.3 |
 | `hooks_disabled` | `reason: token` | C §8.3 |
 | `late_cancellation` | `phase: token` | §2.9 |
 | `progress_dropped` | `lines: u32` | §8, final at E |
-| `judge_scratch` | *(judging, draft)* `run: rid`, `detail: token` (`staged_copy_kept`, `transcript_kept`) | E §2.1 judge scratch |
+| `judge_scratch` | *(judging, draft)* `run: rid` (*(stress, draft)* or an `irid`), `detail: token` (`staged_copy_kept`, `transcript_kept`) | E §2.1 judge scratch |
 | `testlib_header` | *(judging, draft)* `role: token`, `detail: token` (`not_identified`, `not_pinned`, `declared`) | §4.4 `provenance` |
 
 ### 4.11 `persistence`
@@ -1497,7 +1497,7 @@ cumulative over the job.
 | `mode` | `token` | `search`, `replay`, `replay_binaries` |
 | `shape` | `token` | `batch`, `interactive` |
 | `seeds` | object | `{start: u64, last: u64?}`: the start seed (§2.1 of the stress contract; drawn or given) and the generator seed of the last admitted iteration (`null` when none) |
-| `budget` | object | `{iterations: u64, time_us: dur}` as effective (CLI over `[stress]`) |
+| `budget` | object? | `{iterations: u64, time_us: dur}` as effective (CLI over `[stress]`); `null` for a replay job (stress contract §8) |
 | `stop` | object | `{reason: token, iteration: u64?}`: stress contract §5 stop reasons `cancelled`, `build_failed`, `failure`, `infrastructure`, `admission_closed`, `cleanup_failed`, `iterations`, `time_budget`, `counter_limit`, `replay`; `iteration` the k whose admission check decided it (`null` for `build_failed`) |
 | `iterations` | object | `{admitted: u64, retired: u64, saved: u32, promoted: u32, not_saved: u64}`; `saved` counts failures staged with disposition `save`, `promoted` those published, `not_saved` failing iterations counted only (cap) or whose staging failed |
 | `runs` | `u64` | iteration runs started (coverage `started`) |
@@ -1893,7 +1893,7 @@ Each job event envelope starts with `"event"` (token) and `"seq"` (`u64`):
 |---|---|
 | `job_started` | `job: jid, kind: token, sequence: {epoch, n}` |
 | `run_started` | `run: rid, execution: u32, stage: token, role: Role, digest: hex64` |
-| `output_chunk` | `run: rid, stream: token, bytes: bytes` (≤ 4096 raw bytes; `=output` only) |
+| `output_chunk` | `run: rid, stream: token, bytes: bytes` (≤ 4096 raw bytes; `=output` only); *(stress, draft)* `run` is an `irid` for an iteration run (5 656 B at most, within the event-line bound) |
 | `run_finished` | `run: rid, summary: RunSummary` |
 | `progress` | `done: u32, total: u32` |
 | `job_finished` | `job: jid, verdict: token, report: {path: rel}?, dropped: u64` |
@@ -2617,6 +2617,7 @@ row allows it. Ids cite the design's normative statements one by one.
 | R-S06 | `stress_failures` entry at its maximum; 10 001 entries | ≤ 1.5 KiB; 10 000 listed, `entries_dropped` 1 |
 | R-S07 | stalled-then-resumed stress case (portable, injected engine; §9.3): 10 000 iterations, `--keep-going`, 3 failing iterations, `stderr.write` blocked from the first iteration and released 1 s after t_q | stderr holds, in order, the start-up diagnostics, the stress result lines (each present exactly once, in the §8 order), the warnings with `progress_dropped.lines` > 0, the summary last; peak queued result bytes within the final allowance; Linux and macOS repeat it with real fixture programs |
 | R-S08 | `--events` on a stress job of 10 005 iterations with the consumer stalled, then released | `job_finished.seq` equals the number of earlier attempts; the gap equation holds; `iteration_run_*` events carry `irid`, none carries `rid` |
+| R-S09 | `--events=output` on a stress job past iteration 10 000; a `cwd_overflow` and a `judge_scratch` warning from iteration 10 003 | `output_chunk.run` = `"10003.candidate"` etc.; the warnings' `run` is that `irid`; each within its bound (event line ≤ 7 KiB, warning ≤ 768 B) |
 
 ## 10. Amendments to other documents
 

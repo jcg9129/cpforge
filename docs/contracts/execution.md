@@ -467,10 +467,14 @@ diagnose an absent `record.json`.
   retirement waits for every run of the iteration to reach resources
   released, up to the retirement deadline (§5.5); past it the job admits
   nothing more (stress contract §6.4). Each iteration run reserves its slot
-  and credits by the rules above, so at most 2 are admitted at once (a
-  session pair), and a run transferred to the cleanup service keeps its
-  slot as above, so a leaking stress job is stopped by the 4-slot bound
-  (`NotStarted{CleanupCapacity}`), never by memory growth.
+  and credits by the rules above. At most 2 iteration runs execute at once
+  (a session pair: each run is created only after the previous record is
+  final), but every run of the live iteration may hold its slot until
+  resources released, so the 4-slot bound caps the holders and a refusal
+  (`NotStarted{CleanupCapacity}`) stops the job, never memory growth. An
+  iteration run's metadata reservation (§5.4) is owned by the live
+  iteration until retirement hands it to persistence or releases it unused
+  (stress contract §6.2).
 
 ### 3.4 Creation
 
@@ -1000,7 +1004,10 @@ empty captures.
   At the iteration's retirement (stress contract §6.3), a **saved** or
   **kept** iteration enqueues, for each of its runs, the spec, the record
   and the first `cleanup.log` (≤ 24 artefacts); a passing or counted-only
-  iteration enqueues nothing. The iteration's artefacts **settle** (each
+  iteration enqueues nothing. Each such artefact's publication deadline is
+  its own enqueue **call** at retirement + 5 s, records included (the
+  `t_rec + 5 s` rule applies to records enqueued at finalization only).
+  The iteration's artefacts **settle** (each
   has a result, by the rules below) before the next iteration is admitted,
   so at most one iteration's artefacts are ever queued. All other rules
   of this section apply unchanged (charges, waits, B, deadlines,
