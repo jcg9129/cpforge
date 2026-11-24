@@ -3274,8 +3274,9 @@ contest fetch completes its membership.
   byte-identical, no `problems/q`, no `.cpf-tmp-` file. At
   `9999-12-30T22:00:00.999Z`, and separately at
   `1970-01-01T00:00:00.000Z`, each command on its own fresh fixture
-  commits and writes exactly that value (`updated_at`; also `solved_at`
-  for `mark`, `created_at` for `add`).
+  commits and writes exactly that value: `updated_at` for `tag`, `untag`
+  and `mark`, also `solved_at` for `mark`, and `created_at` (not
+  `updated_at`) for `add`.
 - `SG-59` **Creation dates:** `cpf add two-sum` → `[problem] created_at` equals the
   clock in the published record; at each existing `add` crash point the
   published problem, when present, has it; `cpf add --contest c two-sum`
