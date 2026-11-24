@@ -1,8 +1,13 @@
 # Checkers and interactors (design)
 
-Status: **v7.1, frozen** (dialogue-cap amendment §5.5). Covers custom
-checkers per problem, adaptive/adversarial interactors and two programs
-communicating. Supersedes design §6.4.
+Status: **v7.2, frozen** (dialogue-cap amendment §5.5; v7.2 ratifies the
+judging, stress and file-based I/O contracts: candidate header provenance
+§2.1, answer states §3, judge-extraction failures §6.1 rule 5.4, stress
+save rules §8, scope §§9, 11, 12). Covers custom checkers per problem,
+adaptive/adversarial interactors and two programs communicating.
+Supersedes design §6.4. Exact rules are in the configuration contract
+§9.1, the execution contract §2.1, the report contract §§2.11–2.13 and the
+stress contract.
 
 Feature scope: checkers and interactive judging follow the CLI foundation;
 the connected-run mechanics (§5) belong to the supervisor and record events
@@ -62,9 +67,14 @@ interactor <input> <tout>   <answer> <report> -appes
   interactor without them does not exist in cpf. `<report>` is a
   fresh path in the run's private directory (storage contract).
 - **Tested header:** the profile is pinned to one `testlib.h` version,
-  recorded in `docs/testlib-profile.md` by the initial feature release task and exercised in
-  CI. A checker cpf builds records the hashes of its source and of the header
-  it compiled against, the compiler and flags; a prebuilt checker is
+  recorded in `docs/testlib-profile.md` and exercised in CI against a copy
+  vendored for CI only (pinned by commit and hash, never shipped). Users
+  compile against their own header. A checker cpf builds records the hashes
+  of its source and of a **candidate** header: the single captured
+  `testlib.h` beside every source, which a quoted include would resolve to
+  first. The candidate is not proof of the header compiled, since cpf does
+  not observe a compiler's file accesses; without one the reason is
+  recorded. It also records the compiler and flags; a prebuilt checker is
   `provenance = "declared"`.
 - **Observable outcome matrix**. cpf sees only the exit code and the
   report; it never infers which source call produced them. Rows are
@@ -135,13 +145,19 @@ declared assets are copied in. This is wiring, not isolation.
 
 ## 3. Answers
 
-- `answer = "file"` (default): a missing `.ans` for an enabled test is a
-  configuration error before anything runs.
-- `answer = "none"`: an explicit author assertion that the selected checker
-  accepts an empty answer; cpf passes an empty file. Rejected for the
-  built-in comparators.
-- Absent, deliberately none and legitimately empty are three states in
-  `tests.toml`.
+- Absent by accident, deliberately none and legitimately empty are three
+  different states, and `tests.toml` already tells them apart without a new
+  key: an `answer` naming a missing file is an unhealthy catalog entry that
+  refuses the job; an omitted `answer` is deliberately none; an `answer`
+  naming a zero-byte file is legitimately empty (C §9.1.4).
+- `answer = "file"` (default): with a checker or interactor, a selected
+  test whose answer is deliberately none is a configuration error before
+  anything runs. With the built-in comparators such a test stays
+  `unchecked`, because a comparator cannot run without an answer while a
+  checker could misjudge a fabricated one.
+- `answer = "none"`: an explicit author assertion that the problem's judges
+  accept an empty answer; cpf passes an empty file for a test without one.
+  Rejected for the built-in comparators.
 
 ## 4. Scores
 
@@ -375,7 +391,14 @@ judge's validated exit 3 / `fail` is `Failed(DeclaredFail)`.
       including `Failed(DeclaredFail)` for a valid testlib `fail`.
       An `Ok` I result outside its authority row (§6.3) is
       `Failed(ProtocolUnsupported)`; the row check applies to `Ok` results
-      only, never to `DeclaredFail`.
+      only, never to `DeclaredFail`. If reading or extracting the judge's
+      report or `tout` fails on cpf's side (a reservation refusal or an I/O
+      error on an artefact that passed the presence, type and size checks;
+      E §2.1), the outcome is `NotRead` and an `Infrastructure` fact with
+      detail kind `judge_extraction` is recorded in the same wakeup
+      (item 8), or, when the record already has its one `Infrastructure`
+      fact, that fact's `suppressed` count is incremented. The failure is
+      cpf's, not the judge's, so it never becomes a checker verdict.
 6. **Checker start decision.** Taken once, after S and I both have
    `CleanupResult` and I has `ValidationDone`. Eligible iff the record so
    far has no `Infrastructure`, no decisive fact (§6.2 table), no
@@ -472,7 +495,12 @@ role's `StopRequested`; a `NotStarted{_, CancelledBeforeStart}` has a
 `CancelRequested` before it; **decisive facts have pairwise distinct
 `decision_pos`** (rule 5.1 makes a judge's crash and its `ValidationDone`
 exclusive, and every other decisive fact has its own `obs_seq`), so no tie
-order between decisive facts is needed; the §6.1 bound.
+order between decisive facts is needed; the §6.1 bound. A
+`ValidationDone{_, NotRead}` after a `Confirmed` cleanup of a naturally
+exited judge is valid iff the record has an `Infrastructure` fact at or
+before that `ValidationDone`'s wakeup (rule 5.4 extraction failure). Items 1
+and 6 are unchanged: only a planned follow-up checker that never started
+gets `CheckerSkipped` (`Cancelled` before `NotEligible`).
 
 0. **Validate.** Any invariant violated → `internal_policy_error` (reported
    with the record; never success).
@@ -603,7 +631,9 @@ changes the stored result.
 
 ## 7. Seeds, reruns and adaptive interactors
 
-- **Seeds**: separate seeds per role, all recorded.
+- **Seeds**: separate seeds per role, drawn per session from the OS random
+  source (a seeded rerun supplies the recorded ones instead), all recorded
+  as decimal `u64` (C §9.1.6).
   - Generator: **always** `gen <seed>` as argv; this is the stress contract
     (design §6.5), not opt-in.
   - Interactor and solution: opt-in by environment, `CPF_SEED_INTERACTOR`,
@@ -645,12 +675,17 @@ changes the stored result.
      `session_limit`, `idle`, or a score below the declared threshold;
   7. *pass*: otherwise.
   Every terminal verdict maps to exactly one class. Only candidate failures
-  are reported as bugs in the solution; every class is saved with all seeds
-  (design §6.5).
+  are reported as bugs in the solution. Classes 3–6 are failing iterations,
+  saved with all seeds under the caps of design §6.5 (the stress contract
+  splits class 3 into generator and validator failures); an
+  infrastructure or cancelled iteration is never saved and stops the job.
+- Interactive stress needs `answer = "none"` (a generator writes no
+  answer) and a reference solution.
 - Query-count and similar metrics are deferred until a typed metric schema
   exists.
-- Shrinking reruns with smaller generator parameters; transcript bytes are
-  never deleted to minimise.
+- Shrinking is deferred and refused when requested. When it comes, it reruns
+  with smaller generator parameters; transcript bytes are never deleted to
+  minimise.
 
 ## 9. Capability matrix
 
@@ -660,7 +695,7 @@ changes the stored result.
 | Batch, scored | ✓ (`sum`, `min`) | subtasks | |
 | Interactive, one session per test | ✓ | | |
 | Interactive, scored | ✓ (§6.3) | | |
-| File-based I/O, batch S (declared names in the private dir) | ✓ | | |
+| File-based I/O, batch S (declared names in the run's own directory; `cpf test` only, not stress) | ✓ | stress | |
 | File-based I/O for S in an interactive problem | | | ✓ |
 | Output-only (submit files, no program) | | ✓ | |
 | Multi-case persistent session | | ✓ | |
@@ -670,7 +705,10 @@ changes the stored result.
 | Byte-stream / protocol-aware replay | | ✓ | |
 | Kattis validators, DMOJ checkers | | adapters (§2.4) | |
 
-Refused shapes are rejected when the problem is loaded (design §4.1).
+Refused shapes are rejected when the problem is loaded (design §4.1);
+shapes marked "Later" are refused explicitly in this version, never run
+as something else. Every shape that starts processes runs on Linux and
+macOS; Windows refuses it before admission until its supervisor exists.
 
 ## 10. Configuration sketch (configuration contract owns the schema)
 
@@ -713,7 +751,10 @@ release adds the judge facts (`ValidationDone`, `CheckerSkipped`,
 `AuthorityComplete`, items 5–7). The supervisor asserts **event and provenance
 traces only**: `seq` order, stop causes, provenance, byte counts, transcript
 contents, timings. It never asserts a judging verdict. Required fixtures
-must pass on Linux, macOS and Windows:
+must pass on Linux, macOS and Windows. The Windows half waits for the
+Windows supervisor, which is parked: until it lands the fixtures run on
+Linux and macOS, and Windows refuses connected runs before admission, so
+no Windows result is claimed.
 
 1. S exceeds its wall deadline: `StopRequested{S, OwnLimit(wall)}` comes
    first; I's later exit may be `Natural` (it saw EOF) or `Stopped` (teardown):
@@ -755,11 +796,20 @@ must pass on Linux, macOS and Windows:
     numbers recorded, no threshold.
 18. Leak checks over repeated sessions (E §10.2).
 
-## 12. Planned judging and stress features
+## 12. Judging and stress features of the first useful release
 
 Testlib profile and header pinning, staged validation; `simple` and validator
 profiles; answers; scores; authority modes and `tout`; reducer with its tests;
-display profiles; seeded rerun; `cpf interactor-test`; interactive stress.
+display profiles; seeded rerun; `cpf interactor-test`; batch and interactive
+stress; file-based I/O for batch solutions. Their contracts are the
+configuration contract §9, the execution contract §§2.1, 5.6, the report
+contract §§2.11–2.14 and the stress contract. Judged jobs are bounded (at
+most 1 000 judged tests per job, and no plan whose report reservation would
+exceed 256 MiB), so a report always fits the space reserved for it.
+
+Not in this release, each refused when requested: subtasks, output-only and
+multi-case kinds, run-twice tasks, byte-stream replay, shrinking, per-test
+checker overrides, and stress of file-based I/O problems.
 
 ## 13. Design caveats and rationale
 

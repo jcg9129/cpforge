@@ -1822,8 +1822,8 @@ in `commands.md` follow with the command documentation.
 
 ### 11.4 Design and workspace design
 
-Applied: workspace design §2.1 reserved trees. To be ratified in design
-§7a and §11 with the other scope changes:
+Applied: workspace design §2.1 reserved trees. Ratified in design §7a and
+§11 with the other scope changes:
 
 - archive refuses while **any** job lease of the workspace is held, not
   only jobs of the problem (§3.7);

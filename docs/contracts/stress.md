@@ -977,7 +977,7 @@ Applied with this contract, in place:
   (`--from-stress`), §5.5 (gitignore comment), §5.6 (fsck), §6.1 (job
   layout), §6.4 (release after removal, promotion), §9 (`failure.toml`),
   §10 (crash rows).
-- **Design §6.5**, to be amended in the design: "Generator, oracle and checker
+- **Design §6.5**, ratified in the design: "Generator, oracle and checker
   failures are saved too" is narrowed to the caps of §7.4 under
   `--keep-going`; infrastructure and cancelled iterations are never saved
   (§6.3 R4) and stop the job.

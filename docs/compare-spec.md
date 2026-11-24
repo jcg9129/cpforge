@@ -370,4 +370,4 @@ pub struct Item { offset: u64, line: u64, col: u64, excerpt: Excerpt }
 | `lines` | `lcmp` | `lcmp` tokenises each line (ignores leading and repeated interior spaces); cpforge compares trimmed lines bytewise |
 | `float` | `rcmp`, `doubleCompare` | `rcmp` checks one value with an absolute threshold; testlib adds `1e-15` and uses its own relative formula; testlib rejects `nan`/`inf` literals in `readDouble` |
 
-No emulation is claimed. A judge's exact behaviour needs its checker (initial feature release).
+No emulation is claimed. A judge's exact behaviour needs its checker (configuration contract §9.1).

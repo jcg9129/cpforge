@@ -18,7 +18,8 @@ semantics as the one explicit exception.
 **Scope split:** §2–§4 and the single-workspace rows of §9 are
 **normative for the planned single-workspace features**. §5–§6 are
 **later-version sketches**, not to be implemented until their listed
-blockers are resolved. The corresponding contract amendments remain
+blockers are resolved; the one exception is the fetch provenance of §6.4,
+which ships with fetch and is normative through §2.2. The corresponding contract amendments remain
 **draft, not yet implemented**.
 
 ## 1. Design decisions
@@ -39,7 +40,7 @@ them belongs to cpf, whoever created it, and the documentation says so:
 | Tree | Disposable | Notes |
 |---|---|---|
 | `<root>/.cpforge/runs/` | yes: S §6.3 pruning, plus the owning job's own cleanup (S §6.4: overflowing `cwd/`, oversized builds) | job directories incl. builds and `cwd/` (S §6.1, §7) |
-| `<root>/.cpforge/cache/` | yes | HTTP cache (initial feature release) |
+| `<root>/.cpforge/cache/` | yes | HTTP page cache of `cpf fetch` (sites contract §6); the per-host request permit lives in the user cache directory, outside the workspace |
 | `<root>/.cpforge/staging/` | only by its owner protocol (S §3) | |
 | `<root>/.cpforge/facts/` | no | run facts (§3.2) |
 | `<root>/.cpforge/state.toml`, `lock` | no | S §3 |
@@ -48,7 +49,7 @@ them belongs to cpf, whoever created it, and the documentation says so:
 | `<root>/.cpforge/fetch/` | no | fetch journals, history and status (storage contract §5.8.2); moved with its problem by archive retirement |
 | `<root>/.cpforge/archive/` | no: each transaction directory is removed by its own protocol | archive and restore transactions (archive contract §5.3, §7.3) |
 | `<root>/.cpforge/quarantine/` | no: only `cpf quarantine purge --apply` | files displaced by archive cleanup; user content in a tool tree (archive contract §6.6) |
-| `<root>/.cpforge/submit/` | only unreferenced versions, by `cpf clean` | submission versions and their `current` reference (submission contract §8); |
+| `<root>/.cpforge/submit/` | only unreferenced versions, by `cpf clean` | submission versions and their `current` reference (submission contract §8) |
 
 There is **no** reserved or disposable path under `problems/` or
 `contests/`: builds and runs live in job directories (S §6.1). Every path
@@ -57,8 +58,13 @@ automatically, whoever created it. The one approved
 transaction that relocates protected paths is `cpf archive --apply`
 (archive contract): after a committed snapshot it moves the problem
 directory into `.cpforge/archive/<txn>/` and its cleanup sends files to the
-OS trash, the quarantine or, under `delete`, removes them. File-I/O problems with a shared `cwd`
-stay rejected in the CLI foundation (S §2); nothing here widens that rule.
+OS trash, the quarantine or, under `delete`, removes them. Saved stress
+failures under `problems/<p>/stress/failures/` are written by cpf but are
+user content once published (stress contract §7), so they are protected
+like any other file there. File-based I/O runs only in the run's own
+`cwd/` inside its job directory (execution contract §5.6); a file-based I/O
+problem with a shared `cwd` is a configuration error (C §6.2), so no
+program output lands in a protected path through it.
 
 ### 2.2 Attributes of protected paths
 
@@ -71,7 +77,7 @@ For paths under a problem directory, two independent attributes:
 
 A path in two lists takes the first matching row; `fsck` reports such
 overlaps. The fixed layout names `problem.toml`, `tests.toml` and
-*(organisation amendment)* `notes.md` are part of the problem itself, never
+`notes.md` are part of the problem itself, never
 `unknown` or untracked (storage contract §5.9.1). Downloaded provenance `downloaded{role, txn}` (fetch, storage
 contract §5.8.10) sits between `registered` and `created{command}`: a file
 under `tests/` that no record names is `downloaded` only when its name and
@@ -81,7 +87,7 @@ of storage contract §5.8.10, independent of record order and clocks);
 otherwise it is `unknown`. A downloaded file is
 never discarded either. **Untracked** = provenance `unknown` and visibility `normal`.
 Untracked files are never discarded; only an approved, inventory-bound
-transaction (archive; `move` in the initial feature release) may relocate them, and its plan
+transaction (archive; later `move`, §6.2) may relocate them, and its plan
 lists them.
 
 ### 2.3 Adoption
@@ -150,7 +156,9 @@ workspace arrive with the registry (§6.1).
   whose operands passed that guard, otherwise `unchecked{reasons}` (a shell
   stage, whose script text is not inspected). The job report, the fact and
   `status` carry it, so an `unchanged` from an unchecked capture is shown
-  as such.
+  as such. Each declared judge role (checker, validator, interactor) is
+  captured the same way into `inputs/roles/<role>/` with its own capture
+  check (C §9.1.3).
 - **Fingerprints**: SHA-256 over a byte string built with
   conventions like E §2's canonical encoding, fully restated here: every integer `u64` little-endian; every
   byte string length-prefixed (`u64` length, then bytes); paths relative to
@@ -199,6 +207,12 @@ workspace arrive with the registry (§6.1).
     (S §7) its id, input bytes, and the answer as one tag byte (`0` absent,
     `1` present) followed, when present, by its bytes (so empty and absent
     differ).
+  - `judge`: `"cpf-fp-judge-v1"` over the effective `[check]` settings and
+    every declared role's captured files, lists, build and run stages and
+    outcome-affecting limits, in the same conventions; its exact encoding
+    is C §9.1.3. It is absent for a problem without a role. Without it a
+    checker or interactor edit would leave `status` reporting a result as
+    `unchanged` that the current judges never produced.
 - **Publication** at job finalization: the fact file's atomic replace is
   the **commit point** (S §4.1), done before the job's lease is released, so
   S §6.3 cannot prune a finished job before its fact exists.
@@ -219,9 +233,10 @@ workspace arrive with the registry (§6.1).
 - **Ordering:** a fact of the current epoch replaces any fact of another
   epoch (facts carry their epoch); within one epoch a higher `n` wins; never
   a lower one. Epochs carry no chronology beyond "current or not".
-- `status` compares current files with the fact by recomputing both
-  fingerprints: `source changed`, `tests changed`, `unchanged`, or `unknown`
-  (no fact; target not fingerprintable; schema mismatch). The claim is
+- `status` compares current files with the fact by recomputing the
+  fingerprints: `source changed`, `tests changed`, `judge changed`,
+  `unchanged`, or `unknown` (no fact; target not fingerprintable; schema
+  mismatch). The claim is
   scoped to recorded inputs, and `status` shows the fact's capture check
   next to it (`unchanged (capture unchecked: shell stage)`).
 - **Golden vectors** (per OS) fix the encoding, at least: the same files
@@ -238,7 +253,8 @@ settings describe inputs to that same target. The problem directory key is
 the validated local problem name (without `local:`).
 
 Schema-1 fact fields are `schema`, `epoch`, `n`, `job`, `finished_at`,
-`verdict`, `source`, `tests`, and `[capture_check]`. The capture check uses
+`verdict`, `source`, `tests`, `judge` (optional: absent means no judge
+role), and `[capture_check]`. The capture check uses
 `kind = "checked"` or `kind = "unchecked"` with `reasons = ["shell_stage"]`,
 matching report vocabulary. `finished_at` uses the report's UTC millisecond
 timestamp format and records completion of the primary work at phase A;
@@ -252,8 +268,11 @@ schemas are ignored, as with the other tool-only record codecs.
   registered files missing, untracked files, run-fact comparison (§3.2) with
   last verdict and time; explicit user status (tags and the workflow
   status set by `cpf mark`, design §7a; storage contract §5.9) kept apart
-  from derived verdict facts; `--json` (design §8); the shared filters of
-  storage contract §5.9.6. Never compares against history.
+  from derived verdict facts; whether the judges changed since the fact
+  (§3.2); the current submission version and whether it is stale
+  (submission contract §10); the latest fetch attempt and any incomplete
+  fetch (storage contract §5.8.9); `--json` (design §8); the shared filters
+  of storage contract §5.9.6. Never compares against history.
 - **`cpf clean [--apply]`**: plan by default. It is **S §6.3
   pruning with a zero retention budget**, plus deleting `.cpforge/cache/`
   (initial feature release) — the same leases, lock and two-step rename-then-delete protocol,
@@ -262,7 +281,12 @@ schemas are ignored, as with the other tool-only record codecs.
   except the unreferenced submission versions under
   `.cpforge/submit/` and the external test directories recorded by pruned
   `submit` jobs (submission contract §§7.4, 11.1); never `facts/`,
-  `job-seq`, `lock`, `state.toml` or a referenced submission version.
+  `job-seq`, `lock`, `state.toml`, `fetch/`, `archive/`, `quarantine/` or
+  a referenced submission version. Download areas left by an interrupted
+  fetch are removed by the leftover recovery that every locking command
+  runs, `clean` included, and only when their lease is free (storage
+  contract §5.8.3). Saved stress failures are user content and never
+  cleaned.
 - **`cpf adopt <path>`**, **`cpf ignore <pattern>`**: §2.3, §2.4.
 - **`cpf fsck [--apply]`**: takes the workspace lock; reports dangling
   contest references, problem directories without `problem.toml`, schema
@@ -275,8 +299,12 @@ schemas are ignored, as with the other tool-only record codecs.
 ## 4. Git conveniences (single-workspace features, offered only)
 
 - `cpf gitignore [--write]`: prints patterns for tool-owned content
-  (`.cpforge/runs/`, `.cpforge/cache/`, `.cpforge/staging/`, later
-  `views/`); `.cpforge/facts/` is listed as optional. `--write` maintains one
+  (`.cpforge/runs/`, `cache/`, `staging/`, `downloads/`, `submit/`,
+  `archive/`, `quarantine/`, later `views/`); `.cpforge/facts/`,
+  `.cpforge/fetch/` and `problems/*/stress/failures/` are offered only as
+  comments (S §5.5): fetch history is what makes downloaded tests
+  recognisable as downloads, and saved failures are user work a user may
+  want to commit. `--write` maintains one
   delimited block in `<root>/.gitignore` (created no-clobber if absent;
   otherwise only its own block is replaced, by atomic replace of the file
   after verifying the rest is unchanged since read). `cpf init` mentions the
@@ -288,7 +316,7 @@ schemas are ignored, as with the other tool-only record codecs.
 Export/backup tarballs, `.local` copies or any snapshot of user files beyond
 the archive exception, diff viewers for user files, in-place restore.
 
-## 6. Later workspace features (not normative yet)
+## 6. Later workspace features (not normative yet, except §6.4 provenance)
 
 ### 6.1 Registry and main workspace
 
@@ -328,14 +356,27 @@ workspace); validation of existing entry types.
 
 ### 6.4 Fetch provenance and retained originals
 
-With fetch (initial feature release): `downloaded{hash}` provenance, edited-download
-detection, `[downloads]` for non-test assets, and verified test originals in
-a content-addressed `.cpforge/originals/` for `cpf tests original <test>
---to <path>` (no-clobber extraction to a validated new path outside reserved
-trees, provenance `created{tests original}`). **Blockers:** publish
-and verify an original before the referencing `tests.toml` commit;
-recovery of interrupted fetches; missing/corrupt objects; reference-safe
-collection.
+Fetch provenance and edited-download detection ship with fetch and are
+normative now: provenance `downloaded{role, txn}` in §2.2, decided by the
+fetch journal and history (storage contract §5.8.10); a sample pair is
+edited when either file's bytes differ from the hash its catalog entry
+recorded, or a file is missing (storage contract §5.8.5).
+
+Retained originals are **deferred**: a content-addressed
+`.cpforge/originals/` store with `cpf tests original <test> --to <path>`
+(no-clobber extraction to a validated new path outside reserved trees,
+provenance `created{tests original}`). Their purpose, keeping the upstream
+version of a sample the user edited, is met without a second store: fetch
+publishes the upstream pair no-clobber as an unregistered revision pair in
+`tests/` and records it in the durable fetch history, which moves with the
+problem into an archive (design §4.3). A store would add its own
+publication order, recovery, corruption handling and garbage collection.
+**Blockers** if it is wanted later: publish and verify an original before
+the referencing `tests.toml` commit; missing/corrupt objects;
+reference-safe collection.
+
+`[downloads]` for non-test assets is deferred with it: this version fetches
+no attachments (sites contract §1).
 
 ## 7. Import (deferred)
 
@@ -361,4 +402,5 @@ None beyond the contract amendments in §9.
 | S §3 / facts schema | fact file format, ordering by `(epoch, n)`, fingerprint encoding of §3.2 | single-workspace features |
 | C (workspace config) | `[workspace] ignore = [globs]` with the glob subset and matching rules | single-workspace features |
 | S §5 commands | `adopt`, `clean` (= §6.3 with zero budget), `fsck`, `gitignore --write` transactions | single-workspace features |
-| S §2, C §1, design §4.1 | views exception, registry, identity, originals | initial feature release (§6) |
+| S §2, C §1, design §4.1 | views exception, registry, identity | later version (§6) |
+| S §3 | retained originals store | deferred (§6.4) |

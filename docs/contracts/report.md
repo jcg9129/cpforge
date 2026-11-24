@@ -3063,7 +3063,7 @@ compare spec remain, to be applied by the design ratification:
   `judge`).
 - **Compare spec §8**, replace "needs its checker (initial feature
   release)" by "needs its checker (configuration contract §9.1)".
-- **Checkers design §6.1 rule 5** (needs ratification): add to rule 5.4
+- **Checkers design §6.1 rule 5** (ratified in checkers design v7.2): add to rule 5.4
   "if reading or extracting the judge's report or `tout` fails on cpf's
   side (a reservation refusal or an I/O error on an artefact that passed
   the presence, type and size checks; execution contract §2.1), the
@@ -3076,7 +3076,7 @@ compare spec remain, to be applied by the design ratification:
   and item 6 are unchanged: only a planned follow-up checker that never
   started gets `CheckerSkipped` (`Cancelled` before `NotEligible`).
   The fact payload's detail kind gains `judge_extraction`.
-- **Checkers design §2.1** (needs ratification, the design being frozen):
+- **Checkers design §2.1** (ratified in checkers design v7.2):
   "records the hashes of its source and of the header it compiled
   against" is replaced by "records the hashes of its source and of a
   **candidate** header: the single captured `testlib.h` beside every

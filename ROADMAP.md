@@ -29,14 +29,31 @@ Limits of this version:
 
 ## Next: first useful release
 
-- AtCoder and CSES (problemset) fetching.
-- Simple and testlib checkers and validators.
-- Interactive problems with adaptive interactors.
-- Seeded stress testing, with saved failures and reruns.
-- Submission artifacts, with an optional configurable submit stage (for
-  example `distill`).
-- Tags, status, notes and search.
-- Conservative archive snapshots, with quarantine and restore.
+- Fetching from AtCoder (problems and contests) and the CSES problemset,
+  with polite per-host request spacing shared by every `cpf` process.
+  Refetching never modifies or deletes a test file: an edited sample is
+  kept and the new upstream version is stored beside it.
+- Simple and testlib checkers, validators and scored problems.
+- Interactive problems with adaptive interactors, and `cpf interactor-test`.
+- File-based input and output for batch problems.
+- Seeded stress testing, with saved failures, replay and promotion of a
+  failure to a test.
+- Submission artifacts: a plain source copy, or a configurable submit stage
+  (for example `distill`) whose artifact is built and tested outside the
+  workspace.
+- Tags, workflow status, notes, filtered listing and search.
+- Conservative archive snapshots, with trash or quarantine cleanup and
+  restore.
+
+On Windows, fetching, organisation, source-copy submission and archiving
+work in full; judging, stress and the submit stage start processes and are
+refused with exit status 10 until a Windows supervisor exists.
+
+Not part of this release, and refused when requested: parallel test
+execution, a build cache, cgroup accounting, subtasks, output-only and
+multi-case problems, stress shrinking, byte-stream replay of interactive
+sessions, per-test checker overrides, retained download originals, and
+CSES contests.
 
 A draft pre-release is planned once fetching and batch checkers work on Linux
 and macOS.

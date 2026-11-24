@@ -1047,7 +1047,7 @@ Applied with this contract:
   (it limited `clean` to `runs/` and `cache/`).
 - Design §6.7 ("pinned by version", "builds and tests the artifact … when
   the language allows", "headers from the workspace cannot leak in") is
-  ratified by the design-ratification item with the narrowings of §1.2.
+  ratified in the design with the narrowings of §1.2.
 
 ## 16. Decisions and open points
 
