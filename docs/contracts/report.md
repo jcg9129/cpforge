@@ -561,13 +561,14 @@ under the verdict lock, atomic with respect to cancellation intent.
   | Intent first set | `phase` | Effect |
   |---|---|---|
   | before V (P, incl. before the first admission) | `primary` | E §6.4 arbitration; verdict per §2.7 |
-  | after V, until the end of A (`test` only) | `fact` | verdict frozen; fact per the cutoff |
+  | after V, until the end of A (`test` and `submit`) | `fact` | verdict frozen; fact (`submit`: submission publication) per the cutoff |
   | after A, until the end of H (`test` only) | `hooks` | running hook cancelled, later hooks skipped |
   | after the last of V, A, H, until the end of W | `settlement` | settlement still completes (bounded); nothing else changes |
   | after W, until the F lock is taken (phase E included) | `closure` | nothing changes |
 
   For `build`, `run`, `cmd` and `hook` jobs (no A, H) the interval after V
-  belongs to `settlement` and then `closure`. Every phase other than
+  belongs to `settlement` and then `closure`; for a `submit` job (A, no H)
+  the interval after A does. Every phase other than
   `primary` adds the warning `late_cancellation`. Every recorded phase
   selects the cancellation status (§5.2 row 5).
 - **F Finalization** *(lock)*: one critical section snapshots
@@ -1604,7 +1605,7 @@ occurrence order, and count every omitted ordinary warning in
 | `prune` | `job: jid?`, `detail: token` (`rename_failed`, `newer_schema`, `lease_unreadable`, `unmeasurable`, `measurement_incomplete`, `reclaim_leftover`, `reclaim_name_taken`; `test_dir_kept`, `test_dir_lost`) | S §6.3 at admission |
 | `recovery` | `paths: u32`, `first: nsum(128)?` | S §4.5 |
 | `persist` | `artefact: token` (`spec`, `record`, `cleanup_log`), `run: rid` (or an `irid` for an iteration run, §3.2; the grammars are disjoint, so the warning bound still holds at 756 B), `error: PersistError` | E §6.2, final at W |
-| `durability` | `artefact: token`, `detail: token` (`uncertain`, `cleanup_pending`); artefact `stress_failure` for a promoted saved failure | S §4.1 |
+| `durability` | `artefact: token` (`capture_manifest`, `job_metadata` (other job-directory metadata publications), `record`, `fact`, `stress_failure` for a promoted saved failure), `detail: token` (`uncertain`, `cleanup_pending`) | S §4.1 |
 | `retention` | `detail: token` (`cwd_overflow`, `workspace_over_target`), `run: rid?` (or an `irid`), `bytes: u64` | S §6.4 |
 | `cleanup_unverified` | `runs: u32` | E §4.4 |
 | `fact` | `outcome` (§4.9 fact outcome) | S §6.5 |
@@ -1970,7 +1971,7 @@ validator, interactor or `[check]` edit is reported as "judge changed".
 
 Fixture: `src/report/wire/fixtures/status.json`.
 
-The status `Problem` gains, after `diagnostics`,
+The status `Problem` gains, after `findings` (below), the member
 `submit`: `{state: token, id: string?, mode: token?, tested: bool?}`,
 `state` `none`, `current`, `stale`, `unknown` (submission contract §10;
 `id`, `mode`, `tested` from the manifest, `null` for `none` and when the
@@ -1979,6 +1980,21 @@ the `submit` document `{"schema":1,"document":"submit","platform":…,
 "problem":pident,"submission":Submission,"warnings":[Warning; 24]}`, not
 persisted; stage mode: the `job_report`) and `--events` in stage mode only.
 Fixtures `submit.json`, `submit_stage.json` (submission contract SB-R1).
+
+**Fetch state in `status`.** The status `Problem` gains, after `submit`,
+its last member `fetch`: `FetchState?`, `null` for a local problem, else
+`{record: token, attempted_at: time?, outcome: token?, txn: jid?,
+recovered: bool?, incomplete: token?}`. `record` is the S §9 record
+classification of `.cpforge/fetch/<p>/status.toml` (`missing`,
+`unreadable`, `malformed`, `too_new`, `valid`); `attempted_at`, `outcome`
+(`committed`, `unchanged`, `conflict`, `refused`, `failed`,
+`rolled_back`), `txn` and `recovered` are that record's fields (S §5.8.9),
+non-null iff `record` is `valid` (`txn` also `null` when the record has
+none); `incomplete` is the `fetch_incomplete` phase of S §5.8.12
+(`pending`, `committed`, `finished`, `undetermined`) while a journal of
+the problem exists, else `null`. Superseded and unregistered upstream
+files stay in `diagnostics`. Fixtures `status_fetch.json` (a committed
+fetch) and `status_fetch_incomplete.json` (a journal pending).
 
 **Organisation fields in `status`.** `tags` and
 `user_status` keep their existing meaning unchanged: `tags` holds the
@@ -2074,8 +2090,9 @@ Snapshot?` (`null` for `active`): `Snapshot` = `{id: string, kind: token
 canonical root, `path` root-relative with `/`. For a snapshot, the
 `LsProblem` fields come from its summary (archive contract §4.5) and
 `contests` lists the summary's contest directories. The `ls` document's
-`kind` gains `archived` and `archived_contests` (`LsContest` entries then
-carry `snapshot` too, with `members` the planned count and `counts` empty).
+`kind` gains `archived` and `archived_contests`; `LsContest` gains the
+last member `snapshot: Snapshot?`, `null` for an active contest (for an
+archived contest `members` is the planned count and `counts` empty).
 `Source.kind` gains `root_unavailable`, `not_an_archive_root`,
 `root_record_unreadable`, `root_record_malformed`, `root_record_too_new`,
 `roots_unavailable`, `unreadable_directory`, `summary_malformed`,
@@ -3565,7 +3582,8 @@ Top level (§4.1): `schema`, `document`, `platform`, `outcome` (`finished`,
   `reclaim_name_taken`, `test_dir_kept`, `test_dir_lost`}, `recovery`
   {`paths`, `first`}, `persist` {`artefact`: `spec`, `record`,
   `cleanup_log`; `run` (`rid` or `irid`); `error`}, `durability`
-  {`artefact` (the persisted artefact, including `stress_failure`),
+  {`artefact`: `capture_manifest`, `job_metadata`, `record`, `fact`,
+  `stress_failure`;
   `detail`: `uncertain`, `cleanup_pending`}, `retention` {`detail`:
   `cwd_overflow`, `workspace_over_target`; `run` (`rid` or `irid`);
   `bytes`}, `cleanup_unverified` {`runs`}, `fact` {`outcome`}, `hook`
@@ -3643,8 +3661,11 @@ final envelope `report` {`report`}.
   `last_verdict`, `finished_at`, `capture_check`, `judge` (`none`,
   `unchanged`, `changed`, `unknown`)}], `diagnostics`, `findings`
   [`OrgFinding`], `submit` {`state` (`none`, `current`, `stale`,
-  `unknown`), `id`, `mode`, `tested`}}]; the order of `findings` and
-  `submit` is open (§6.1 places both after `diagnostics`).
+  `unknown`), `id`, `mode`, `tested`}, `fetch` (`FetchState` {`record`
+  (`missing`, `unreadable`, `malformed`, `too_new`, `valid`),
+  `attempted_at`, `outcome` (`committed`, `unchanged`, `conflict`,
+  `refused`, `failed`, `rolled_back`), `txn`, `recovered`, `incomplete`
+  (`pending`, `committed`, `finished`, `undetermined`)})}].
 - Organisation types: `OrgFinding` {`field` (`tags`, `status`,
   `created_at`, `updated_at`, `solved_at`, `archived_at`), `reason`};
   `Source` {`path`, `kind`, `field`, `message`} with `kind` `link`,
@@ -3665,7 +3686,7 @@ final envelope `report` {`report`}.
   `solved_at`, `archived_at`, `contests`, `findings`, `snapshot`}],
   `contests` [`LsContest` {`contest`, `identity`, `tags`, `members`,
   `counts` [{`status`, `count`}], `unresolved`, `invalid`, `findings`,
-  and `snapshot` for archived contests}], `invalid` [`Source`].
+  `snapshot`}], `invalid` [`Source`].
 - `search`: `terms`, `notes`, `archives`, `hits` [`Hit` {`problem`,
   `origin`, `fields` (`identity`, `title`, `url`, `tags`, `status`,
   `notes`), `notes_lines` + dropped, `notes_truncated`, `snapshot`}],

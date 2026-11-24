@@ -943,7 +943,7 @@ judging, solution failure, not verified, success.
 | 1 | failed | the solution or a program failed (wrong answer, presentation error, time limit, idle, session limit, output limit, runtime error, a score below the full scale); `interactor-test`: an expectation contradicted | `test`, `run`, `cmd`, `stress`, `interactor-test`, `submit-prep` (stage) |
 | 2 | usage | invalid arguments or a rejected combination; nothing was started (except a refused `cpf fetch` contest or section selection, refused after its one listing request) | every command |
 | 3 | build_failed | a build failed, or the submission tool failed | `build`, `test`, `run`, `cmd`, `stress`, `interactor-test`, `submit-prep` (stage) |
-| 4 | not_verified | nothing failed, but not everything was checked (no answer, no tests, no iteration, an incomplete score) | `test`, `stress`, `interactor-test`, `submit-prep` (stage) |
+| 4 | not_verified | nothing failed, but not everything was checked (no answer, a judge's cleanup not verified, no tests, no iteration) | `test`, `stress`, `interactor-test`, `submit-prep` (stage) |
 | 5 | checker_failed | judging could not decide: a checker, validator, interactor, generator or brute failed, or invalid test data | `test`, `stress`, `interactor-test`, `submit-prep` (stage) |
 | 6 | cancelled | cancelled on Windows, or through the API; on Unix cpf exits by the signal instead (a shell shows 130 or 143) | job commands, `fetch`, `search`, `ls --archived`, `submit-prep` |
 | 7 | config | configuration or plan error, an unsupported problem kind, a missing context, a workflow status outside the vocabulary, a submission tool of another version | most commands |
