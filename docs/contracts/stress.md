@@ -362,8 +362,8 @@ and a is the number of iterations the job has admitted so far:
 | # | Condition | Stop reason |
 |---|---|---|
 | 1 | cancellation intent is set | `cancelled` |
-| 2 | a build did not succeed (only before k = 0) | `build_failed` |
-| 3 | an earlier iteration set a stop: a failing class without `--keep-going`; class `infrastructure` (also with `--keep-going`); class `cancelled`; a cleanup failure (§6.4) | `failure`, `infrastructure` (`admission_closed` when its reason is `retention_budget`), `cancelled`, `cleanup_failed` |
+| 2 | a build did not succeed (checked at a = 0, before any iteration, in search and replay jobs alike) | `build_failed` |
+| 3 | an earlier iteration set a stop: a failing class without `--keep-going` (search jobs only: in a replay a failing class sets no stop, so row 7 decides); class `infrastructure` (also with `--keep-going`); class `cancelled`; a cleanup failure (§6.4) | `failure`, `infrastructure` (`admission_closed` when its reason is `retention_budget`), `cancelled`, `cleanup_failed` |
 | 4 | a = N (the iteration budget) | `iterations` |
 | 5 | the time budget has expired: now ≥ t₀ + T, with t₀ the monotonic instant the check for k = 0 began | `time_budget` |
 | 6 | a cumulative counter (§1) would overflow by admitting k | `counter_limit` |
@@ -442,7 +442,7 @@ stated; none waits for an unbounded event.
 | R1 | every admitted run's record is finalized (E §6.2), and every session has a closed record or a **cancellation snapshot** (a pair or follow-up checker whose creation returned `Transferred`, E §§2.1, 3.4; report contract §2.12 I3), which is final without reduction and without waiting for the creation to complete | the runs' own deadlines (E §§5.5, 6.3); a snapshot is immediate |
 | R2 | derive the class, deciding role and reason (§4), under the verdict lock | no I/O |
 | R3 | **fold** into the aggregates (report contract §4.14): the class counter; first iteration and seed of the class; the first 16 diagnostics of the class (§9); per-role timing (count, min, max, total wall); for one of the first 20 failing iterations its failure ref (its `saved` outcome completed at R7, its record refs at R8); runs started; captured bytes (stored stdout and stderr of every run) | no I/O |
-| R4 | choose the **disposition**: `save` (a failing class in a search job while fewer than 20 earlier iterations of the job had a failing class, §7.4: the save attempts are exactly the first 20 failing iterations, the same population as the report's failure refs, whatever their staging outcome); `count` (a failing class otherwise); `keep` (`infrastructure` or `cancelled`: the job stops, and the iteration stays in the job directory as evidence; also every class of a replay job, whose one iteration is its evidence); `discard` (`passed` in a search job) | no I/O |
+| R4 | choose the **disposition**. In a replay job every class is `keep` (its one iteration is its evidence; no other disposition applies). In a search job: `save` (a failing class while fewer than 20 earlier iterations of the job had a failing class, §7.4: the save attempts are exactly the first 20 failing iterations, the same population as the report's failure refs, whatever their staging outcome); `count` (a failing class otherwise); `keep` (`infrastructure` or `cancelled`: the job stops, and the iteration stays in the job directory as evidence); `discard` (`passed`) | no I/O |
 | R5 | `save`, `keep`: enqueue, per run of the iteration, its spec, its record and its first `cleanup.log` (E §6.2, ≤ 24 artefacts, through the queue credits), each with its publication deadline measured from **this** enqueue call (E §6.2 *(stress, draft)*), never from its record's finalization; each run's metadata reservation passes to its artefacts. `discard`, `count`: nothing is enqueued and each run's metadata reservation is released unused | E §6.2 credit wait (≤ 1 s per artefact) |
 | R6 | wait until every run of the iteration (a transferred one included) has reached **resources released** (E §1 milestone 4; the metadata reservation is settled by R5, §6.2) | the **retirement deadline**, 5 s (*fixed*) after R1; past it §6.4 applies, with the unreleased runs' directories as leftovers |
 | R7 | `save`: stage and promote the saved failure (§7.5) | the workspace lock bound (S §4.5, 10 s) plus bounded file work |
@@ -453,9 +453,21 @@ stated; none waits for an unbounded event.
 
 - **Debug counters** (feature `storage-test-hooks`): live iterations,
   in-memory run records and encoded specs, pending persistence cells,
-  queued artefacts, held reservations. After R11 of any iteration the
-  first four are 0 and the reservations are only the job's fixed ones
-  (§6.6).
+  queued artefacts, held reservations, and the **persistence tail**
+  (below). After R11 of any iteration the first four are 0, queued
+  artefacts are 0, and the reservations are the job's fixed ones plus the
+  persistence tail (§6.6).
+- **Persistence tail.** When an artefact misses its deadline (R8), E §6.2
+  marks the thread unavailable, fails every other pending artefact at once
+  (their reservations released at that refusal) and leaves only the write
+  in progress, whose reservation and measured bytes the thread keeps until
+  that write returns and its owner joins it (late completion, settled
+  exactly once). Since the thread is never replaced, this happens at most
+  once per job, and the tail is at most one artefact's metadata
+  reservation (≤ 1 MiB) plus its in-flight thread credit. Every later
+  enqueue fails at once with `worker_unavailable`, so later iterations,
+  saved ones included, reserve nothing for persistence beyond R5's
+  hand-over, which their refused artefacts return at once.
 - Because R5–R8 complete before the next admission, at most one
   iteration's artefacts (≤ 24) are ever queued: the stress lifecycle does
   not rely on the persistence queue's headroom (E §6.2 Q). For the credit
@@ -519,10 +531,15 @@ At every instant after the builds, the job holds at most:
   staging and extraction, transcripts, E §5.4);
 - retained bytes in the job directory: the **base** (`job.toml`, lease,
   frozen inputs, captured files, the capture manifest, the builds and their
-  persisted metadata) plus, per saved failure, its runs' persisted
-  metadata (≤ 8 × 384 KiB) and, while not promoted, its staged directory
-  (§7.5), plus the one `keep` iteration;
-- persistence: ≤ 24 queued artefacts, all of the retiring iteration;
+  persisted metadata) plus, per **save attempt** (≤ 20, whatever its
+  staging outcome; R10 keeps the metadata of every `save` disposition,
+  `not_saved` ones included, as the evidence its failure ref names), its
+  runs' persisted metadata (≤ 8 × 384 KiB, so ≤ 60 MiB in all) and, while
+  not promoted, its staged directory (§7.5), plus the one `keep`
+  iteration;
+- persistence: ≤ 24 queued artefacts, all of the retiring iteration, plus
+  the persistence tail (§6.3: at most one in-flight write per job, ≤ 1 MiB
+  reserved);
 - aggregates of fixed size (report contract §4.14).
 
 None of these grows with the number of passing or counted-only
@@ -828,7 +845,7 @@ report contract §9.
 
 | Id | Fixture | Expected |
 |---|---|---|
-| ST-L01 | batch, 5 runs per iteration, 100 passing iterations; interactive, 8 runs, 100 passing iterations; then batch with the stderr writers of `generator`, `validator` and `brute` each held 1 s past their record (controlled sinks) | admitted 100, retired 100, runs started 500 / 800; at every `stress.run_admit` barrier the live-iteration counter is 1 and no run of the next iteration exists; never more than 2 iteration runs executing at once; with held writers 3 runs hold slots at once (debug occupancy 3), the candidate's admission takes the fourth, and the next iteration is admitted only after all have released |
+| ST-L01 | batch, 5 runs per iteration, 100 passing iterations; interactive, 8 runs, 100 passing iterations; then one batch iteration with an explicit hold schedule: the injected executor finalizes the records of `generator`, `validator` and `brute` at controlled-clock times 0, 1, 2 s while each run's resources (stderr sink and slot) stay held behind one shared barrier H; H is released at the candidate's `stress.run_admit` barrier, after the occupancy is sampled; the candidate's record is finalized at 3 s | admitted 100, retired 100, runs started 500 / 800; at every `stress.run_admit` barrier the live-iteration counter is 1 and no run of the next iteration exists; never more than 2 iteration runs executing at once; in the scheduled iteration the occupancy at the candidate's admission is exactly 3 held slots, the candidate takes the fourth, all four release within R6's 5 s after R1, the iteration retires normally, and the next iteration is admitted only after the occupancy is 0 |
 | ST-L02 | intent at `stress.iteration_admit` of k = 7 | stop `cancelled`, retired 7 (0…6), no directory `iterations/7.*`, verdict `cancelled`, cancellation status |
 | ST-L03 | intent at `stress.run_admit` of `7.candidate` (batch) and of the candidate pair (interactive) | the candidate `skipped{cancelled}`; class `cancelled` (S2/T2); disposition `keep`: `iterations/7.*` kept with persisted spec, record and `cleanup.log` of each admitted run; retired 8; no further admission |
 | ST-L04 | intent while `7.candidate` runs (scripted long run) | the run stopped (class `cancelled`), iteration `cancelled`, as ST-L03 |
@@ -838,7 +855,8 @@ report contract §9.
 | ST-L08 | plateau with failures: `--keep-going`, every iteration `candidate_failure`, 10 000 iterations | saved exactly 20 (k = 0…19, all `promoted`), `not_saved` 9 980; from the first sample on, files and bytes in the job directory equal (the base plus 20 × the persisted metadata of 5 runs); failure refs 20, `failures_dropped` 9 980; exactly 20 directories under `stress/failures/` |
 | ST-L09 | removal failure injected at R10 of k = 5 (one entry of `iterations/5.candidate/cwd/`) | no iteration 6 admitted (admitted 6, retired 6), stop `cleanup_failed`, verdict `stress_cleanup_failed`, status 10, `cleanup_failed.paths` names exactly that entry, its bytes still retained; a later `cpf clean --apply` prunes the job |
 | ST-L10 | R6 deadline: `5.candidate`'s stderr writer stalled (controlled sink, released after 8 s) | the record is finalized with `write_stalled` on stderr (class unchanged), retirement waits 5 s [+ 100 ms] after R1, stop `cleanup_failed`, the run's directory listed; the job still reaches `JobFinished` |
-| ST-L11 | engine debug counters after every R11 in ST-L01 | live iterations, records, specs, pending cells 0; persistence never holds an artefact of an earlier iteration |
+| ST-L11 | engine debug counters after every R11 in ST-L01 | live iterations, records, specs, pending cells, queued artefacts and the persistence tail 0; persistence never holds an artefact of an earlier iteration |
+| ST-L23 | persistence tail: `--keep-going`, every iteration failing; the controlled writer blocks the record write of `2.candidate` forever until released; 10 more iterations run, then the writer is released | iteration 2's deadline missed (`timeout`), every other pending artefact of it `timeout` at once; iterations 3–12 continue (saved, refs `worker_unavailable`, their failures still staged and promoted); after each later R11 queued artefacts 0 and reserved bytes = fixed + exactly the one blocked artefact's reservation; on release the late write is settled once (committed by its joining owner, never twice), and reserved bytes return to the fixed baseline |
 | ST-L12 | slow controlled writer (each artefact 200 ms), `--keep-going`, 25 failing iterations | every artefact of the 20 saved iterations published (no `queue_full`, `timeout`, `cancelled`), max queued artefacts ≤ 24 and of one iteration only; the 5 counted iterations enqueue nothing |
 | ST-L13 | counters: `stress.counters` sets runs-started to `u64::MAX − 3` before a batch iteration | stop `counter_limit` before that iteration, no run admitted, nothing wraps |
 | ST-L14 | time budget with `stress.clock`: T = 10 s, each iteration 3 s | admitted exactly 4 (checks at 0, 3, 6, 9 s), the fourth completes past T, stop `time_budget` |
@@ -886,7 +904,7 @@ report contract §9.
 | ST-F04 | `fsck --apply` sequence repair between jobs: jobs n = 3, 4 of epoch E₁ save failures; `job-seq` removed; `cpf fsck --apply` (new epoch E₂, `next = 0`); a job saves at k = 0 | ids `f-E₁-3-…`, `f-E₁-4-…`, `f-E₂-0-0` all distinct; the old directories byte-unchanged; `stress ls` lists 3 `valid` entries |
 | ST-F05 | a hand-made directory with the id the next failure will get | `not_promoted{exists}`, the existing directory byte-unchanged, the staged directory named (job-relative) in the report |
 | ST-F06 | `--keep-going`, 25 candidate failures | saved exactly 20 (k = first 20 failing), the 21st and later counted (`not_saved` 5), no staging left for them |
-| ST-F16 | failed save attempts: `--keep-going`, 25 failing iterations, staging of the first 20 failing with injected `EIO` | 20 failure refs, each `not_saved{io}`; iterations 21–25 `count` (no staging attempt, nothing enqueued); `not_saved` 25; queued artefacts never exceed one iteration's |
+| ST-F16 | failed save attempts: `--keep-going`, 25 failing iterations, staging of the first 20 failing with injected `EIO` | 20 failure refs, each `not_saved{io}` with record refs naming kept `iterations/<k>.<role>/record.json`; the job directory keeps exactly the persisted metadata of those 20 iterations (5 runs × 3 files each) and nothing staged; iterations 21–25 `count` (no staging attempt, nothing enqueued, directories removed); `not_saved` 25; files and bytes in the job directory equal after iteration 20 and after 25; queued artefacts never exceed one iteration's |
 | ST-F07 | a candidate program of 64 MiB + 1 byte (padded binary) | `omitted = "too_large"` for the candidate, the failure saved; `stress ls` and the report say binaries are unavailable; `--replay-binaries` refused, exit 7 |
 | ST-F08 | 5 failures with 60 MiB of programs each | programs preserved for the first 4 failures (240 MiB), the fifth `omitted = "job_cap"` (256 MiB cap); all 5 saved |
 | ST-F09 | `ENOSPC` injected while staging `out/candidate` (disk full during promotion); and at the publish rename | the first `not_saved{io}`, partial staging removed; the second `not_promoted{io}`, staged directory kept in the job directory; both reported; the job lease is held until `report.json` is written (a concurrent `cpf clean --apply` at `persist.report` skips the job) |
@@ -904,7 +922,7 @@ report contract §9.
 | ST-P01 | saved deterministic candidate failure, `--replay` | one iteration, k as saved, `from_input: true`, the generator not run, `reproduced: true`, status 1 |
 | ST-P02 | the candidate fixed after saving, `--replay` | class `passed`, `reproduced: false`, status 0, human "not reproduced" |
 | ST-P03 | nondeterminism, scripted: a candidate that fails iff a control file the harness writes says `fail`; saved with `fail`, replayed with `fail`, then with `pass` | `reproduced: true`, then `reproduced: false` (class `passed`, status 0); no output line claims determinism, a fix or timing equivalence |
-| ST-P13 | replay of saved failures with k = 9 999, 10 000 and `u64::MAX` (default `iterations` 10 000 in `[stress]`) | exactly one iteration admitted with that k (`iterations/<k>.candidate/`), stop `replay`, `budget: null` |
+| ST-P13 | replay of saved failures with k = 9 999, 10 000 and `u64::MAX` (default `iterations` 10 000 in `[stress]`), each (a) reproduced (candidate still failing), (b) passing, (c) with the candidate now failing to build | (a), (b): exactly one iteration admitted with that k (`iterations/<k>.candidate/`), disposition `keep`, stop `replay`, `budget: null`, `reproduced` true / false, status 1 / 0; (c): no iteration admitted, stop `build_failed`, status 3 |
 | ST-P04 | saved `generator_failure`, `--replay` | the generator runs with the saved seed (`from_input: false`) |
 | ST-P05 | `--replay-binaries` of a candidate failure, sources then edited to fix it | no build in `executions[]`; the preserved candidate reproduces (`reproduced: true`); the copies in `inputs/bin/` are byte-equal to the manifest |
 | ST-P06 | `--replay-binaries` with the manifest's `os` or `arch` edited | exit 7 before admission, naming both values |
