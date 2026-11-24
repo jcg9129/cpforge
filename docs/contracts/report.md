@@ -938,7 +938,7 @@ Serialized maxima include quotes; they feed §3.7.
 | `text` | cpf-generated text, serialized ≤ 260 bytes including quotes (the writer cuts at a character boundary and ends with `…`); informative | 260 |
 | `dec` | a TOML float as `{"text": shortest round-trip, "bits": 16 hex}` (compare spec §6 `F`) | 69 |
 | `ns` | full native value (§3.3), n source bytes | max(2n + 11, 4⌈n/3⌉ + 16) |
-| `nsum(P)` | bounded native summary (§3.3) | 132 + max(2P + 11, 4⌈P/3⌉ + 16), the `ns` bound of its head; this equals 2P + 143 for P = 9 and every P ≥ 11 (every P used in this contract is ≥ 128) and exceeds it for P ≤ 8 and P = 10 (e.g. 156 at P = 4); rows below computed with the earlier 2P + 149 keep 6 B of slack per summary |
+| `nsum(P)` | bounded native summary (§3.3) | 132 + max(2P + 11, 4⌈P/3⌉ + 16), the `ns` bound of its head; this equals 2P + 143 for P = 9 and every P ≥ 11 (every production P in this contract is ≥ 128; fixtures may use smaller P, covered by the general formula) and exceeds it for P ≤ 8 and P = 10 (e.g. 156 at P = 4); rows below computed with the earlier 2P + 149 keep 6 B of slack per summary |
 | `bytes` | `{"bytes_b64": …}` of n bytes | 4⌈n/3⌉ + 17 |
 | `score` | a fixed-point value in units of 10⁻⁹ (§2.13) as a JSON string: the integer part in minimal decimal (`"0"` when zero), then, only if the value has a fraction, `.` and 1–9 digits without a trailing zero; no sign, no exponent. ≤ 14 integer digits (10 000 tests × 10⁹) | 26 |
 
