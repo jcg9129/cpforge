@@ -1,20 +1,14 @@
 # Storage contract
 
-Status: v3. Normative for the `workspace` module and the storage side of
-`jobs`. Initial scope: manual problems and tests, job directories, retention.
-Fetch, generation-based publication and archives are planned for later
-versions; the initial implementation reaches tests only through the
-test-store interface (§8).
+Status: v5. Normative for the `workspace` module and the storage side of
+`jobs`: problems and tests, job directories, retention, and the
+managed-workspace transactions of `../design-workspace.md` §9 (admission
+sequence, source capture, run facts, adopt / clean / fsck / gitignore),
+which are implemented. Jobs reach tests only through the test-store
+interface (§8). References labelled *workspace design* point to
+`../design-workspace.md`.
 
-**Managed-workspace amendment (v5): settled, implementation in progress.** The
-single-workspace rows of `../design-workspace.md` §9 cover admission sequence,
-source capture, run facts, adopt / clean / fsck / gitignore transactions.
-Amended content is marked *(draft)* below; init sequence bootstrap (C4c) and
-local add with template provenance and contest membership (C4d) are implemented,
-while the remaining amended transactions are planned.
-References labelled *workspace design* point to `../design-workspace.md`.
-
-**Gate-2 additions.** *Fetch*: remote identities (§2.1), the fetch
+**Gate-2 additions** (approved; implemented by the gate-2 tasks). *Fetch*: remote identities (§2.1), the fetch
 transaction and test publication (§5.8), the download area and fetch
 records (§3, §4.5), catalog download fields (§8.1), their schemas (§9) and
 allowed states (§10); it replaces generation-based publication: tests are
@@ -91,9 +85,10 @@ Related: design §4, `execution.md` and `report.md` (report contract).
   names, trailing dots or spaces.
 - **Shared `cwd`** (configuration contract §4.1, any configured `cwd` other than the run's own)
   is a distinct capability: `cpf` never measures, clears or deletes
-  anything in it; the record marks `shared_cwd`; file-based I/O problems with
-  a shared `cwd` are rejected in the CLI foundation. In this version every
-  file-I/O problem is rejected, regardless of `cwd` (configuration contract §6.2).
+  anything in it; the record marks `shared_cwd`; a file-based I/O problem
+  with a shared `cwd` is a configuration error (configuration contract
+  §6.2); file-based I/O always runs in the run's own `cwd/` (execution
+  contract §5.6).
 
 ### 2.1 Portable names and identity
 
@@ -249,11 +244,11 @@ native error, never treated as success.
 | `.cpforge/runs/<job>/` | tool, disposable | by its job (§6) |
 | `.cpforge/staging/` | tool | only while holding the workspace lock |
 | `.cpforge/lock` | tool | lock only; never unlinked or replaced |
-| `.cpforge/job-seq` *(draft)* | tool | atomic replace under the workspace lock (§6.2) |
-| `.cpforge/facts/<problem>/<target>.toml` *(draft)* | tool | atomic replace under the workspace lock (§6.5) |
-| `problems/<p>/problem.toml` `[files] user` *(draft)* | user field | edit transaction by `cpf adopt` (§5.4) |
-| `problems/<p>/problem.toml` `[files] created` *(draft)* | tool field | edit transaction by the creating command |
-| `<root>/.gitignore` cpf block *(draft)* | tool block in a user file | only on `cpf gitignore --write` (§5.5) |
+| `.cpforge/job-seq` | tool | atomic replace under the workspace lock (§6.2) |
+| `.cpforge/facts/<problem>/<target>.toml` | tool | atomic replace under the workspace lock (§6.5) |
+| `problems/<p>/problem.toml` `[files] user` | user field | edit transaction by `cpf adopt` (§5.4) |
+| `problems/<p>/problem.toml` `[files] created` | tool field | edit transaction by the creating command |
+| `<root>/.gitignore` cpf block | tool block in a user file | only on `cpf gitignore --write` (§5.5) |
 | `.cpforge/downloads/<txn>/` | tool, leased | created with its lease under the lock, written lock-free only by the lease owner; removed by the owner or by recovery when the lease is free (§5.8.3) |
 | `.cpforge/fetch/<p>/journal.toml` | tool | no-clobber under the lock, atomic replace at its metadata phase; removed when its transaction finishes or is reconciled (§5.8.7) |
 | `.cpforge/fetch/<p>/txn-<txn>.toml` | tool, durable | no-clobber under the lock; never rewritten or removed by cpf (§5.8.10) |
@@ -271,12 +266,14 @@ file. A command changes only its own fields; untouched items survive as a
 `toml_edit` round-trip. Permanent user files (sources, tests, notes) are
 outside every retention budget.
 
-**Reserved trees** *(draft)*: `.cpforge/runs/`, `.cpforge/cache/`,
+**Reserved trees**: `.cpforge/runs/`, `.cpforge/cache/`,
 `.cpforge/staging/`, `.cpforge/facts/`, `.cpforge/downloads/`,
 `.cpforge/fetch/`, `.cpforge/archive/`,
 `.cpforge/quarantine/`, `.cpforge/submit/` and the
 files `.cpforge/state.toml`,
 `lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
+`.cpforge/cache/http/` is the disposable HTTP cache of the sites contract
+§6, within `cache/`.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
 (initial feature release) are disposable; a `downloads/` entry is removed
 only by its protocol (§5.8.3), and `fetch/` is not disposable; under `submit/` only unreferenced versions are removed, by `cpf
@@ -452,7 +449,7 @@ An editor saving an older buffer after the tool overwrites the tool's change.
   (removed with the no-follow walker, §2, whatever its type), and in the
   **metadata recovery locations** (the workspace root, `.cpforge/`, each
   `problems/<p>/` and `problems/<p>/tests/`, each `contests/<c>/`, and
-  *(draft)* each `.cpforge/facts/<p>/`), non-recursively, only regular files
+  each `.cpforge/facts/<p>/`), non-recursively, only regular files
   named exactly `.cpf-tmp-` + 32 lowercase hex digits. The `.cpf-` prefix is
   reserved (§2.1), so no name cpf validates can match; a matching file
   created outside cpf is removed (documented, §3). Temporary files inside a
@@ -665,7 +662,7 @@ unregistered candidates refuse before admission. Case selection never uses a
 positional id, so it cannot collide with these subcommands. Zero selected tests
 still build the target, then report `no_tests` if the build succeeds.
 
-### 5.4 `cpf adopt <path>` *(draft)*
+### 5.4 `cpf adopt <path>`
 
 Lock. Validate the path (relative to the problem directory, no `..`, no link
 component, an existing regular file, not in a reserved tree); edit
@@ -682,7 +679,7 @@ kept. **Both lists** are validated like `adopt` paths when read; invalid or
 hand-edited entries that fail validation are reported by `status`/`fsck`
 and ignored, never acted on.
 
-### 5.5 `cpf gitignore [--write]` *(draft)*
+### 5.5 `cpf gitignore [--write]`
 
 Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
 `.cpforge/staging/`, `.cpforge/downloads/`, `.cpforge/submit/`, `.cpforge/archive/`,
@@ -704,7 +701,7 @@ nothing written. Validate before each publish attempt (also every Windows
 retry) exactly as §4.4 step 4, then atomic replace (§4.2). Same stated
 guarantee as §4.4: validation is not compare-and-swap.
 
-### 5.6 `cpf fsck [--apply]` *(draft)*
+### 5.6 `cpf fsck [--apply]`
 
 Lock (with the usual §4.5 leftover recovery, as for every locked
 operation). Reports: dangling contest references, problem directories
@@ -1907,13 +1904,16 @@ The archive class `notes` (design §7a) is the archive contract's.
 ```
 .cpforge/runs/<job-id>/            time-ordered + random id, never reused
     lease                          lock file held by the job owner
-    job.toml                       (draft) schema, (epoch, n) admission sequence
+    job.toml                       schema, (epoch, n) admission sequence
     report.json
     inputs/<test-id>.in|.ans       frozen copies (§7)
-    inputs/src/...                 (draft) captured solution-target sources (§7)
+    inputs/src/...                 captured solution-target sources (§7)
     inputs/capture.json            capture manifest (report contract §4.2)
     builds/<build-id>/             fresh output directory per build (build planning)
     <run-id>/  spec.json record.json cleanup.log  out/stdout out/stderr  cwd/
+    <run-id>/out/output            extracted output file of a file-based I/O run (execution contract §5.6), outside cwd/
+    <run-id>/judge/report, judge/tout  extracted judge artefacts (execution contract §2.1), outside cwd/
+    <run-id>/transcript/           session transcript of a relay-mode interactor run
     inputs/roles/<role>/...        captured role files (stress: also generator, brute)
     iterations/<k>.<role>/         iteration run directory, the <run-id>/ layout (stress contract §3.1)
     failures/<id>/                 staged saved failure until promotion (stress contract §7.5)
@@ -1932,6 +1932,10 @@ iteration (stress contract §6.3); a passing or counted-only iteration's
 directories are removed at its retirement. `failures/` holds staged
 failures that are not yet promoted or whose promotion failed.
 
+For a judge run, `<run-id>/cwd/` is its private directory with the staged
+`input`, `output`, `answer`, `tout` and the judge's `report` (execution
+contract §2.1).
+
 `<run-id>` is `r` + the five-digit admission index (report contract §3.4);
 `<build-id>` is the build's run id.
 
@@ -1944,7 +1948,7 @@ The workspace lock is held **continuously** from step 1 to step 5:
 
 1. Lock; leftover recovery (§4.5).
 2. Prune steps 1–2 (§6.3): select and rename candidates to `.reclaim-*`.
-2a. *(draft)* Allocate the admission sequence: classify `job-seq` (§9);
+2a. Allocate the admission sequence: classify `job-seq` (§9);
    `missing` or `malformed` → admission fails closed ("run `cpf fsck
    --apply`"); `unreadable` → fails closed naming the I/O error ("fix access
    to `.cpforge/job-seq`, or remove it and run `cpf fsck --apply`");
@@ -1952,7 +1956,7 @@ The workspace lock is held **continuously** from step 1 to step 5:
    refused (`SequenceExhausted`). Otherwise atomically replace it with `next + 1` (§4.2); the
    job's sequence is `(epoch, next)`.
 3. Create `runs/<job-id>/` (`create_dir`, fresh id).
-3a. *(draft)* Publish `job.toml` no-clobber with the sequence.
+3a. Publish `job.toml` no-clobber with the sequence.
 4. Create `lease` and lock it non-blockingly (new file: must succeed).
 5. Release the workspace lock.
 6. Prune step 3: delete the renamed `.reclaim-*` directories, outside the lock.
@@ -2021,7 +2025,7 @@ ends job members with the `cpf` process (execution contract §4.3).
 ### 6.3 Pruning
 
 Runs inside job admission (§6.2, which keeps the lock across steps 1–2 and
-its own directory creation) and in `cpf clean` (steps 1–3 directly). *(draft)*
+its own directory creation) and in `cpf clean` (steps 1–3 directly).
 `cpf clean` plans by default and with `--apply` prunes with a **zero**
 retention budget (`keep_jobs = 0`, `workspace_bytes = 0`): every inactive
 job directory is a candidate except newer-schema ones (§9, reported);
@@ -2093,9 +2097,12 @@ It never touches anything else.
   until a later prune succeeds.
 - **Per-job accounting definition:** outstanding logical bytes of files `cpf`
   creates for the job, admitted through the execution contract §5.4 reservation **before**
-  each allocation (captures, frozen input copies and clones, file-I/O copies
-  into `cwd/`, specs, records, reports, logs, the capture manifest and the
-  report reservation (report contract §3.7), and their temp files during
+  each allocation (captures, frozen input copies and clones, the staged
+  input in `cwd/` and the extracted output file `out/output` of file-based
+  I/O runs (execution contract §§5.4, 5.6), judge staging copies and
+  session transcripts (execution contract §5.4), specs, records, reports,
+  logs, the capture manifest and the report reservation (2 × the report
+  bound of the plan, report contract §3.7), and their temp files during
   replacement), with checked arithmetic; released when the file is removed or
   when the job's owner is released. Reflinks count at full logical length.
 - **Release after confirmed removal.** A stress job
@@ -2110,16 +2117,23 @@ It never touches anything else.
   every budget (stress contract §7.5).
 - **Child output:** after each run, `cwd/` beyond `cwd_bytes` (*default*
   256 MiB) is cleared and `CwdOverflow{bytes}` recorded (diagnostic, not a
-  verdict). After each build, output beyond the build cap (configuration contract) →
+  verdict). For a judge run, `cwd/` is measured only after the judge's
+  report and `tout` were read and its staged copies removed; for a
+  file-based I/O run, only after the output file was collected and the I/O
+  scratch removed (execution contract §§2.1, 5.6). Staged files never count
+  towards `cwd_bytes`. After each build, output beyond the build cap (configuration contract) →
   `BuildOutputTooLarge`, the build directory is removed (a failed removal is
   reported) and nothing runs from it.
 
-### 6.5 Run facts *(draft)*
+### 6.5 Run facts
 
 - One fact per (problem, solution target): `.cpforge/facts/<problem>/
   <target>.toml` (`schema`, `epoch`, `n`, job id, finish time, verdict
   summary, `source` and `tests` fingerprints, workspace design §3.2 encoding,
-  and the job's capture check, §7).
+  the job's capture check, §7, and `judge`: the judge fingerprint, 64
+  lowercase hex characters, configuration contract §9.1.3, absent for a
+  problem without a role; an absent field is valid and means none). The
+  verdict summary takes every job-verdict token of report contract §2.7.
 - An existing fact and `job-seq` are classified by §9's **record
   classification** (`missing`, `unreadable`, `malformed`, `too_new`,
   `valid`). Fact fields validated for `valid`: `epoch` (§9 encoding), `n`
@@ -2185,7 +2199,7 @@ capture failure (class `workspace`, exit 8).
   output is read from there.
 - `TestStore::freeze_into` writes only into an admitted job's `inputs/`
   through the `JobInputs` capability from admission.
-- *(draft)* **Source capture**. A job's **admission is complete
+- **Source capture**. A job's **admission is complete
   only after its freeze**: the §6.2 workspace-lock section (steps 1–5) ends
   with the lease held and the lock released; the freeze then runs outside
   the lock: tests (above), then the selected solution target's **captured
@@ -2195,9 +2209,11 @@ capture failure (class `workspace`, exit 8).
   the job budget). Each destination file is created **exclusively**
   (`create_new`); an existing destination (a filesystem alias the plan's
   same-file check missed, e.g. after a rename between plan and capture) →
-  capture error `SourceCollision{path}`, nothing overwritten. No build or
-  run starts before the freeze is complete; a capture failure starts
-  none.
+  capture error `SourceCollision{path}`, nothing overwritten. Then each
+  declared role's captured files are copied into `inputs/roles/<role>/`
+  with the same rules (configuration contract §9.1.3); the judge
+  fingerprint is streamed from the copied bytes. No build or run starts
+  before the freeze is complete; a capture failure starts none.
 - **Fingerprint**: the `source` fingerprint is computed with the
   exact byte encoding of workspace design §3.2, streaming the **copied bytes as written**
   into it (not per-file digests); `status` uses the same encoding over the
@@ -2302,8 +2318,10 @@ enabled = true
 - **Answers:** `answer` omitted means deliberately absent; an `answer`
   naming a zero-byte file is present and empty; an `answer` naming a missing
   file is an entry error. A registered entry's answer is never inferred from
-  a sibling file. Whether a test without an answer can pass is decided by
-  the comparator and job tasks.
+  a sibling file. How a test whose answer is omitted is judged is decided
+  by `[check] answer` (configuration contract §9.1.4): omitted means
+  deliberately none, a zero-byte file is legitimately empty, and an
+  `answer` naming a missing file is an unhealthy entry.
 - No hashes for `custom` tests: the current file is the content, and job
   admission hashes the bytes it copies (§7). Download hashes arrive with
   fetch and mean "content at download time".
@@ -2380,13 +2398,15 @@ finalizes them (execution contract §6.2).
   never replayed.
 - Governed formats: `cpforge.toml`, `problem.toml`, `tests.toml`,
   `contest.toml` (user-editable, ordered `[[problem]]` membership, §5.2);
-  `state.toml`, `spec.json`, `record.json`, `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
+  `state.toml`, `spec.json`, `record.json`, `report.json`, `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
   Also `.cpforge/fetch/<p>/journal.toml`, `status.toml`
   and `txn-<txn>.toml` (tool-only, schema 1, unknown keys `malformed`, each
   field set of §5.8 owned by its writer). The `tests.toml` download fields
   (§8.1), the `problem.toml` tool fields and `contest.toml` `[contest]`
   (§5.8.13) are additions to schema 1 of those user-editable formats: a
   version without fetch preserves them as unknown keys.
+- `problem.toml` `[check]` is not decoded by the record classification;
+  configuration validates it (configuration contract §9.1).
 - The `problem.toml` organisation fields and the
   `contest.toml` top-level `tags` (§5.9.1) are additions to schema 1 of
   those formats; a version without them preserves them as unknown keys.
@@ -2446,7 +2466,7 @@ finalizes them (execution contract §6.2).
   `schema` alone; decode and validate fields. Directory binding of a valid
   identity (§2.1) is checked after classification and is not part of it.
 - **Record classification** of the tool-only records `state.toml` (§5.7)
-  and, *(draft)*, `job-seq`, `facts/*.toml` and the fetch records, one enum used everywhere: `missing` (no file);
+  and `job-seq`, `facts/*.toml` and the fetch records, one enum used everywhere: `missing` (no file);
   `unreadable` (the bytes cannot be read: I/O error, permission, not a
   regular file); `malformed` (not TOML; `schema` absent or not an integer;
   `SchemaTooOld`, none exists yet; or a supported schema with a missing or
@@ -2455,7 +2475,7 @@ finalizes them (execution contract §6.2).
   alone; only for the supported schema decode and validate the fields. A
   file is never decoded as the current schema before its `schema` is
   checked.
-- *(draft)* **Encodings** in these records and in `job.toml`: `epoch` is a
+- **Encodings** in these records and in `job.toml`: `epoch` is a
   string of exactly 32 lowercase hex digits (128 bits); `n` and `next` are
   **decimal strings** (TOML integers are signed 64-bit, so a `u64` is not
   stored as one): ASCII digits only, no sign, no leading zero except `"0"`,
@@ -2476,16 +2496,16 @@ finalizes them (execution contract §6.2).
 | `test add` | files absent, or published but unregistered (`ls` shows them as candidates) | entry registered |
 | job admission (lease locked) | no dir; dir without lease; or dir with a lease file not yet locked (both interrupted, inactive, reclaimable) | job dir with lease: inactive orphan once `cpf` is dead, reclaimable |
 | prune rename | job dir intact | `.reclaim-*`, deleted by a later prune |
-| *(draft)* `job-seq` replace (admission 2a) | old counter | counter advanced; no job dir yet = an unused number (gap) |
-| *(draft)* `job.toml` publish (3a) | job dir without `job.toml`: interrupted admission | job dir with sequence, lease not yet locked: interrupted, reclaimable |
-| *(draft)* fact replace (§6.5) | previous fact | new fact, even if the lease was never released |
-| *(draft)* fact publication with another epoch or unavailable `job-seq` | previous fact, `NotPublished` reported | — (no commit) |
+| `job-seq` replace (admission 2a) | old counter | counter advanced; no job dir yet = an unused number (gap) |
+| `job.toml` publish (3a) | job dir without `job.toml`: interrupted admission | job dir with sequence, lease not yet locked: interrupted, reclaimable |
+| fact replace (§6.5) | previous fact | new fact, even if the lease was never released |
+| fact publication with another epoch or unavailable `job-seq` | previous fact, `NotPublished` reported | — (no commit) |
 | `init` `job-seq` (§5.1) | no `job-seq`, no `cpforge.toml`: rerun is initial | `job-seq` without `cpforge.toml`: rerun keeps it |
 | `init` `cpforge.toml` (§5.1) | valid `job-seq`, no `cpforge.toml`: rerun keeps the sequence and publishes config | complete workspace; rerun keeps both files |
-| *(draft)* `fsck` new epoch | `job-seq` missing or malformed, admission refused | new epoch; jobs of old epochs publish no fact |
-| *(draft)* `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
-| *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
-| *(draft)* adopt / gitignore | old content | new content |
+| `fsck` new epoch | `job-seq` missing or malformed, admission refused | new epoch; jobs of old epochs publish no fact |
+| `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
+| fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
+| adopt / gitignore | old content | new content |
 | `tag`, `untag`, `mark` edit (§5.9.4) | record byte-identical to before; temp may remain (recovered by the next locked operation) | record with exactly the new organisation values and every other byte unchanged |
 | `notes` publish (§5.9.5) | no `notes.md`; temp may remain (recovered) | empty regular `notes.md` |
 | every fetch boundary | see the fetch crash matrix below | |
@@ -2717,8 +2737,8 @@ contest fetch completes its membership.
 - Retention: per-job budget refusal (execution contract); `CwdOverflow`;
   `BuildOutputTooLarge` removes the build directory; a mount point inside a
   job directory is skipped by measuring and deletion.
-- Shared `cwd`: never measured or cleared; every file-I/O problem, including
-  one with shared `cwd`, is rejected (configuration contract §6.2).
+- Shared `cwd`: never measured or cleared; a file-based I/O problem with a
+  shared `cwd` is refused (configuration contract §11).
 - Freeze: edits between tests and between repeat iterations do not change
   later runs; an edit and an injected interruption **during** freezing (the
   run does not start; the manifest is never partial); freeze failure starts

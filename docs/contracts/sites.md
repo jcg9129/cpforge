@@ -1238,6 +1238,12 @@ exactly 1 request. The problem-level and selection-level assertions of
 
 ## 11. Amendments to other documents
 
+Applied in the configuration contract (§11.1 rows, config §1.1), the
+report contract (§11.2, report §§5, 6.1) and the storage contract (§11.3:
+S §3 HTTP cache, S §2.1 native-id grammars). The optional S §5.8.10
+`page_sha256` field and the design items of §11.3 are not applied (the
+latter belong to the design ratification).
+
 ### 11.1 Configuration (config §1.1)
 
 | Key | Type | Layers | Notes |

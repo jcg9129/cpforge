@@ -6,16 +6,12 @@ hook switch §8.3), with the expansion amendment of 2026-11-20 (Windows
 environment-name equality §4.3, resolver details and launch kinds §4.4,
 preparation states §4.5, expansion context §5.2, interpreter rules §5.3)
 and the grader-target amendment of 2026-11-20 (file roles §6.2, problem
-`entry` §6.4, template destination §6.5, grader tasks §9), settled, not yet
-implemented.
+`entry` §6.4, template destination §6.5, grader tasks §9) and the
+managed-workspace amendment (v4: `[workspace] ignore` §7.4, the design of
+`../design-workspace.md` §2.4, and source capture), all implemented.
+References labelled *workspace design* point to `../design-workspace.md`.
 
-**Managed-workspace amendment (v4): settled, not yet implemented.**
-`[workspace] ignore` (§7.4) specifies the design in
-`../design-workspace.md` §2.4. Amended content is marked *(draft)* below and
-is settled but not yet implemented. References labelled *workspace design* point to
-`../design-workspace.md`.
-
-**Gate-2 additions.** The workflow status vocabulary `[status] values`
+**Gate-2 additions** (approved; implemented by the gate-2 tasks). The workflow status vocabulary `[status] values`
 (§1.1, §7.5) for `cpf mark` (storage contract §5.9). The `problem.toml`
 table `[check]` (§9.1): judging kind, role specs and their capture, answer
 policy, scoring, display profile, interactive settings and the
@@ -86,6 +82,9 @@ and the problem record, not to configuration.
 | `archive.quarantine.retention_days` | integer 0–36 500 | 1, 2 | §7.6 |
 | `submit.clipboard` | boolean | 1, 2 | default `false`; submission contract §9.3 |
 | `submit.test_dir` | config-relative path | 1, 2 | base of the external test directory; default the OS temporary directory; submission contract §7.1 |
+| `sites.atcoder.language` | `"en"` or `"ja"` | 1, 2 | default `"en"`; sites contract §8.4 |
+| `http.offline` | boolean | 1, 2 | default `false`; `--offline` sets it for one invocation; sites contract §6 |
+| `http.cache_dir` | absolute path string | 1 | permit directory base (sites contract §4.1); `CPF_CACHE_DIR` wins. Not layer 2: a workspace value would split the per-host permit between workspaces |
 | `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
@@ -527,7 +526,7 @@ undeclared placeholder does not make it available. Distinct causes stay
 distinct in errors: no selected problem, not inside a workspace, a target
 without a `file` artifact, a test without an answer. `{source}` is derived
 from `{sources}`; an empty `sources` list is available and expands
-`{sources}` to zero elements, while `{source}` then fails. *(draft)* In a
+`{sources}` to zero elements, while `{source}` then fails. In a
 managed workspace the source values are the captured copies supplied by job
 admission; expansion never falls back to the originals.
 
@@ -618,7 +617,7 @@ and limits.
   Roles live only in the problem layer: a language cannot know which files
   a judge provides. They change neither placeholder meaning nor cardinality:
   `{source}` still requires exactly one member of `sources`.
-- *(draft)* In a managed workspace, sources are **captured** into the job
+- In a managed workspace, sources are **captured** into the job
   (storage contract §7) and every `{sources}` / `{source}` expansion names
   the copy; outside the amendment they are read in place. Test data is
   always frozen.
@@ -861,7 +860,7 @@ never a verdict and never a command failure (storage contract §6.4); `BuildOutp
 is a **build failure** (the build stage failed; nothing runs from it), not an
 infrastructure failure.
 
-### 7.4 Workspace ignore patterns *(draft)*
+### 7.4 Workspace ignore patterns
 
 `[workspace] ignore = ["*.swp", "scratch/**"]`, allowed in layers 1 and 2
 (user, workspace); an array, so a later layer replaces it (§2). Patterns
@@ -1608,7 +1607,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     file → both reported; the workspace's other keys still checked.
   - `cpf add` with `languages.cpp.template = { path = "t.cpp" }` and problem `sources = ["a.cpp",
     "b.cpp"]` → error, nothing published; `cpf config check` → exit 0.
-- *(draft)* **Ignore patterns (§7.4), exact results:**
+- **Ignore patterns (§7.4), exact results:**
   - `*.o` matches `a.o` and `x/y/a.o`; `x/*.o` matches `x/a.o`, not
     `x/y/a.o` or `y/x/a.o`; `**` matches every file at any depth;
     `x/**/a.o` matches `x/a.o` and `x/p/q/a.o`; `a[b]`, `!a`, `a\b`,
@@ -1624,7 +1623,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     (ASCII-only folding); Linux: `*.O` does not match `a.o`.
   - Composed vs decomposed `é` (U+00E9 vs `e` U+0301): no match on any
     platform (no normalisation); `?.txt` matches only the composed form.
-- *(draft)* **Source capture accident guard (storage contract §7)**, workspace
+- **Source capture accident guard (storage contract §7)**, workspace
   `/abs/ws`, job directory `/abs/ws/.cpforge/runs/J`:
   - `argv = ["g++", "{sources}", "-o", "{artifact}"]` → valid (expansions
     are inside the job directory), capture check `checked`.

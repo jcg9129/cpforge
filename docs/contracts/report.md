@@ -3050,167 +3050,19 @@ status (§5.2); the configuration rows are C §11.
 
 ## 10. Amendments to other documents
 
-Amendments applied to the other documents with this contract.
+Every amendment text this contract prescribed for the execution, storage
+and configuration contracts (gate 1, judging and file-based I/O) and for
+`src/exit.rs`, `src/error.rs` and the release profile is applied in those
+documents and files. The texts prescribed for the design documents and the
+compare spec remain, to be applied by the design ratification:
 
-- **E §6.2 (Persistence)**, add: "A job settles its persistence before
-  finalizing its report: it waits, outside the verdict lock, until every
-  artefact it enqueued (specs, records, first `cleanup.log` publications)
-  has a result, published or `PersistError`; this ends by the last enqueue
-  + 5 s. The report then names a path for every published artefact and an
-  error for every other (report §2.9 W)." Replace the size bound "report ≤
-  16 KiB + 64 KiB × runs" by "report ≤ the report bound of the plan
-  (report §3.7)".
-- **E §5.4**, add after the metadata reservation: "Before its first run the
-  job also reserves the report bound of report §3.7 for `report.json` and
-  its temporary file."
-- **E §6.4**, replace "A comparison already started finishes …; one not
-  started when intent is set is skipped" and "The job report says
-  `cancelled` and is still finalized" by: "Intent arbitrates check
-  admission per report §2.4. A check I/O failure is infrastructure unless
-  the check is diagnostic, in which case it is evidence only. The job
-  verdict follows the precedence of report §2.7 (`internal_error`, then
-  `infrastructure`, then `cancelled`, then the outcome rows): it is
-  `cancelled` only if no higher-precedence value applies and some primary
-  execution or check was stopped, skipped or refused by cancellation;
-  intent that stopped nothing leaves the completed verdict. Every intent
-  set before report finalization is recorded with its phase (report §2.9)
-  and the process status follows report §5.2. The report is still
-  finalized."
-- **E §8.2**, replace "exit with the cancellation exit code" by "terminate
-  per report §5.3 (Unix: re-raise the forcing signal; otherwise 6)", and add
-  "no further intentional write to stdout or stderr begins after force exit
-  starts".
-- **E §9**, replace the `RunFinished` bound "≤ 4 KiB" by "≤ 7 KiB (report
-  §3.7)"; add: "`seq` starts at 0 and is assigned in one critical section
-  with the enqueue-or-drop decision; `JobFinished` takes the next number
-  after the main channel is closed. The terminal slot is filled after
-  report persistence (report §2.9 S), so `JobFinished.report` reflects it.
-  `RunStarted` carries `execution` and `role` on the wire."; replace
-  "Otherwise `None`, and the report's `PersistError` says why." by
-  "Otherwise `None`; the reason is in the delivered document's
-  `persistence` member (report §4.11) and on stderr, never in
-  `report.json`, which cannot contain its own persistence result."; replace
-  "Transport failure (closed stdout, `EPIPE`) gives the report-delivery
-  exit code (report transport)." by "Transport failure (closed stdout,
-  `EPIPE`) is a delivery failure; the process status follows report
-  §5.2."
-- **E §6.4 / §5.3** (budgets), add: "A `Discard` breach on a stream that is
-  not compared is a note, not an output-budget outcome (report §2.2)."
-- **E (spec record)**: `spec.json` encodes native values as report §3.3
-  `ns`. `spec_digest` is unaffected (it is computed over E §2's binary
-  encoding). If `spec.json` has already been written with another native
-  encoding, this is a `spec.json` schema increment in E.
-- **S §6.1**: in the layout, `<run-id>` is `r` + five-digit admission index
-  (report §3.4), `builds/<build-id>` uses the build's run id, and
-  `inputs/capture.json` is added: "capture manifest (report §4.2)".
-- **S §6.2**, replace "The capture check and the captured file lists live
-  in the ready job value and reach reports (report schema) and facts (§6.5);
-  they are not persisted here." by "The capture check and the captured file
-  lists are persisted in the capture manifest `inputs/capture.json`
-  (report §4.2), published no-clobber as the last capture step with its
-  size reserved first; a manifest that is not committed is a capture
-  failure and the job never becomes ready. They are not persisted in
-  `job.toml`. Reports carry bounded previews, the list digest and the
-  manifest path; facts carry the capture check (§6.5)."
-- **S §6.4**, add to the per-job accounting list: "the capture manifest and
-  the report reservation (report §3.7)".
-- **S §6.5**, replace "Publication at job finalization of a job that
-  completed (not cancelled, not failed before its report)" by "Publication
-  in report phase A by a job whose primary verdict is not `cancelled`,
-  `infrastructure` or `internal_error`"; insert before the decision table:
-  "After reading `job-seq` and the existing fact, the job reads its
-  cancellation intent once (the **cancellation cutoff**); intent set →
-  `NotAttempted{Cancelled}`, nothing written. Intent set after the cutoff
-  does not prevent the replace."; replace "A job cancelled or interrupted
-  before the commit leaves the previous fact unchanged" by "A job cancelled
-  before the cutoff, or interrupted (death) before the commit, leaves the
-  previous fact unchanged; cancellation after the cutoff does not stop the
-  replace, and a committed fact is never rolled back."
-- **S §5.2** step 5 and **S §5.3** step 4: "exit 1" → failure class
-  `partial` (9). **S §5.7**: "exit code is 1 (`NoSelection` included) until
-  the report transport assigns codes" → "failure class `workspace` (8)".
-- **C §8.1**, replace the exit-status paragraph by: "Exit status of `cpf
-  cmd`: selected by report §5.2, whose precedence governs. In its terms:
-  usage 2; forced cancellation per report §5.3; an internal failure 70; a
-  delivery failure of `--json`/`--events` 11; any recorded cancellation
-  (including one after every run completed) per report §5.3; plan errors 7;
-  workspace errors 8; job verdict `infrastructure` 10; a failed build
-  (`needs_build`) 3; a run failure (§8.2) 1; otherwise, when every planned
-  run succeeded, 0."
-- **C §8.2**, replace "remaining runs recorded `skipped`" by "remaining
-  runs have coverage `skipped{stop_policy}` (report §2.1)"; add: "Planned
-  runs count only hooks allowed by trust, the switch and the depth guard at
-  plan time; a cancellation records remaining runs as
-  `skipped{cancelled}`."
-- **C §8.3**, replace "`after_test` once per `cpf test` invocation after its
-  job finished, also when tests failed, never after cancellation or an
-  infrastructure failure of the job" by "`after_test` in report phase H,
-  after fact publication, when the primary verdict is not `cancelled`,
-  `infrastructure` or `internal_error` and no cancellation was requested";
-  add: "An `after_test` hook's ordinary failure (a failed, cancelled or
-  skipped hook) is a warning in the triggering report; a hook internal
-  error is an internal failure of the job (report §2.6, status 70).
-  `on_switch` hooks run as a job of kind `hook` (report §2.10). Its
-  ordinary failures (verdicts `wall_deadline`, `output_budget`, `signal`,
-  `nonzero_exit`, `infrastructure`) and its admission failures of class
-  `workspace` or `config` are warnings and leave the status of `cpf switch`
-  at 0; a cancellation selects the cancellation status and an internal
-  failure (verdict `internal_error` or a caught panic) selects 70, by the
-  precedence of report §5.2."
-- **C §10**, replace the JSON bullet by: "JSON follows report §3 (canonical
-  profile, reader rules). Mapping of configuration values: TOML string →
-  JSON string; integer → decimal string (`i64`); float → `dec` (`{"text",
-  "bits"}`), for every float, not only comparator fields; boolean → JSON
-  boolean; array → JSON array; table → JSON object in key order of the
-  effective configuration; native paths and values (program paths,
-  environment values, file paths) → `ns` (`{"utf8"}` iff valid UTF-8
-  without control characters, else `{"bytes_b64"}`; Windows WTF-8). TOML
-  date-times are not accepted by any configuration key (phase-1 error), so
-  they need no mapping. The document has `schema`, `document:
-  "config_show"` and `platform`." Replace "Exit 0 or the config-error code
-  (report transport)" by "exit 0 or 7".
-- **`src/exit.rs`, `src/error.rs`**: replace the provisional `Failure = 1`
-  with §5.1 and failure classes; `Cargo.toml` release profile keeps
-  `panic = "unwind"`.
 - **Checkers design** (CLI exit codes "belong to the report transport"): no
   text change; §5 provides them.
-
-Judging amendment text for the other documents (the configuration and execution contracts carry
-theirs in place):
-
-- **S §6.1** (layout), add: `inputs/roles/<role>/...` "captured role files
-  (configuration contract §9.1.3)"; for a judge run, `<run-id>/cwd/` is its
-  private directory with the staged `input`, `output`, `answer`, `tout` and
-  the judge's `report` (execution contract §2.1); `<run-id>/transcript/`
-  "session transcript of a relay-mode interactor run".
-- **S §6.4**, add to the per-job accounting list: "judge staging copies and
-  session transcripts (execution contract §5.4); the report reservation is
-  2 × the report bound of the plan (report contract §3.7)".
-- **S §6.5**, add the fact field `judge`: the judge fingerprint (64
-  lowercase hex characters, configuration contract §9.1.3), absent for a
-  problem without a role; an absent field is valid and means none. The
-  verdict summary takes every §2.7 token.
-- **S §7**, add after source capture: "Then each declared role's captured
-  files are copied into `inputs/roles/<role>/` with the same rules
-  (configuration contract §9.1.3); the judge fingerprint is streamed from
-  the copied bytes."
-- **S §8.1**, replace "Whether a test without an answer can pass is decided
-  by the comparator and job tasks." by "How a test whose answer is omitted
-  is judged is decided by `[check] answer` (configuration contract §9.1.4):
-  omitted means deliberately none, a zero-byte file is legitimately empty,
-  and an `answer` naming a missing file is an unhealthy entry."
-- **S §9**, add: "`problem.toml` `[check]` is not decoded by the record
-  classification; configuration validates it (configuration contract
-  §9.1)."
 - **Workspace design §3.2**, add the judge fingerprint (configuration
   contract §9.1.3) to the run fact and its comparison in `status` (§6.1
   `judge`).
 - **Compare spec §8**, replace "needs its checker (initial feature
   release)" by "needs its checker (configuration contract §9.1)".
-- **S §6.4** (child output), add: "For a judge run, `cwd/` is measured only
-  after the judge's report and `tout` were read and its staged copies
-  removed; staged files never count towards `cwd_bytes` (execution contract
-  §2.1)."
 - **Checkers design §6.1 rule 5** (needs ratification): add to rule 5.4
   "if reading or extracting the judge's report or `tout` fails on cpf's
   side (a reservation refusal or an I/O error on an artefact that passed
@@ -3232,29 +3084,6 @@ theirs in place):
   not proof of the header compiled, and without one the reason is
   recorded" (execution contract §2.1), since cpf does not observe the
   compiler's file accesses and captures no build trace.
-- **S §6.1** (layout), also add `<run-id>/judge/report`, `judge/tout`
-  "extracted judge artefacts (execution contract §2.1), outside `cwd/`".
-- **S §2** (Shared `cwd`), replace "file-based I/O
-  problems with a shared `cwd` are rejected in the CLI foundation. In this
-  version every file-I/O problem is rejected, regardless of `cwd`
-  (configuration contract §6.2)" by "a file-based I/O problem with a shared
-  `cwd` is a configuration error (configuration contract §6.2); file-based
-  I/O always runs in the run's own `cwd/` (execution contract §5.6)".
-- **S §6.1** (layout), add `<run-id>/out/output` "the
-  extracted output file of a file-based I/O problem (execution contract
-  §5.6), outside `cwd/`".
-- **S §6.4**, in the per-job accounting list replace
-  "file-I/O copies into `cwd/`" by "the staged input in `cwd/` and the
-  extracted output file `out/output` of file-based I/O runs (execution
-  contract §§5.4, 5.6)"; in "Child output" add: "For a file-based I/O
-  run, `cwd/` is measured only after the output file was collected and
-  the I/O scratch removed (execution contract §5.6); the staged input
-  never counts."
-- **S §10** (tests), replace "Shared `cwd`: never
-  measured or cleared; every file-I/O problem, including one with shared
-  `cwd`, is rejected (configuration contract §6.2)" by "Shared `cwd`: never
-  measured or cleared; a file-based I/O problem with a shared `cwd` is
-  refused (configuration contract §11)".
 - **Design §6.2** (Supervisor), after "files a program
   writes itself are only monitored best-effort (no quota promise)" add:
   "the one exception is the declared output file of a file-based I/O
