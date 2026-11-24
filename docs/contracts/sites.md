@@ -291,8 +291,12 @@ before the request is written (`t_start ≤ t_send < t_start + 30 s`),
 `t_headers` when status line and headers are complete, `t_end` when the
 attempt ends (last body byte read, or the error; `t_end ≤ t_start + 30 s`).
 Every expiry is computed once from its instant and written as an absolute
-time. **Every write** of the state sets `written_at = now` and includes
-the term `now + spacing` in its `max`, so `written_at ≤ next` always holds;
+time. **Write time** `t_w`: each state write reads the wall clock once,
+immediately before rendering the temporary file, and uses that value as
+both `written_at` and the base of its spacing term `t_w + spacing`, which
+every write includes in its `max`; so `written_at ≤ next` always holds.
+The writes of one attempt are the reservation (`t_w = t_start`), the
+header write (`t_wh ≥ t_headers`) and the outcome write (`t_wo ≥ t_end`).
 `pending.since` (when present) is `t_start ≤ written_at`. With the bounds
 below every write satisfies the validity rule of §4.1.
 
@@ -329,22 +333,23 @@ below every write satisfies the validity rule of §4.1.
    A failed write → release, `network{permit}`, no request.
 7. Budget and attempt-deadline recheck; send the one wire request (§2.2)
    and read the response **while holding the permit**. At `t_headers`,
-   before any other await or I/O, the **header write**: `next = max(next,
-   E_h, t_headers + spacing)` with `E_h = t_headers + d_h` (§5,
+   before any other await or I/O, the **header write** at `t_wh`: `next =
+   max(next, E_h, t_wh + spacing)` with `E_h = t_headers + d_h` (§5,
    preprocessing; the term is absent when there is no `d_h`), `pending =
    {body, since = t_start}`; only then is the body read. For a `200`, the
    body is classified by the adapter's marker table (§8.2) **before**
    step 8, still under the permit; a challenge or login result sets the
    body expiry `E_b = t_end + 60 s`.
-8. **Outcome write**: `next = max(next, E_h, E_b, t_end + spacing, t_end +
-   backoff)` (each term present only when §5 gives it), no `pending`.
+8. **Outcome write** at `t_wo`: `next = max(next, E_h, E_b, t_wo +
+   spacing, t_end + backoff)` (each expiry term present only when §5 gives
+   it; `t_wo + spacing ≥ t_end + spacing`), no `pending`.
 9. Release the lock.
 
 - **Bounds of a write**: `next ≤ written_at + 1 h + F + spacing` (the
   largest `E_h`, the fallback and the spacing term), the validity bound of
   §4.1.
-- **Spacing survives a delayed send**: step 8 always adds `t_end +
-  spacing`, so the next request to `h` starts no earlier than spacing
+- **Spacing survives a delayed send**: step 8 always adds `t_wo +
+  spacing` (`t_wo ≥ t_end`), so the next request to `h` starts no earlier than spacing
   after the previous one ended; and a send delayed past `t_start + 30 s`
   never happens (§3.4), so `since + F` always covers a dead attempt.
 - **Monotonic extension.** Every write is `max(old, new)` on the values
@@ -353,16 +358,22 @@ below every write satisfies the validity rule of §4.1.
   keeps the remaining duration.
 - **Write failure after sending** (header write or outcome write:
   temporary write or rename failed, after 3 tries within 1 s): the
-  previous state stays, with its `pending` record. A **known cooldown that
-  could not be persisted** (`E_h` or `E_b`) is honoured fail-closed within
-  the invocation: the outcome is classified as §5 says, every further wire
-  request of the invocation to `h` is refused (`network{permit}`), and the
-  command reports `cooldown_not_persisted{host, retry_at}` with the known
-  expiry. The next process sees only `pending` and applies `since + F`;
-  the server's longer cooldown then comes back on its next request (at
-  most one extra request, the rationale of step 4).
+  permit store cannot be written, so there is nowhere durable for a known
+  cooldown. The previous state stays on disk **with its `pending` record,
+  which cpf never clears afterwards**: the invocation makes no further
+  write and no further wire request to `h` (`network{permit}`), so any
+  later process sees an unfinished attempt and applies `since + F`, exactly
+  as after a kill. The outcome is classified as §5 says; a **known
+  cooldown that could not be persisted** (`E_h` or `E_b`) is reported to
+  the user as `cooldown_not_persisted{host, retry_at}` with the known
+  expiry. **Residual, accepted** (as for the kill below, under the
+  rationale of step 4): a later process may send one request after `since
+  + F` although the site asked for longer; the site answers it with
+  `429`/`Retry-After`, which is then persisted.
+- **No marker, no request**: the `pending` record is part of the
+  reservation write (step 6); if that write fails, nothing is sent.
 - **Cancellation during an attempt** stops the transfer. After the header
-  write, step 8 runs with the known terms (`E_h`, `t_end + spacing`).
+  write, step 8 runs with the known terms (`E_h`, `t_wo + spacing`).
   Before it, step 8 runs with `since + F` and, when headers had already
   arrived, `E_h` (no `pending` left). Then the command ends with the
   cancellation status.
@@ -450,7 +461,7 @@ after attempts 1 and 2, and the persisted expiry term after attempt 3.
 - A response that cannot be read to its end because of a cap is never
   retried.
 
-| Wire result | Retry | Expiry terms of the outcome write (besides `t_end + s`) | Class when final |
+| Wire result | Retry | Expiry terms of the outcome write (besides `t_wo + s`) | Class when final |
 |---|---|---|---|
 | `200`, body a task page or other document | — | — | success / adapter result |
 | `200`, body with challenge or login markers | no | `E_b = t_end + 60 s` | `challenge` / `auth_required` |
@@ -911,8 +922,10 @@ sent), `http.before_send` (after the reservation, before the request is
 written; a test may hold it), `http.after_headers` (headers received,
 before their write), `http.after_header_write`, `http.after_classify`
 (body classified, before step 8), `http.after_outcome_write` (step 8
-written, lock held). The hook records the instants `t_start`, `t_send`,
-`t_headers`, `t_end` of each attempt (wall clock, ms). State assertions read `<h>.next`
+written, lock held), `http.before_header_write`, `http.before_outcome_write`
+(a test may hold them to delay a write). The hook records the instants
+`t_start`, `t_send`, `t_headers`, `t_end` and the write times `t_wh`,
+`t_wo` of each attempt (wall clock, ms). State assertions read `<h>.next`
 at a barrier or after the command, and compare with the expiry formula of
 §4.2 evaluated on the recorded instants, exactly (ms).
 
@@ -943,10 +956,16 @@ at a barrier or after the command, and compare with the expiry formula of
 - **Header write validity**: at every `http.after_header_write` (a `200`
   without cooldown received 5 s (scaled) after a reservation whose `next`
   was `t_start + s`; a `429 Retry-After: 3600`) the state satisfies §4.1:
-  `written_at = t_headers ≤ next`, `pending.since = t_start ≤ written_at`,
-  `next ≤ written_at + 1 h + 92 s`; for the `200` `next = t_headers + s`.
+  `written_at = t_wh ≥ t_headers`, `written_at ≤ next`, `pending.since =
+  t_start ≤ written_at`, `next ≤ written_at + 1 h + 92 s`; for the `200`
+  `next = t_wh + s`, for the `429` `next = max(t_headers + 1 h, t_wh + s)`.
+- **Delayed writes**: the header write held at `http.before_header_write`
+  for 1 s (scaled) → `written_at = t_wh = t_headers + 1 s` (± allowance)
+  and `next = max(E_h, t_wh + s)`; the outcome write held at
+  `http.before_outcome_write` for 1 s → `next = max(…, t_wo + s)` with
+  `t_wo ≥ t_end + 1 s`, and B's next arrival is ≥ `t_wo + s`.
 - **Body challenge**: a `200` whose body carries the challenge markers →
-  at `http.after_outcome_write`, `next = max(t_end + 60 s, t_end + s)`
+  at `http.after_outcome_write`, `next = max(t_end + 60 s, t_wo + s)`
   (scaled), class `challenge`; killed at `http.after_classify` → B applies
   `t_start + 90 s`.
 - **Header cooldown independent of the body**: `429 Retry-After: 30` with a
@@ -963,16 +982,21 @@ at a barrier or after the command, and compare with the expiry formula of
   `http.after_headers` on → `rate_limited`, 3 write tries, the command
   reports `cooldown_not_persisted{host, retry_at = t_headers + 1 h}`, every
   later wire request of the invocation to that host `network{permit}` with
-  0 requests; the state on disk still holds `pending = request`; the next
-  process (renames working again) applies `t_start + 90 s`, its request
-  receives `429 Retry-After: 3600` again and persists it.
+  0 requests and no further write attempt; after the command the state on
+  disk is byte-identical to the reservation write (`pending = request`,
+  `since = t_start`). The next process (renames working again) refuses
+  until `t_start + 90 s`, then sends exactly one request, which receives
+  `429 Retry-After: 3600` and persists `t_headers' + 1 h`; a third process
+  refuses until then (the accepted residual: one extra request).
+- **Reservation write failure**: renames failing before step 6 → 0
+  requests, `network{permit}`.
 - **Outcome write failure** without a cooldown (`200`, renames failing at
   `http.after_classify`): success for this request, later requests to the
   host in the invocation `network{permit}`, the next process applies
   `t_start + 90 s`. A failed directory sync after a successful rename
   (injection hook) → warning only, the new state is in effect.
 - **Cancellation**: during the attempt after `t_headers` (`429
-  Retry-After: 30`) → state `max(t_headers + 30 s, t_end + s)`, no
+  Retry-After: 30`) → state `max(t_headers + 30 s, t_wo + s)`, no
   `pending`; before `t_headers` (headers delayed 5 s) → state `t_start +
   90 s` (scaled), no `pending`; in each case the cancellation status.
 - **Lock failure**: `<h>.lock` is a directory, or the permit directory is
@@ -1002,28 +1026,29 @@ at a barrier or after the command, and compare with the expiry formula of
 
 One test per row and step of §5. Each asserts the server-counted wire
 requests, the class, and the state after the last attempt, equal (ms) to
-`max` of §4.2 step 8's terms on the recorded `t_headers` and `t_end`:
+`max(listed terms, t_wo + s)` on the recorded `t_headers`, `t_end` and
+outcome-write time `t_wo` of that attempt (§4.2 step 8):
 
-| Script | Requests | Class | Expiry terms of the last outcome write |
+| Script | Requests | Class | Expiry terms of the last outcome write (besides `t_wo + s`) |
 |---|---|---|---|
-| `502`, `502`, `200` | 3 | success | `t_end + s` |
+| `502`, `502`, `200` | 3 | success | — (`t_wo + s` only) |
 | `502` × 3; `504` × 3; `503` (unusable) × 3 | 3 | `network{status}` | `t_end + 8s` |
-| `503` no `Retry-After`, then `200` | 2 | success, second arrival ≥ first `t_end + 2s` | `t_end + s` |
-| `503` `Retry-After: 5`, then `200` | 2 | success, second arrival ≥ first `t_headers + 5 s` | `t_end + s` |
-| `429` `Retry-After: 5` × 3 | 3 | `rate_limited` | `t_headers + 5 s`, `t_end + s` |
+| `503` no `Retry-After`, then `200` | 2 | success, second arrival ≥ first `t_end + 2s` | — (`t_wo + s` only) |
+| `503` `Retry-After: 5`, then `200` | 2 | success, second arrival ≥ first `t_headers + 5 s` | — (`t_wo + s` only) |
+| `429` `Retry-After: 5` × 3 | 3 | `rate_limited` | `t_headers + 5 s` |
 | `429` without `Retry-After` | 1 | `rate_limited` | `t_headers + 60 s` |
 | `429` `Retry-After: 120`; `503` `Retry-After: 120` | 1 | `rate_limited` | `t_headers + 120 s` |
 | `429` `Retry-After: 99999` | 1 | `rate_limited` | `t_headers + 1 h` |
-| `429` with an HTTP-date 30 s after `t_headers` (each of the 3 formats), then `200` | 2 | success | `t_end + s` |
+| `429` with an HTTP-date 30 s after `t_headers` (each of the 3 formats), then `200` | 2 | success | — (`t_wo + s` only) |
 | `429` with a malformed value, a past date, 11 digits, two fields | 1 each | `rate_limited` | `t_headers + 60 s` |
-| `503` with each unusable value above, then `200` | 2 | success | `t_end + s` |
+| `503` with each unusable value above, then `200` | 2 | success | — (`t_wo + s` only) |
 | `403`; `503` with `cf-mitigated: challenge` | 1 each | `challenge` | `t_headers + 60 s` |
 | `200` whose body has challenge markers; login markers | 1 each | `challenge`; `auth_required` | `t_end + 60 s` |
 | `503` `Retry-After: 120` with `cf-mitigated: challenge` | 1 | `challenge` | `t_headers + 120 s` |
 | `429` `Retry-After: 30` with a corrupt gzip body, × 3 | 3 | `rate_limited` | `t_headers + 30 s` |
-| `401`; `404`; `410`; `407`; `500`; `501`; `204` | 1 each | per §5 step 5 | `t_end + s` |
+| `401`; `404`; `410`; `407`; `500`; `501`; `204` | 1 each | per §5 step 5 | — (`t_wo + s` only) |
 | connect refused × 3 | 3 connection attempts, 0 requests | `network{transport}` | `t_end + 8s` |
-| `200` with a body reset, then `200` | 2 | success | `t_end + s` |
+| `200` with a body reset, then `200` | 2 | success | — (`t_wo + s` only) |
 
 (`8s` is `s × 2^3`; the scale applies to every term.)
 
