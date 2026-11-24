@@ -863,19 +863,19 @@ unless stated.
 
 ### 10.1 Client
 
-- The `cargo tree` checks of §2.1 pass on the locked graph; MSRV 1.85
+- `SI-1.01` The `cargo tree` checks of §2.1 pass on the locked graph; MSRV 1.85
   builds for Linux, macOS and Windows targets.
-- HTTPS to the local server with the test root: 1 request, `200`, body
+- `SI-1.02` HTTPS to the local server with the test root: 1 request, `200`, body
   intact. Without the test root: `network{tls}`, 1 TLS handshake, 0 HTTP
   requests, no retry.
-- An `http://` URL handed to the dispatcher directly: refused, 0
+- `SI-1.03` An `http://` URL handed to the dispatcher directly: refused, 0
   connections.
-- An h2-only server (ALPN `h2` only): `network{tls}`, exactly 1 connection
+- `SI-1.04` An h2-only server (ALPN `h2` only): `network{tls}`, exactly 1 connection
   attempt observed by the server.
-- A sent request has exactly the headers of §3.1 (server records them);
+- `SI-1.05` A sent request has exactly the headers of §3.1 (server records them);
   no `Authorization`, `Proxy-Authorization` or `Cookie`, also after the
   server sent `Set-Cookie`.
-- **Credentials**: a task URL with userinfo → `unsupported{userinfo}`, 0
+- `SI-1.06` **Credentials**: a task URL with userinfo → `unsupported{userinfo}`, 0
   connections; a redirect to `https://u:p@<same host>/…` →
   `network{redirect_userinfo}`, 1 request; `HTTPS_PROXY=http://u:p@<test
   proxy>` (and each other proxy variable, an empty password included) →
@@ -883,40 +883,40 @@ unless stated.
   a proxy variable without userinfo → the test proxy records one
   `CONNECT` without `Proxy-Authorization` and the origin one request
   without `Authorization`.
-- **Connection attempts**: a host name resolving to two addresses, the first
+- `SI-1.07` **Connection attempts**: a host name resolving to two addresses, the first
   refusing → 2 connection attempts and 1 wire request in the transport log,
   permit and budget count 1.
 
 ### 10.2 Dispatcher
 
-| Server script | Expected (server-counted wire requests, result) |
-|---|---|
-| 5 same-host redirects, then `200` | 6, success, `final_url` = last target |
-| 6 same-host redirects | 6, `network{too_many_redirects}` |
-| redirect to another host | 1, `network{redirect_offsite}`; 0 at the other host |
-| redirect to `http://` same host | 1, `network{redirect_offsite}` |
-| redirect to the login path | 1, `auth_required` |
-| task A redirected to task B of the same host (both adapters) | 1, `unrecognized{redirect}`; B never requested; through `cpf fetch` nothing published |
-| AtCoder task redirected to the same task under another contest | 2, success, identity unchanged |
-| redirect without `Location` | 1, `network{protocol}` |
-| connection closed after reading the request, 3 times | 3 (no hidden client replay), `network{transport}` |
-| `Content-Length` 8 MiB + 1 | 1, `network{too_large_wire}`, ≤ 64 KiB of body read |
-| chunked identity body of 8 MiB + 1 | 1, `network{too_large_wire}` |
-| exactly 8 MiB identity body | 1, success, `body_len` = 8 388 608 |
-| gzip of empty members, 8 MiB + 1 on the wire, decodes to 0 bytes | 1, `network{too_large_wire}` |
-| gzip bomb: ≤ 64 KiB wire, decodes to 8 MiB + 1 | 1, `network{too_large_decoded}`; decoder output stops at 8 388 609 bytes; counting-allocator peak ≤ 8 MiB + 256 KiB above the baseline |
-| gzip decoding to exactly 8 MiB | 1, success, body equal to the original, allocator peak as above |
-| gzip member with `FEXTRA` of 65 535 bytes, `FNAME` and `FCOMMENT` of 1024 bytes each, `FHCRC` | 1, success; allocator peak ≤ 8 MiB + 256 KiB above the baseline, and ≤ 256 KiB above it for a 1-byte body |
-| `FNAME` of 1025 bytes; `FCOMMENT` of 1025 bytes; wrong `FHCRC`; reserved flag set; method ≠ 8; bad `ISIZE`; bad CRC-32 | 1 each, `network{bad_encoding}` |
-| 100 000 empty gzip members (≈ 2 MiB wire), then a page member | 1, success; allocator peak as above |
-| stream of `FEXTRA` bytes dripped past the attempt deadline (no output produced) | `network{timeout}` within the deadline + one step + allowance |
-| `Content-Encoding: br`; `deflate`; `gzip, gzip`; corrupt gzip CRC | 1 each, `network{bad_encoding}` |
-| body dripped below the attempt timeout | 3, `network{timeout}`, elapsed ≈ 3 attempts + 2 backoffs |
-| accept, read the request, never answer | 3, `network{timeout}` |
-| TCP handshake never completes (blackhole hook) | 3 connection attempts, 0 requests, `network{timeout}` after 3 connect timeouts + 2 backoffs |
-| budget: 50 section members, each answered by 1 redirect then `502` | exactly 200 requests (enumeration included), the remaining members `network{budget}` |
-| time budget (hook: `D` = 3 s) against `502` | no request starts at or after `D`; the command ends by `D` + allowance; `network{budget}` |
-| time budget with lock contention: another process holds the permit until `D` + 1 s | the waiter gives up at `D` + allowance with `network{budget}`, 0 requests from it |
+| Id | Server script | Expected (server-counted wire requests, result) |
+|---|---|---|
+| SI-2.01 | 5 same-host redirects, then `200` | 6, success, `final_url` = last target |
+| SI-2.02 | 6 same-host redirects | 6, `network{too_many_redirects}` |
+| SI-2.03 | redirect to another host | 1, `network{redirect_offsite}`; 0 at the other host |
+| SI-2.04 | redirect to `http://` same host | 1, `network{redirect_offsite}` |
+| SI-2.05 | redirect to the login path | 1, `auth_required` |
+| SI-2.06 | task A redirected to task B of the same host (both adapters) | 1, `unrecognized{redirect}`; B never requested; through `cpf fetch` nothing published |
+| SI-2.07 | AtCoder task redirected to the same task under another contest | 2, success, identity unchanged |
+| SI-2.08 | redirect without `Location` | 1, `network{protocol}` |
+| SI-2.09 | connection closed after reading the request, 3 times | 3 (no hidden client replay), `network{transport}` |
+| SI-2.10 | `Content-Length` 8 MiB + 1 | 1, `network{too_large_wire}`, ≤ 64 KiB of body read |
+| SI-2.11 | chunked identity body of 8 MiB + 1 | 1, `network{too_large_wire}` |
+| SI-2.12 | exactly 8 MiB identity body | 1, success, `body_len` = 8 388 608 |
+| SI-2.13 | gzip of empty members, 8 MiB + 1 on the wire, decodes to 0 bytes | 1, `network{too_large_wire}` |
+| SI-2.14 | gzip bomb: ≤ 64 KiB wire, decodes to 8 MiB + 1 | 1, `network{too_large_decoded}`; decoder output stops at 8 388 609 bytes; counting-allocator peak ≤ 8 MiB + 256 KiB above the baseline |
+| SI-2.15 | gzip decoding to exactly 8 MiB | 1, success, body equal to the original, allocator peak as above |
+| SI-2.16 | gzip member with `FEXTRA` of 65 535 bytes, `FNAME` and `FCOMMENT` of 1024 bytes each, `FHCRC` | 1, success; allocator peak ≤ 8 MiB + 256 KiB above the baseline, and ≤ 256 KiB above it for a 1-byte body |
+| SI-2.17 | `FNAME` of 1025 bytes; `FCOMMENT` of 1025 bytes; wrong `FHCRC`; reserved flag set; method ≠ 8; bad `ISIZE`; bad CRC-32 | 1 each, `network{bad_encoding}` |
+| SI-2.18 | 100 000 empty gzip members (≈ 2 MiB wire), then a page member | 1, success; allocator peak as above |
+| SI-2.19 | stream of `FEXTRA` bytes dripped past the attempt deadline (no output produced) | `network{timeout}` within the deadline + one step + allowance |
+| SI-2.20 | `Content-Encoding: br`; `deflate`; `gzip, gzip`; corrupt gzip CRC | 1 each, `network{bad_encoding}` |
+| SI-2.21 | body dripped below the attempt timeout | 3, `network{timeout}`, elapsed ≈ 3 attempts + 2 backoffs |
+| SI-2.22 | accept, read the request, never answer | 3, `network{timeout}` |
+| SI-2.23 | TCP handshake never completes (blackhole hook) | 3 connection attempts, 0 requests, `network{timeout}` after 3 connect timeouts + 2 backoffs |
+| SI-2.24 | budget: 50 section members, each answered by 1 redirect then `502` | exactly 200 requests (enumeration included), the remaining members `network{budget}` |
+| SI-2.25 | time budget (hook: `D` = 3 s) against `502` | no request starts at or after `D`; the command ends by `D` + allowance; `network{budget}` |
+| SI-2.26 | time budget with lock contention: another process holds the permit until `D` + 1 s | the waiter gives up at `D` + allowance with `network{budget}`, 0 requests from it |
 
 ### 10.3 Permit and cooldown
 
@@ -932,19 +932,19 @@ written, lock held), `http.before_header_write`, `http.before_outcome_write`
 at a barrier or after the command, and compare with the expiry formula of
 §4.2 evaluated on the recorded instants, exactly (ms).
 
-- **Two processes**, each issuing 10 logical requests to the same host
+- `SI-3.01` **Two processes**, each issuing 10 logical requests to the same host
   (some answered by a redirect, some by one `502`): the server counts
   exactly the expected wire requests (hops and retries included); every
   arrival is ≥ spacing after the previous response ended; no two requests
   overlap. One run at *production* spacing for each host (2 requests per
   process).
-- **Delayed send**: A held at `http.before_send` for 5 s (scaled) after its
+- `SI-3.02` **Delayed send**: A held at `http.before_send` for 5 s (scaled) after its
   reservation, then completes; B's next arrival is ≥ A's `t_end` + spacing.
   A held there past `t_start + 30 s` (scaled) → no request is written,
   `network{timeout}`, the server counts 0 from that attempt. A held there
   for 29 s (scaled) and killed → B refuses until A's `t_start + 90 s`,
   which is ≥ the kill time + 60 s.
-- **Kill after reservation**: A killed at `http.after_reserve`, or at
+- `SI-3.03` **Kill after reservation**: A killed at `http.after_reserve`, or at
   `http.after_headers` (the accepted residual of §4.2): the server counts ≤ 1
   from A; B refuses
   `rate_limited` with `retry_at` = A's `pending.since` + 90 s (scaled), 0
@@ -952,35 +952,35 @@ at a barrier or after the command, and compare with the expiry formula of
   B's request after that time with `429 Retry-After: 600` (scaled): B
   persists `t_headers + 600 s` and a third process refuses until then (at
   most one extra request).
-- **Kill after the header write**: `429 Retry-After: 120` (scaled), A
+- `SI-3.04` **Kill after the header write**: `429 Retry-After: 120` (scaled), A
   killed at `http.after_header_write` → B refuses with `retry_at` =
   `max(t_headers + 120 s, t_start + 90 s)` (scaled). The same with
   `Retry-After: 3600`: B refuses until `t_headers + 1 h`.
-- **Header write validity**: at every `http.after_header_write` (a `200`
+- `SI-3.05` **Header write validity**: at every `http.after_header_write` (a `200`
   without cooldown received 5 s (scaled) after a reservation whose `next`
   was `t_start + s`; a `429 Retry-After: 3600`) the state satisfies §4.1:
   `written_at = t_wh ≥ t_headers`, `written_at ≤ next`, `pending.since =
   t_start ≤ written_at`, `next ≤ written_at + 1 h + 92 s`; for the `200`
   `next = t_wh + s`, for the `429` `next = max(t_headers + 1 h, t_wh + s)`.
-- **Delayed writes**: the header write held at `http.before_header_write`
+- `SI-3.06` **Delayed writes**: the header write held at `http.before_header_write`
   for 1 s (scaled) → `written_at = t_wh = t_headers + 1 s` (± allowance)
   and `next = max(E_h, t_wh + s)`; the outcome write held at
   `http.before_outcome_write` for 1 s → `next = max(…, t_wo + s)` with
   `t_wo ≥ t_end + 1 s`, and B's next arrival is ≥ `t_wo + s`.
-- **Body challenge**: a `200` whose body carries the challenge markers →
+- `SI-3.07` **Body challenge**: a `200` whose body carries the challenge markers →
   at `http.after_outcome_write`, `next = max(t_end + 60 s, t_wo + s)`
   (scaled), class `challenge`; killed at `http.after_classify` → B applies
   `t_start + 90 s`.
-- **Header cooldown independent of the body**: `429 Retry-After: 30` with a
+- `SI-3.08` **Header cooldown independent of the body**: `429 Retry-After: 30` with a
   corrupt gzip body: at each `http.after_header_write`, `next ≥ t_headers +
   30 s`; the final state equals §4.2 step 8 on the last attempt; class
   `rate_limited`.
-- **Monotonic**: a unit test of the step-8 merge over generated values
+- `SI-3.09` **Monotonic**: a unit test of the step-8 merge over generated values
   (`next` never decreases except by the rollback rule); and the legitimate
   transition `429 Retry-After: 120` refused → after the wait, a `503
   Retry-After: 5`: the second write's `next` = `max` of the first state and
   the second's terms, never below the first.
-- **Header write failure with a known cooldown**: `429 Retry-After: 3600`
+- `SI-3.10` **Header write failure with a known cooldown**: `429 Retry-After: 3600`
   and every rename into the permit directory made to fail from
   `http.after_headers` on → `rate_limited`, 3 write tries, the command
   reports `cooldown_not_persisted{host, retry_at = t_headers + 1 h}`, every
@@ -991,39 +991,51 @@ at a barrier or after the command, and compare with the expiry formula of
   until `t_start + 90 s`, then sends exactly one request, which receives
   `429 Retry-After: 3600` and persists `t_headers' + 1 h`; a third process
   refuses until then (the accepted residual: one extra request).
-- **Reservation write failure**: renames failing before step 6 → 0
+- `SI-3.11` **Reservation write failure**: renames failing before step 6 → 0
   requests, `network{permit}`.
-- **Outcome write failure** without a cooldown (`200`, renames failing at
+- `SI-3.12` **Outcome write failure** without a cooldown (`200`, renames failing at
   `http.after_classify`): success for this request, later requests to the
   host in the invocation `network{permit}`, the next process applies
   `t_start + 90 s`. A failed directory sync after a successful rename
   (injection hook) → warning only, the new state is in effect.
-- **Cancellation**: during the attempt after `t_headers` (`429
+- `SI-3.13` **Cancellation**: during the attempt after `t_headers` (`429
   Retry-After: 30`) → state `max(t_headers + 30 s, t_wo + s)`, no
   `pending`; before `t_headers` (headers delayed 5 s) → state `t_start +
   90 s` (scaled), no `pending`; in each case the cancellation status.
-- **Lock failure**: `<h>.lock` is a directory, or the permit directory is
+- `SI-3.14` **Lock failure**: `<h>.lock` is a directory, or the permit directory is
   read-only: `network{permit}`, 0 requests. Unreadable state: same.
   Malformed state, and a state outside its validity rule (`next =
   written_at + 3 h`): refused with `retry_at` = read time + 90 s (scaled);
   the file read back after the refusal is valid and holds exactly that
   `next`. `too_new` state: `network{permit_state}`, file unchanged.
-- **Filesystem**: each refused type of §4.4 through the filesystem-type
+- `SI-3.15` **Filesystem**: each refused type of §4.4 through the filesystem-type
   injection hook → `network{permit_fs}`, 0 requests; the CI filesystem
   (ext4 or tmpfs, APFS, NTFS) is accepted.
-- **Clock rollback** (wall-clock injection hook): CSES state `next =
+- `SI-3.16` **Clock rollback** (wall-clock injection hook): CSES state `next =
   written_at + 1 h`, clock moved back 3 s → refused, `retry_at` = now + 1 h
   (the full remaining duration as of the write); moved back 2 days → the
   same; moved forward 30 min → `retry_at` = `next`, 30 min nearer.
-- **Persisted cooldown refusal** (unscaled values, run scaled): state
+- `SI-3.17` **Persisted cooldown refusal** (unscaled values, run scaled): state
   `now + 61 s` → `rate_limited` with `retry_at`, 0 requests; `now + 59 s`
   → waits, then exactly 1 request, sent no earlier than the state value.
-- **Cancellation while waiting** (state `now + 30 s` scaled, cancel after
+- `SI-3.18` **Cancellation while waiting** (state `now + 30 s` scaled, cancel after
   1 s): 0 requests; the command ends within 1 s + allowance with the
   cancellation status (6 on Windows and for API cancellation; the
   re-raised signal on Unix, report §5.3).
-- **Lock busy**: another process holds the lock past 120 s (scaled 12 s):
+- `SI-3.19` **Lock busy**: another process holds the lock past 120 s (scaled 12 s):
   `network{permit_busy}`, 0 requests from the waiter.
+- `SI-3.20` **Permit directory base**: `CPF_CACHE_DIR` absolute → the permit files
+  are created under `$CPF_CACHE_DIR/http/`; unset, with the user-layer
+  `http.cache_dir` absolute → under it; both set → `CPF_CACHE_DIR` wins;
+  neither → Linux `$XDG_CACHE_HOME/cpforge/http/` when `XDG_CACHE_HOME`
+  is absolute and `$HOME/.cache/cpforge/http/` when it is unset, empty or
+  relative; macOS `$HOME/Library/Caches/cpforge/http/`; Windows
+  `%LOCALAPPDATA%\cpforge\http\`, each on its OS. A relative
+  `CPF_CACHE_DIR`; on Linux `HOME` unset with no usable `XDG_CACHE_HOME`;
+  on macOS `HOME` unset; on Windows `LOCALAPPDATA` unset → each
+  `network{permit}`, 0 connections, no file created. A relative
+  `http.cache_dir` is the configuration error of config §11 (exit 7, 0
+  connections).
 
 ### 10.4 Outcome table
 
@@ -1032,61 +1044,61 @@ requests, the class, and the state after the last attempt, equal (ms) to
 `max(listed terms, t_wo + s)` on the recorded `t_headers`, `t_end` and
 outcome-write time `t_wo` of that attempt (§4.2 step 8):
 
-| Script | Requests | Class | Expiry terms of the last outcome write (besides `t_wo + s`) |
-|---|---|---|---|
-| `502`, `502`, `200` | 3 | success | — (`t_wo + s` only) |
-| `502` × 3; `504` × 3; `503` (unusable) × 3 | 3 | `network{status}` | `t_end + 8s` |
-| `503` no `Retry-After`, then `200` | 2 | success, second arrival ≥ first `t_end + 2s` | — (`t_wo + s` only) |
-| `503` `Retry-After: 5`, then `200` | 2 | success, second arrival ≥ first `t_headers + 5 s` | — (`t_wo + s` only) |
-| `429` `Retry-After: 5` × 3 | 3 | `rate_limited` | `t_headers + 5 s` |
-| `429` without `Retry-After` | 1 | `rate_limited` | `t_headers + 60 s` |
-| `429` `Retry-After: 120`; `503` `Retry-After: 120` | 1 | `rate_limited` | `t_headers + 120 s` |
-| `429` `Retry-After: 99999` | 1 | `rate_limited` | `t_headers + 1 h` |
-| `429` with an HTTP-date 30 s after `t_headers` (each of the 3 formats), then `200` | 2 | success | — (`t_wo + s` only) |
-| `429` with a malformed value, a past date, 11 digits, two fields | 1 each | `rate_limited` | `t_headers + 60 s` |
-| `503` with each unusable value above, then `200` | 2 | success | — (`t_wo + s` only) |
-| `403`; `503` with `cf-mitigated: challenge` | 1 each | `challenge` | `t_headers + 60 s` |
-| `200` whose body has challenge markers; login markers | 1 each | `challenge`; `auth_required` | `t_end + 60 s` |
-| `503` `Retry-After: 120` with `cf-mitigated: challenge` | 1 | `challenge` | `t_headers + 120 s` |
-| `429` `Retry-After: 30` with a corrupt gzip body, × 3 | 3 | `rate_limited` | `t_headers + 30 s` |
-| `401`; `404`; `410`; `407`; `500`; `501`; `204` | 1 each | per §5 step 5 | — (`t_wo + s` only) |
-| connect refused × 3 | 3 connection attempts, 0 requests | `network{transport}` | `t_end + 8s` |
-| `200` with a body reset, then `200` | 2 | success | — (`t_wo + s` only) |
+| Id | Script | Requests | Class | Expiry terms of the last outcome write (besides `t_wo + s`) |
+|---|---|---|---|---|
+| SI-4.01 | `502`, `502`, `200` | 3 | success | — (`t_wo + s` only) |
+| SI-4.02 | `502` × 3; `504` × 3; `503` (unusable) × 3 | 3 | `network{status}` | `t_end + 8s` |
+| SI-4.03 | `503` no `Retry-After`, then `200` | 2 | success, second arrival ≥ first `t_end + 2s` | — (`t_wo + s` only) |
+| SI-4.04 | `503` `Retry-After: 5`, then `200` | 2 | success, second arrival ≥ first `t_headers + 5 s` | — (`t_wo + s` only) |
+| SI-4.05 | `429` `Retry-After: 5` × 3 | 3 | `rate_limited` | `t_headers + 5 s` |
+| SI-4.06 | `429` without `Retry-After` | 1 | `rate_limited` | `t_headers + 60 s` |
+| SI-4.07 | `429` `Retry-After: 120`; `503` `Retry-After: 120` | 1 | `rate_limited` | `t_headers + 120 s` |
+| SI-4.08 | `429` `Retry-After: 99999` | 1 | `rate_limited` | `t_headers + 1 h` |
+| SI-4.09 | `429` with an HTTP-date 30 s after `t_headers` (each of the 3 formats), then `200` | 2 | success | — (`t_wo + s` only) |
+| SI-4.10 | `429` with a malformed value, a past date, 11 digits, two fields | 1 each | `rate_limited` | `t_headers + 60 s` |
+| SI-4.11 | `503` with each unusable value above, then `200` | 2 | success | — (`t_wo + s` only) |
+| SI-4.12 | `403`; `503` with `cf-mitigated: challenge` | 1 each | `challenge` | `t_headers + 60 s` |
+| SI-4.13 | `200` whose body has challenge markers; login markers | 1 each | `challenge`; `auth_required` | `t_end + 60 s` |
+| SI-4.14 | `503` `Retry-After: 120` with `cf-mitigated: challenge` | 1 | `challenge` | `t_headers + 120 s` |
+| SI-4.15 | `429` `Retry-After: 30` with a corrupt gzip body, × 3 | 3 | `rate_limited` | `t_headers + 30 s` |
+| SI-4.16 | `401`; `404`; `410`; `407`; `500`; `501`; `204` | 1 each | per §5 step 5 | — (`t_wo + s` only) |
+| SI-4.17 | connect refused × 3 | 3 connection attempts, 0 requests | `network{transport}` | `t_end + 8s` |
+| SI-4.18 | `200` with a body reset, then `200` | 2 | success | — (`t_wo + s` only) |
 
 (`8s` is `s × 2^3`; the scale applies to every term.)
 
 ### 10.5 Cache and offline
 
-- `200` with `ETag`: stored; the next online fetch sends `If-None-Match`,
+- `SI-5.01` `200` with `ETag`: stored; the next online fetch sends `If-None-Match`,
   gets `304`: 1 request, body equal to the stored one, `from_cache =
   true`, `status = 304`.
-- `Last-Modified` only → `If-Modified-Since`; no validators → an
+- `SI-5.02` `Last-Modified` only → `If-Modified-Since`; no validators → an
   unconditional request.
-- **Through a redirect**: online `A → B → 200` stores the entry under `A`
+- `SI-5.03` **Through a redirect**: online `A → B → 200` stores the entry under `A`
   with `final_url = B`; the next online fetch sends the conditional
   headers on the request to `B` only (server records them); `--offline`
   for `A` → success, 0 requests, provenance `final_url = B`. An entry for a
   task whose `final_url` resolves to another identity (edited entry) →
   `offline_miss`.
-- **Transitions from a populated entry**: `200` with `no-store`, `200` with
+- `SI-5.04` **Transitions from a populated entry**: `200` with `no-store`, `200` with
   `Vary: *`, `404`, a login page → entry file gone, a later `--offline` →
   `offline_miss`; `304` with a new `ETag` → the next request sends the new
   value; `304` with `no-store` → body used, entry gone; `502` × 3 → entry
   unchanged.
-- Corrupt entries (body byte flipped, truncated header, `schema = 99`):
+- `SI-5.05` Corrupt entries (body byte flipped, truncated header, `schema = 99`):
   unconditional request, entry replaced, fetch succeeds.
-- `Vary: Accept-Encoding` with a stored value different from the current
+- `SI-5.06` `Vary: Accept-Encoding` with a stored value different from the current
   one: unconditional request.
-- **304 merging** from a populated entry: a `304` with `Content-Type:
+- `SI-5.07` **304 merging** from a populated entry: a `304` with `Content-Type:
   text/html; charset=iso-8859-1` → the stored `content_type` replaced and
   the parse fails `unsupported{charset}`; a `304` with `Vary: Accept` →
   the entry's `Vary` names become `Accept` with the validating request's
   value, and the next request with that value is conditional.
-- **Failed eviction**: unlink of the entry made to fail during a `no-store`
+- `SI-5.08` **Failed eviction**: unlink of the entry made to fail during a `no-store`
   transition → a warning naming the entry; a later `--offline` fetch reads
   that entry, with provenance `from_cache = true` and its stored
   `final_url` and `stored_at`.
-- `--offline` with an entry: 0 requests, 0 permit files touched, result
+- `SI-5.09` `--offline` with an entry: 0 requests, 0 permit files touched, result
   equal to the online result; without an entry: `offline_miss`, 0
   requests. `--offline` creating a new problem from a cache entry: the
   published samples equal the online run's bytes.
@@ -1096,36 +1108,36 @@ outcome-write time `t_wo` of that attempt (§4.2 step 8):
 Golden table, each row a synthetic recognized page with one sample `<pre>`
 (shown as its source) and the expected bytes:
 
-| Source of the sample element | Bytes |
-|---|---|
-| `<pre>1 2\n</pre>` | `1 2\n` |
-| `<pre>\n1 2\n</pre>` | `1 2\n` |
-| `<pre>\n\n1\n</pre>` | `\n1\n` |
-| `<pre>1 2</pre>` | `1 2\n` (appended) |
-| `<pre>1\n\n</pre>` | `1\n\n` (kept) |
-| `<pre>a&lt;b&amp;c&#x41;&#66;&nbsp;d</pre>` | `a<b&cAB d\n` |
-| `<pre>1<br>2<br/>3</pre>` | `1\n2\n3\n` |
-| source bytes `<pre>1\r\n2\r3</pre>` | `1\n2\n3\n` |
-| `<pre>1&#13;&#10;2&#13;3</pre>` | `1\n2\n3\n` |
-| `<pre>1 \n2\t </pre>` | `1 \n2\t \n` (trailing spaces kept) |
-| `<pre>é</pre>` | `c3 a9 0a` |
-| raw U+00A0 (`c2 a0`) between `1` and `2` | `1 2\n` |
-| `<pre></pre>`; `<pre>\n</pre>` | empty (0 bytes) |
-| `<pre> </pre>` | ` \n` |
-| `<pre><var>N</var> <span>3</span></pre>` | `N 3\n` |
-| `<pre>1<!-- c -->2</pre>` | `12\n` |
-| `<pre>&#0;</pre>` | `ef bf bd 0a` |
+| Id | Source of the sample element | Bytes |
+|---|---|---|
+| SI-6.01 | `<pre>1 2\n</pre>` | `1 2\n` |
+| SI-6.02 | `<pre>\n1 2\n</pre>` | `1 2\n` |
+| SI-6.03 | `<pre>\n\n1\n</pre>` | `\n1\n` |
+| SI-6.04 | `<pre>1 2</pre>` | `1 2\n` (appended) |
+| SI-6.05 | `<pre>1\n\n</pre>` | `1\n\n` (kept) |
+| SI-6.06 | `<pre>a&lt;b&amp;c&#x41;&#66;&nbsp;d</pre>` | `a<b&cAB d\n` |
+| SI-6.07 | `<pre>1<br>2<br/>3</pre>` | `1\n2\n3\n` |
+| SI-6.08 | source bytes `<pre>1\r\n2\r3</pre>` | `1\n2\n3\n` |
+| SI-6.09 | `<pre>1&#13;&#10;2&#13;3</pre>` | `1\n2\n3\n` |
+| SI-6.10 | `<pre>1 \n2\t </pre>` | `1 \n2\t \n` (trailing spaces kept) |
+| SI-6.11 | `<pre>é</pre>` | `c3 a9 0a` |
+| SI-6.12 | raw U+00A0 (`c2 a0`) between `1` and `2` | `1 2\n` |
+| SI-6.13 | `<pre></pre>`; `<pre>\n</pre>` | empty (0 bytes) |
+| SI-6.14 | `<pre> </pre>` | ` \n` |
+| SI-6.15 | `<pre><var>N</var> <span>3</span></pre>` | `N 3\n` |
+| SI-6.16 | `<pre>1<!-- c -->2</pre>` | `12\n` |
+| SI-6.17 | `<pre>&#0;</pre>` | `ef bf bd 0a` |
 
-- Malformed UTF-8 (byte `ff`) outside every sample → `parser_failure{utf8}`,
+- `SI-6.18` Malformed UTF-8 (byte `ff`) outside every sample → `parser_failure{utf8}`,
   nothing published. A UTF-8 BOM → removed, samples unchanged.
-- `charset=iso-8859-1` header; no header and `<meta charset="windows-1252">`
+- `SI-6.19` `charset=iso-8859-1` header; no header and `<meta charset="windows-1252">`
   → `unsupported{charset}`. Header `utf-8` with that meta → accepted.
-- Through `cpf fetch`: the published files' bytes equal the table's
+- `SI-6.20` Through `cpf fetch`: the published files' bytes equal the table's
   bytes exactly.
 
 ### 10.7 AtCoder
 
-Synthetic fixtures (public) and private excerpts (§9.3) for: modern task
+`SI-7.01` Synthetic fixtures (public) and private excerpts (§9.3) for: modern task
 with English and Japanese sections (samples from the English section
 only, N pairs, not 2N); `ja` configured → Japanese section; Japanese-only
 old page → `language_fallback` and its samples; ARC and AGC tasks; zero
@@ -1145,14 +1157,14 @@ started → `not_available`; each required marker removed in turn →
 `unrecognized`; limit values unparseable → limits unavailable,
 `limits_unparsed`, samples kept.
 
-**Problem-level failures** through `cpf fetch` (a resolved task whose
+`SI-7.02` **Problem-level failures** through `cpf fetch` (a resolved task whose
 fetch fails): the tree under `problems/` and `contests/` is unchanged
 (listing and bytes hashed), no entry is left in `.cpforge/downloads/`,
 `.cpforge/fetch/<p>/status.toml` records `failed` with the class (storage
 §5.8.9), no journal or history record exists, and the exit status is the
 `site` status.
 
-**Selection-level failures** (before any problem transaction, storage
+`SI-7.03` **Selection-level failures** (before any problem transaction, storage
 §5.8.1): an unsupported URL → `unsupported`, 0 requests; a URL with
 userinfo → `unsupported{userinfo}`, 0 requests; an enumeration page
 classified as a failure; a contest of 51 tasks → `selection_too_large{51}`
@@ -1160,7 +1172,7 @@ with exactly 1 enumeration request and 0 member requests counted; an
 unknown `--only` label. Each: nothing created under `problems/`,
 `contests/`, `.cpforge/fetch/` or `.cpforge/downloads/`.
 
-**Adapter-result boundaries** (through `cpf fetch`, against storage
+`SI-7.04` **Adapter-result boundaries** (through `cpf fetch`, against storage
 §5.8.1): title of 1024 bytes → written; 1025 bytes → `title`
 unavailable, `title_unparsed`, nothing else changed; canonical URL at the
 2048-byte bound accepted (the native grammar keeps real URLs far below
@@ -1175,9 +1187,43 @@ tables and whose `contest.toml` record has user keys: those tables and
 keys are byte-identical afterwards; only the tool fields of storage §5.8.2
 change.
 
+`SI-7.05` **Heuristic contests and other kinds**: the task URL
+`/contests/ahc040/tasks/ahc040_a` answered by a page that is otherwise a
+recognized batch task → `unsupported{kind}`, 1 request, with the
+problem-level failure assertions above; the same page for
+`/contests/abc400/tasks/abc400_a` → a batch problem, published; a page
+carrying each kind marker of the marker table other than the interactive
+one → `unsupported{kind}`, nothing published.
+
+`SI-7.06` **Contest enumeration**: a task table of three rows → members `(A,
+atcoder:abc400_a)`, `(B, atcoder:abc400_b)`, `(C, atcoder:abc400_c)` in
+table order. Failures, each with exactly 1 request and the selection-level
+assertions above: a row label `A*` and a label of 17 characters →
+`parser_failure{label}`; a row link `/contests/abc400/submit` and one to
+another host → `parser_failure{member}`; two rows labelled `A`, and two
+rows linking one task → `parser_failure`; 10 001 rows →
+`parser_failure{too_many}`. A table of exactly 10 000 rows is parsed and
+then refused by the bulk bound (`selection_too_large{10000}`).
+
+`SI-7.07` **Fetch document and status per class** (through `cpf fetch --json`): one
+case per class of §8.3 for a single task (`auth_required` by a login
+redirect, `challenge` by `403`, `rate_limited` by `429 Retry-After: 120`,
+`not_found`, `not_available`, `unsupported{kind}`, `unrecognized`,
+`parser_failure{pairing}`, `network{status}` after three `502`,
+`offline_miss`) → exit 12 and `problems[0].failure` with that `class`, its
+`reason` where the class carries one, `http_status` of the last response
+(`null` without one), `retry_at` only for `rate_limited`, and `provenance`
+`null` exactly when no response was obtained; `network` equal to the
+server's counts. A URL-level failure (an unsupported URL, a contest
+enumeration answered by `404`) → the `error` document with `command:
+"fetch"` and class `site`, exit 12. A committed single task, and a contest
+of three with the second member failing `not_found`, give documents equal
+to the fixtures `fetch.json` and `fetch_contest_partial.json` (exit 0 and
+9).
+
 ### 10.8 CSES
 
-Ordinary task (1 pair); several examples (pairs in order); recognized
+`SI-8.01` Ordinary task (1 pair); several examples (pairs in order); recognized
 task without example → 0 pairs, `no_samples`; interactive → `kind =
 "interactive"`, 0 pairs; **example blocks**: an input label without its
 `<pre>`, an output label followed by another label, an orphan `<pre>`
@@ -1196,18 +1242,18 @@ exactly 1 request. The problem-level and selection-level assertions of
 
 ### 10.9 Private delivery
 
-- A same-repo branch run: the job (permissions `contents: read`, checkout
+- `SI-9.01` A same-repo branch run: the job (permissions `contents: read`, checkout
   without persisted credentials) downloads the prerelease asset
   anonymously,
   decrypts it, every check of §9.4 passes, and `executed` equals `cases`
   of the lock and the manifest.
-- Test workflow without the secret → the job fails at step 2, it does not
+- `SI-9.02` Test workflow without the secret → the job fails at step 2, it does not
   skip.
-- A ciphertext of another version → fails at step 3; a lock with the
+- `SI-9.03` A ciphertext of another version → fails at step 3; a lock with the
   right ciphertext hash but another `version` → fails at step 5.
-- One case disabled in the harness → fails at step 8 (`executed n − 1 of
+- `SI-9.04` One case disabled in the harness → fails at step 8 (`executed n − 1 of
   n`).
-- **Hostile archives** (unit tests of the reader, synthetic, no secret):
+- `SI-9.05` **Hostile archives** (unit tests of the reader, synthetic, no secret):
   `../x`, `/x`, a symlink, a hard link, a directory entry, a device, a pax
   header, a GNU long-name header, a duplicate path, `A` and `a`, `a`
   before `a/b`, `a/b` before `a`, `A` and `a/b`, 4097
@@ -1215,25 +1261,25 @@ exactly 1 request. The problem-level and selection-level assertions of
   a hash mismatch → each refused at step 5 with **no file created** under
   the target directory (listing empty) and nothing written outside it (a
   sentinel directory beside it unchanged).
-- A fork PR → the exact skip line, the asset is not downloaded, the secret
+- `SI-9.06` A fork PR → the exact skip line, the asset is not downloaded, the secret
   not referenced by any executed step, the job succeeds, every other job
   runs.
-- A scan of the job log for marker strings planted in the private cases
+- `SI-9.07` A scan of the job log for marker strings planted in the private cases
   finds none, in the passing run and in the runs failing at steps 3, 5 and
   8; the workflow uploads no artifact from `$RUNNER_TEMP`.
 
 ### 10.10 Live smoke (advisory)
 
-- Workflow `live-smoke.yml`: weekly schedule and manual dispatch,
+- `SI-10.01` Workflow `live-smoke.yml`: weekly schedule and manual dispatch,
   concurrency group `live-smoke` (no parallel runs), never a required check.
-- It fetches one AtCoder task and one CSES task (each with ≥ 1 sample)
+- `SI-10.02` It fetches one AtCoder task and one CSES task (each with ≥ 1 sample)
   into a fresh workspace and permit directory, with the transport log
   (`CPF_HTTP_LOG`, one JSON line per wire request: time, host, path,
   status, wire bytes, connection attempts, hop or retry; never bodies).
-- Pass: ≥ 1 wire request per adapter host, each page positively recognized
+- `SI-10.03` Pass: ≥ 1 wire request per adapter host, each page positively recognized
   and its samples parsed (≥ 1 pair each), and the log's line count (hops
   and retries included) ≤ 20.
-- A classified failure opens one issue labelled `live-smoke`, or comments
+- `SI-10.04` A classified failure opens one issue labelled `live-smoke`, or comments
   on the open one (deduplicated by title).
 
 ## 11. Amendments to other documents

@@ -1547,6 +1547,17 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   an unknown profile key, `archive.roots` in a `problem.toml` `[config]` →
   phase-1 diagnostics with provenance (7); an absent `[archive]` → the
   defaults above in `cpf config show`.
+- `[sites]` and `[http]` (sites contract §11.1): absent → `cpf config
+  show` gives `sites.atcoder.language = "en"` and `http.offline = false`,
+  and no `http.cache_dir`; user `language = "ja"` with workspace `"en"` →
+  `"en"`; user `http.cache_dir = "/abs/c"` → accepted with user-layer
+  provenance; `http.cache_dir` in the workspace file or in a `problem.toml`
+  `[config]` → phase-1 layer error; `http.cache_dir = "rel"` and `""`,
+  `sites.atcoder.language = "jp"`, `http.offline = "yes"` → phase-1
+  diagnostics with provenance; `sites.atcoder.language` or `http.offline`
+  in a `problem.toml` `[config]` → phase-1 layer error. Each error exits 7
+  from `cpf config check`, and from `cpf fetch` before any request (0
+  connections).
 - **Cases with exact results:**
   - C++ built-in build: `{artifact}` expands to `<output root>/main`
     (`main.exe` on Windows); a build exiting 0 without writing it →
@@ -1755,11 +1766,29 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     `direct` → phase-2 error; `idle_s = -1` and `"0.0004s"` → phase-1
     errors; defaults of every key shown by `config show`; `[config] io`
     on an interactive problem → phase-2 error.
+  - Interactive `checking`: a `[check.interactive]` without `checking` →
+    an error at `check.interactive.checking` naming it as required, exit
+    7, and `config show` shows no default for it; `checking = "both"` →
+    phase-1 error; `interactor`, `checker` (with `checker`) and
+    `interactor+checker` (with `checker`) → valid.
   - Effective kind: `[problem] kind = "interactive"` without `[check]` →
     `cpf test` phase-2 error, `cpf build` and raw `cpf run` valid; `[check]
     kind = "interactive"` on a problem without `[problem] kind` → an
     interactive `cpf test`; `cmd` with `for_each_test` on an interactive
     problem → refused, exit 7.
+  - Role local limits (Linux and macOS; `cpf test`): a checker in Python
+    with a C++ target, and `[languages.python.run] limits = { job_commit =
+    "1GiB" }` as a generic value → phase-3 error naming the checker's run
+    stage and the limit, exit 7, no job directory; `limits = {
+    address_space = "1GiB" }` → valid on Linux and a phase-3 error on
+    macOS; the same `job_commit` value in the Windows overlay of that run
+    stage (`[languages.python.windows.run]`) → valid on both.
+  - Unimplemented parts: while a part of §9.1 is not implemented, each of
+    its keys present in `[check]`, also with its default value → `cpf
+    build`, `run`, `test` and `cmd` with `needs_build` or `for_each_test`
+    exit 7 with "unsupported in this version" before admission (no job
+    directory, `job-seq` unchanged), and no test is judged by the
+    comparator instead; `cpf config show` still lists the keys.
   - Run counts: one test with validator, checker and a C++ checker and
     validator → 3 builds + 3 runs; an interactive test with checking
     `interactor+checker` and a validator → 4 runs per test; 1 000 judged

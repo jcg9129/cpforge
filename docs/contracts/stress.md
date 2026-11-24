@@ -868,6 +868,7 @@ report contract §9.
 | ST-L20 | metadata reservations: 10 passing iterations, then one saved | after each passing R5 the job budget's reserved bytes drop by exactly 5 × 1 MiB; for the saved one they drop as each artefact settles; never more than 8 MiB of metadata reserved |
 | ST-L21 | cleanup `unverified` (injected) for every candidate run, 100 iterations | classes unchanged (`passed`), note `cleanup_unverified`, retirement proceeds, retired 100 |
 | ST-L22 | lightweight long plateau: batch, zero-byte captures, 1 000 000 iterations, samples every 100 000 | the ST-L06 equalities at all 10 samples; `iterations.retired = "1000000"`; report ≤ B_S |
+| ST-L24 | pure classification over injected batch records: the candidate `exited_zero` with a comparator match on an incomplete capture (`complete: false`, no class row); the candidate `exited_zero` with its check `not_admitted{run_not_eligible}` and no intent set (a combination no row lists) | each iteration class `infrastructure`, reason `invariant`; an internal failure recorded (`result.internal` set); job verdict `internal_error`, status 70; the iteration retired like any other |
 
 ### 10.2 Seeds, roles, classes, budgets (real, Linux and macOS)
 
@@ -914,6 +915,8 @@ report contract §9.
 | ST-F13 | `stress ls` on Windows over a workspace with saved failures (created on Linux, copied) | lists each entry `valid`, status 0 |
 | ST-F14 | `stress ls` with entries: a valid failure, `notes.txt`, an id-named file, a directory with an uppercase id, a manifest with `schema = 2`, one of 1 MiB + 1 byte, one whose `id` differs from its name, one with an unknown key, one with `[[file]] path = "../x"`, a symlinked `failure.toml` | `valid`, `unexpected` × 3, `too_new`, `malformed` × 4 (size, id, key, path), `unreadable` (link) ; exit 0 |
 | ST-F15 | manifest size: a failure whose manifest would exceed 1 MiB (injected huge argv) | `not_saved{manifest_too_large}` |
+| ST-F17 | `cpf fsck` over `stress/failures/` holding a `valid` failure whose id has another epoch than the current `job-seq`, `notes.txt`, an id-named regular file, a manifest with `schema = 2`, one with an unknown key, an entry without `failure.toml`, a symlinked `failure.toml`, and a `valid` failure whose `input` has one byte flipped; a second problem whose `stress` is a regular file; a third whose `stress/failures` is a link | exit 0; one finding per non-`valid` entry with its classification and reason (`unexpected` × 2, `too_new`, `malformed`, `missing`, `unreadable`) and one per blocked path; nothing for the other-epoch failure or the flipped byte (no hash verified); `cpf fsck --apply` then leaves every `problems/*/stress/` tree byte-identical, with file identities |
+| ST-F18 | two failures promoted (ST-F01 fixture), then `cpf clean --apply` with `keep_jobs = 0`, three later jobs whose admissions prune, `cpf fsck --apply`, and removal of the job directory that produced them | each `problems/<p>/stress/failures/<id>/` byte-identical with the same file identities after every step; `stress ls` lists both `valid` |
 
 ### 10.4 Replay and `--from-stress`
 
@@ -932,6 +935,7 @@ report contract §9.
 | ST-P10 | `--from-stress` of an `oracle_failure` (no `answer` key) and of an interactive failure | input registered without answer |
 | ST-P11 | `--from-stress` with a modified `input` | exit 8, nothing published under `tests/` |
 | ST-P12 | Windows: `cpf stress --replay <id>` and `--replay-binaries <id>` with a valid configuration; with a `[stress]` phase-1 error | status 10; status 7 |
+| ST-P14 | usage errors: `--iterations 0`, `--iterations x`, `--seed 18446744073709551616`, `--time 0`, `--json --events`, `--replay <id> --seed 1`, `--replay <id> --iterations 5`, `--replay-binaries <id> --keep-going`, `--replay <id> --replay-binaries <id>`, `--replay f-ABC`, `--replay-binaries nope` | each exit 2, no job directory, `job-seq` unchanged; on Windows the same command lines exit 2 (usage before the platform refusal) |
 
 ### 10.5 Crash states (storage crash harness, real `cpf`, Linux and macOS)
 

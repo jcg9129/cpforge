@@ -804,8 +804,27 @@ spelled exactly as given, a directory and not a link, `problem.toml`
 `valid`, identity bound to the directory. A different spelling, several
 entries, a link or a mismatched identity is an error, never corrected or
 chosen, so with `problems/A` and `problems/a` both present (Linux), neither
-is selectable by any source. `<contest>/<label>` and path references are
-later designs. **Readers** (`current`, and every command that only resolves
+is selectable by any source. Two further forms resolve to that same
+lookup:
+
+- a **remote identity** `<site>:<native>` (§2.1) names the directory
+  `<site>-<native>`, which must hold exactly that identity; a reference
+  whose site or native part is outside its grammar is an invalid
+  reference;
+- **`<contest>/<label>`**: `<contest>` is an Identifier naming an entry of
+  `contests/`, found by the same rules as an entry of `problems/` (exactly
+  one entry with the key, spelled exactly as given, a directory and not a
+  link); its `contest.toml` must classify `valid`; exactly one
+  `[[problem]]` record must carry `<label>` (exact spelling, §5.2), and
+  that record's `id` is then resolved as an identity reference. Two
+  records with one label make `contest.toml` `malformed` (§5.2), so an
+  ambiguous label is that error. A label never falls back to a problem
+  name or to another contest.
+
+Every failure (an unknown contest, a contest entry or `contest.toml` that
+is not valid, no record with the label, the named problem missing or
+invalid) is an error naming the reference and the cause (failure class
+`workspace`, exit 8). Path references are later designs. **Readers** (`current`, and every command that only resolves
 its problem) perform this lookup **without** the workspace lock, listing
 `problems/` and classifying `problem.toml` directly; the §2.1 collision check
 under the lock is required only where a name is created. A concurrent
@@ -868,7 +887,8 @@ identity; an unknown-kind problem selectable; stdout purity of `current`;
 `current` leaves the workspace byte-identical (no lock file created, no
 recovery); same-selection `switch` writes nothing; `switch` inside another
 problem prints the identity alone on stdout and the note on stderr; configuration loaded for `--problem` B while the
-current directory is in A uses B's `[config] language`.
+current directory is in A uses B's `[config] language`; remote and
+`<contest>/<label>` references (§10 SG-36).
 
 ### 5.8 `cpf fetch`: fetch transaction and test publication
 
@@ -2565,7 +2585,7 @@ barrier `fetch.after_reconcile` (step 0, after reconciliation, before the
 new area is created): the cell's assertions are taken there; then the
 barrier is released and the **follow-up** fetch is asserted separately.
 (b) `cpf clean` (reclaims the area, does not reconcile), then `cpf fsck
---apply`; assertions after it. Row 25 uses (a) only, asserted after the
+--apply`; assertions after it. Row 24 uses (a) only, asserted after the
 complete rerun.
 
 | # | Crash point | Scenarios | Left by the kill | Reconciliation | Expected after it |
@@ -2621,7 +2641,7 @@ need not reappear.
 
 | # | Crash point | Scenario | Rerun (reconciler (a) only) |
 |---|---|---|---|
-| 25 | `fetch.member_finished#2`, `fetch.contest_created`, `fetch.membership_edited` | K | every member committed; membership equal to `Ref(K)` |
+| 24 | `fetch.member_finished#2`, `fetch.contest_created`, `fetch.membership_edited` | K | every member committed; membership equal to `Ref(K)` |
 
 *Expected states*, compared in every cell together with: no journal, nothing
 in `downloads/` or `staging/`, no `.cpf-tmp-` name; every file that was under
@@ -2688,7 +2708,7 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | fsck new epoch; adopt; gitignore | their respective command tasks |
 | `tag`/`untag`/`mark`, `notes`, filters, `ls`, `status` with filters, `search`, `created_at` | the organisation command tasks (fetch creation's `created_at`: the fetch creation task); archive-root search with the archive |
 | every crash table and test of the archive contract (§10 there) | the archive tasks: plan and classes; root guard and codec; snapshot publication; retirement; cleanup and trash; recovery; quarantine; restore validation, `--into`, containment and publication; contests; archived listing and search |
-| every cell of the fetch crash matrix, the §5.8.8 failure transitions, reconciliation, download-area reclamation, readers, records | C5 (transaction, recovery, matrix rows 1–24 for R, M, A, X), C6 (creation, row C cells), C7 (pair rules, provenance), C8 (selections, bulk bound, row 25), C9 (status surfaces) |
+| every cell of the fetch crash matrix, the §5.8.8 failure transitions, reconciliation, download-area reclamation, readers, records | C5 (transaction, recovery, matrix rows 1–23 for R, M, A, X), C6 (creation, row C cells), C7 (pair rules, provenance), C8 (selections, bulk bound, row 24), C9 (status surfaces) |
 
 Reruns: `init`, `add --contest` complete the operation; `test add` may
 create a new number and leave the earlier files unregistered.
@@ -2697,26 +2717,26 @@ contest fetch completes its membership.
 
 **Tests:**
 
-- Kill a real subprocess at every commit point (test-only env var); assert
+- `SG-01` Kill a real subprocess at every commit point (test-only env var); assert
   the allowed states and the rerun behaviour. Storage primitives and edit
   transactions use a library helper subprocess (C4b). Each command task
   additionally kills the actual `cpf` binary at that command's commit points.
-- Injected failures: link + failed unlink; rename + failed directory sync
+- `SG-02` Injected failures: link + failed unlink; rename + failed directory sync
   (`Durability::Uncertain`, caller continues); directory `RENAME_NOREPLACE`
   unsupported; `EXDEV` on publish; existing empty destination directory;
   disk full; permission denied; temp removal failure before commit.
-- Edit transaction: in-place edit, atomic editor save, deletion, type change
+- `SG-03` Edit transaction: in-place edit, atomic editor save, deletion, type change
   and malformed TOML between steps; Windows sharing retries with a save
   between attempts; two `cpf` processes on one file; hard link refused; mode
   preserved; untouched-item round-trip.
-- Composition: nested operations never re-acquire the lock; leftover recovery
+- `SG-04` Composition: nested operations never re-acquire the lock; leftover recovery
   runs before the current transaction creates files.
-- `test add`: `.ans` `Exists` after `.in` published, and an editor modifying
+- `SG-05` `test add`: `.ans` `Exists` after `.in` published, and an editor modifying
   the `.in` before that: the `.in` is kept, reported unregistered; a
   registered entry whose `tests/custom-1.in` is missing makes `add` choose
   `custom-2`; an editor taking the id or a path during the replay → conflict,
   catalog unchanged.
-- Test commands (C6): `register` uses an existing sibling `.ans` and says
+- `SG-06` Test commands (C6): `register` uses an existing sibling `.ans` and says
   so, `--no-answer` ignores it, the stem default id and `--id` when the stem
   is taken or invalid; `register` of a path already named → refused;
   `enable`/`disable` after an editor reordered entries changes the right one,
@@ -2727,32 +2747,49 @@ contest fetch completes its membership.
   missing answers; a FIFO in place of an input is refused without blocking
   (Unix), including one swapped in after inspection; unregistered
   candidates cannot be enabled or selected.
-- Leases and pruning: held lease never pruned; killed job becomes prunable;
+- `SG-07` Leases and pruning: held lease never pruned; killed job becomes prunable;
   directory without lease reclaimed; unreadable lease left and reported;
   rename refused (Windows: a handle open inside the job directory; injected
   elsewhere) leaves the directory; `.reclaim-*` leftovers retried; the
   probe is released before the rename (Windows: the rename succeeds with no
   handle open and fails, reported, with the owner's lease open); `keep_jobs` and byte-target triggers;
   newer-schema job metadata never pruned.
-- Retention: per-job budget refusal (execution contract); `CwdOverflow`;
+- `SG-08` Retention: per-job budget refusal (execution contract); `CwdOverflow`;
   `BuildOutputTooLarge` removes the build directory; a mount point inside a
   job directory is skipped by measuring and deletion.
-- Shared `cwd`: never measured or cleared; a file-based I/O problem with a
+- `SG-09` Shared `cwd`: never measured or cleared; a file-based I/O problem with a
   shared `cwd` is refused (configuration contract §11).
-- Freeze: edits between tests and between repeat iterations do not change
+- `SG-10` Freeze: edits between tests and between repeat iterations do not change
   later runs; an edit and an injected interruption **during** freezing (the
   run does not start; the manifest is never partial); freeze failure starts
   no run; FIFO refused.
-- Admission: a second `cpf` pruning concurrently never selects a job being
+- `SG-11` Admission: a second `cpf` pruning concurrently never selects a job being
   admitted (lock held through lease creation); `cpf clean` racing admission.
-- Mount boundaries: a bind mount of the same filesystem inside a job
+- `SG-12` **Judge fingerprint in facts** (real jobs on Linux and macOS; on
+  Windows the fact codec and the status comparison are run as pure tables
+  over constructed facts): a judged `cpf test` with a `simple` checker
+  publishes a fact whose `judge` equals the report's `fingerprints.judge`;
+  `cpf status` then gives target `judge` `unchanged` and the human
+  "unchanged"; one byte of the checker source changed → `judge` `changed`
+  with `comparison` `unchanged`, human "judge changed"; the `[check]`
+  `scoring` scale changed → `changed`; only `display` changed →
+  `unchanged`; a problem without roles → a fact without `judge` and
+  `judge` `none`; a fact with `judge` against a problem whose roles were
+  removed, and a fact without it against a problem that gained a checker →
+  `changed`; a `malformed` fact → `unknown`. Golden vectors: the fact of a
+  fixed job (clock and job id injected) and its `status --json` document
+  are byte-equal to committed golden files, one pair per OS. Kill at the
+  fact replace (real `cpf`): before the rename → the previous fact
+  byte-identical and `status` compares with it; after it → the new fact
+  complete with its `judge`.
+- `SG-13` Mount boundaries: a bind mount of the same filesystem inside a job
   directory (Linux, privileged CI step) is skipped by measurement and
   deletion.
-- Per-job accounting: reservation before each copy, replacement temp counted,
+- `SG-14` Per-job accounting: reservation before each copy, replacement temp counted,
   release on removal, overflow of checked arithmetic refused.
-- Links in tool-written paths refused; root via a link works.
-- Schema refusal per format; answer absent vs present-empty.
-- **Fetch harness.** A test adapter (`storage-test-hooks`)
+- `SG-15` Links in tool-written paths refused; root via a link works.
+- `SG-16` Schema refusal per format; answer absent vs present-empty.
+- `SG-17` **Fetch harness.** A test adapter (`storage-test-hooks`)
   returns a given selection (§5.8.1) without network; every fetch test below
   drives the actual `cpf` binary with it. Assertions read back, after each
   step: the catalog (entries in order, `download` tables, `[fetch]`), the
@@ -2769,17 +2806,17 @@ contest fetch completes its membership.
   (before the step-6 `prepare`), `fetch.before_history`, `fetch.before_unlink`,
   `fetch.after_reconcile` (step 0, after reconciliation, before the area is
   created).
-- **Fetch crash states:** every cell of the crash matrix (row × scenario ×
+- `SG-18` **Fetch crash states:** every cell of the crash matrix (row × scenario ×
   `i` × reconciler), with its expected state and follow-up; one test per
   cell, named by row, scenario, `i` and reconciler.
-- **Journal completeness:** for R killed at `fetch.files_published`, and R
+- `SG-19` **Journal completeness:** for R killed at `fetch.files_published`, and R
   and M killed at `fetch.catalog_committed`, reconciler (b) runs with the download area
   already reclaimed and the test adapter disabled (any adapter call fails the
   test): the history record is byte-identical (except txn) to the
   uninterrupted run's, including `fetched_at`, `url`, pair outcomes and the
   `superseded` hashes; for a rolled-back X, the record lists exactly the
   present set.
-- **Restart cases** (after the kill, before reconciliation):
+- `SG-20` **Restart cases** (after the kill, before reconciliation):
   - `tests.toml` edited (an `enabled` change) after `fetch.files_published`
     → rolled back;
   - a planned file modified after `fetch.files_published` → that file is not
@@ -2813,7 +2850,7 @@ contest fetch completes its membership.
   - a file planted as `txn-<txn>.toml` at `fetch.before_history` →
     `history_blocked`, journal kept, `fetch` refused; after it is moved away
     a fetch reconciles and writes the record.
-- **Failure transitions** (§5.8.8), one test per table row, injected with
+- `SG-21` **Failure transitions** (§5.8.8), one test per table row, injected with
   the primitive test hooks (permission denied, sync failure, cleanup
   failure) at the step: assert the committed state, journal, history and
   status of that row, then that the next reconciliation reaches the row's
@@ -2837,13 +2874,13 @@ contest fetch completes its membership.
   (rule 5); on `journal.toml` at `fetch.before_unlink` → `journal_pending`,
   and a fetch after release removes it by rule 1 with no catalog or metadata
   edit.
-- **Catalog baseline** (§5.8.4 step 5): at `fetch.before_catalog_read` an
+- `SG-22` **Catalog baseline** (§5.8.4 step 5): at `fetch.before_catalog_read` an
   editor deletes an `updated` entry; changes its `input` path; disables it;
   converts it to `custom` (removes `download`) → each `conflict`
   `base_changed`, catalog byte-identical to the editor's version, history
   `conflict` with the published files `unreferenced`. For A, a `tests.toml`
   created by the user at that barrier → `conflict`, the user's file kept.
-- **Aborts:** at `fetch.before_publish#i` another process creates the
+- `SG-23` **Aborts:** at `fetch.before_publish#i` another process creates the
   planned name, separately for an input and an answer: exact spelling →
   `Exists`; a case variant (`Sample-1.R2.ans`) → the key recheck on every
   OS; the name `sample-1.r2.in` when the plan chose `r2` (an occupied
@@ -2855,13 +2892,13 @@ contest fetch completes its membership.
   `edited_during_commit`, catalog byte-identical, published files
   candidates; the Windows retry path with a save between attempts → the same
   conflict.
-- **Observation points and the race:** a save of a download entry's input at
+- `SG-24` **Observation points and the race:** a save of a download entry's input at
   `fetch.network` → `base_changed`, nothing published, no journal; a save at
   `fetch.after_rehash` → the catalog names the revision pair, the superseded
   file keeps the user's bytes, `cpf status` reports it as edited (the
   stated race); a save to `problem.toml` at `fetch.before_metadata` →
   per-field rule.
-- **Pair rules:** one test per row of the §5.8.5 outcome table, each with an
+- `SG-25` **Pair rules:** one test per row of the §5.8.5 outcome table, each with an
   enabled and a disabled entry; input-only edit, answer-only edit, deleted
   input, deleted answer, input replaced by a directory; each ambiguity kind
   (`duplicate_ordinal`, `duplicate_recorded`, `duplicate_upstream`, `moved`
@@ -2878,7 +2915,7 @@ contest fetch completes its membership.
   that ordinal; three refetches with an edited pair and an unchanged upstream
   revision → exactly one unregistered upstream pair; an unchanged refetch →
   every file byte-identical except `status.toml`, no history record.
-- **Provenance:** after a committed update (journal removed), the old pair
+- `SG-26` **Provenance:** after a committed update (journal removed), the old pair
   is `downloaded{superseded}` and the new `registered`; after three
   successive updates of one pair, each earlier pair is `superseded` and the
   counts by role match the records; with history records listed in any
@@ -2887,13 +2924,13 @@ contest fetch completes its membership.
   journal and with it removed, the same roles; a superseded file edited by
   the user → `unknown`; a superseded file registered by `cpf test register`
   → `registered` (custom), history records unchanged.
-- **Names:** `sample-1.r2.in` present and unregistered → `r3`; a directory
+- `SG-27` **Names:** `sample-1.r2.in` present and unregistered → `r3`; a directory
   named `sample-1.r2.ans` → `r3`; a catalog path naming a missing
   `sample-1.r2.in` → `r3`; a history-listed name deleted by the user is not
   reused; `added` on an existing unregistered `sample-1.in` → `sample-1.r2`
   with id `sample-1.r2`; collision-key variants (`Sample-1.R2.in`) count as
   taken.
-- **Download area:** at `fetch.network`, `cpf fsck --apply`, `cpf clean
+- `SG-28` **Download area:** at `fetch.network`, `cpf fsck --apply`, `cpf clean
   --apply` and `cpf clean` from other processes leave the area and its
   lease intact and the fetch then commits; a kill at `fetch.network` → the
   next locked command removes the area; an area without `lease` → removed;
@@ -2901,7 +2938,7 @@ contest fetch completes its membership.
   as `RecoveryIncomplete`; an unexpected entry in `downloads/` → kept and
   reported; the owner's own recovery at step 2 sees its area `held`;
   Windows: owner release renames with no handle open.
-- **Concurrency:** two fetches of one problem paused at `fetch.network`,
+- `SG-29` **Concurrency:** two fetches of one problem paused at `fetch.network`,
   released in turn → the first commits, the second `base_changed` with
   nothing published; a rerun → `unchanged`. A fetch and `cpf test add` on
   one problem serialize by the lock; a `test add` between steps 0 and 2 →
@@ -2912,7 +2949,7 @@ contest fetch completes its membership.
   catalog named (files are never modified, so no capture is mixed; §7 still
   permits different moments); a job admitted after the commit freezes the
   revision pair.
-- **Records:** each fetch record in each classification (`missing`,
+- `SG-30` **Records:** each fetch record in each classification (`missing`,
   `unreadable`, `malformed`, `too_new`, `valid`): a `too_new` journal
   blocks `cpf fetch` and survives `fsck --apply`; a `malformed` journal is
   removed by `fsck --apply` and its files become `unknown`; a journal with an
@@ -2925,18 +2962,18 @@ contest fetch completes its membership.
   without fetch support preserves the fields as unknown keys through `test
   enable`; a plan whose catalog would pass 1 MiB → `record_too_large`,
   nothing published.
-- **Readers:** with a `pending`, a `committed`, a `finished` and an
+- `SG-31` **Readers:** with a `pending`, a `committed`, a `finished` and an
   `undetermined` journal, `cpf status` and `cpf test ls` report
   `fetch_incomplete` with that phase and leave the workspace byte-identical;
   a pending journal's files are candidates and never run.
-- **Prepared edit** (§4.4 prepared form, library helper subprocess as C4b):
+- `SG-32` **Prepared edit** (§4.4 prepared form, library helper subprocess as C4b):
   on a CRLF `problem.toml` with comments, the prepared output bytes equal the
   bytes finally published and their SHA-256 equals the journal's
   `after_sha256`; a save between `prepare` and `publish` → `Conflict`, file
   keeps the save, no temp left; on Windows, a save between retry attempts →
   `Conflict` against the retained baseline; dropping a prepared edit leaves
   the directory byte-identical; an *unchanged* result publishes nothing.
-- **Metadata:** an unavailable field is not written; a limit change with a
+- `SG-33` **Metadata:** an unavailable field is not written; a limit change with a
   contest record `limits` override → only `problem.toml` changes,
   `contest.toml` byte-identical. Size: a `problem.toml` padded (a user
   comment) to within 1,000 bytes of 1 MiB and a title growing from one to
@@ -2944,25 +2981,107 @@ contest fetch completes its membership.
   nothing published, no journal; the same padding added at
   `fetch.before_metadata` → R `committed` with `metadata_not_applied
   {too_large}`, journal removed, `problem.toml` unchanged.
-- **Creation:** an existing local problem whose name is the derived one →
+- `SG-34` **Creation:** an existing local problem whose name is the derived one →
   refused, nothing created; a directory bound to another remote identity →
   `IdentityMismatch`; zero samples → empty catalog with `upstream_samples =
   0`, `max_ordinal = 0` and `no_samples`; non-ASCII sample bytes published
   exactly.
-- **Selections and bulk bound:** a `ProblemSet` of 50 members → 50
+- `SG-35` **Remote identities** (pure tables): accepted `atcoder:abc400_a`,
+  `atcoder:a`, an AtCoder native id of 56 characters, `cses:1`,
+  `cses:1068`, `cses:9999999`, with the directories `atcoder-abc400_a`,
+  `atcoder-a`, `atcoder-` + the 56 characters (64 characters, an
+  Identifier), `cses-1`, `cses-1068`, `cses-9999999`; the contest
+  `atcoder:abc400` with the directory `contests/atcoder-abc400`. Rejected:
+  `atcoder:`, `atcoder:ABC400_A`, `atcoder:_a`, `atcoder:-a`, `atcoder:a.b`,
+  a 57-character AtCoder native id, `cses:0`, `cses:01`, `cses:12345678`,
+  `cses:a`, `Atcoder:abc400_a`, `1x:a`, a site of 33 characters. Binding:
+  `problems/atcoder-abc400_a/problem.toml` with `id = "atcoder:abc400_a"`
+  is bound; with `"atcoder:abc400_b"`, `"local:atcoder-abc400_a"` or
+  `"cses:1068"` → `IdentityMismatch`; `problems/cses-1068` holding
+  `id = "local:cses-1068"` → `IdentityMismatch`. Then through the actual
+  binary on a workspace whose remote problem and contest the fetch harness
+  created: `cpf status atcoder:abc400_a` and `cpf fsck` report no identity
+  finding; after the `id` is edited by hand to `"atcoder:abc400_b"`, both
+  report `IdentityMismatch` for `problems/atcoder-abc400_a` and no
+  reference resolves to it.
+- `SG-36` **References** (§5.7): a workspace with `problems/atcoder-abc400_a`,
+  `problems/cses-1068` and `problems/two-sum` (all bound), the contest
+  `contests/atcoder-abc400/contest.toml` with records `A` →
+  `atcoder:abc400_a` and `B` → `atcoder:abc400_b` (no such directory), and
+  a local contest `contests/c/` with the record `A` → `local:two-sum`.
+  `cpf current --problem <ref>` prints exactly the identity and a newline
+  on stdout and nothing else, exit 0, for `atcoder:abc400_a`,
+  `atcoder-abc400_a`, `atcoder-abc400/A`, `cses:1068` and `c/A` (→
+  `local:two-sum`); `cpf switch atcoder-abc400/A` stores `current_problem =
+  "atcoder:abc400_a"`. Each of `atcoder-abc400/a` (labels by exact
+  spelling), `atcoder-abc400/B` (the named problem missing),
+  `atcoder-abc400/Z` (no record), `nope/A` (unknown contest),
+  `Atcoder-abc400/A` (another spelling), `atcoder:abc400_c` (no directory)
+  and `atcoder:ABC400_A` (outside the grammar) → exit 8, stdout empty,
+  stderr naming the reference and the cause, workspace byte-identical. A
+  `contests/c/contest.toml` with two records labelled `A` → `c/A` exits 8
+  naming `contest.toml` as `malformed`; `contests/C` beside `contests/c`
+  (Linux) → `c/A` exits 8 (several entries); `contests/l` a link → 8.
+  `cpf status`, `cpf tag` and `cpf archive` (plan) given the same
+  references act on the same problems or fail the same way.
+- `SG-37` **Selections and bulk bound:** a `ProblemSet` of 50 members → 50
   transactions, no contest file; 51 members → `selection_too_large{51}`,
   no area, record or contest file created; 51 members with `--only` naming
   50 → accepted; an unknown `--only` label → refused before any member; a
   `Contest` of 51 → refused likewise. (One enumeration request and zero
   member requests on refusal are asserted by the adapter tests, C4/C8.)
-- **Contest membership:** a kill at `fetch.member_finished#2` of four, then a
+- `SG-38` **Contest membership:** a kill at `fetch.member_finished#2` of four, then a
   rerun → membership equals the enumeration in order; a member failing in
   the rerun but committed earlier → listed; a member never committed → not
   listed; insertion before the first later member; an existing record with
   another label keeps it; a label held by another record → record without
   label, reported; `[contest] id` mismatch → refused; a problem shared by
   two contests is one directory listed in both.
-- **fsync order** (trace recorder, `storage-test-hooks`; it checks call
+- `SG-39` **Fetch exit statuses** (the test adapter returns, per member, either a
+  parsed problem or the given sites class): one problem committed,
+  unchanged, or committed with only `edited_sample_kept` (an edited pair
+  whose upstream changed) → 0; each ambiguity kind (`duplicate_ordinal`,
+  `duplicate_recorded`, `duplicate_upstream`, `moved`), `base_changed` (a
+  save at `fetch.network`) and `edited_during_commit` (a save at
+  `fetch.before_validation`) → outcome `conflict`, 9; a committed refetch
+  with `metadata_conflict{title}`, and one with `metadata_not_applied
+  {too_large}` → 9; a problem refused at step 0 (`tests.toml` `malformed`)
+  → 8; the problem failing with `not_found` → 12. Contest K of four
+  members: all committed → 0; member 3 failing `not_found`, the others
+  committed → 9; member 2 unchanged and members 1, 3, 4 failing
+  `network{status}` → 9; every member failing with a sites class → 12;
+  member 2 refused at step 0 and the others committed → 8; member 2
+  refused and member 3 failing → 8; member 2 ending `conflict` and member
+  3 failing → 9; the membership edit failing after the members committed
+  (permission denied on `contest.toml`) → 9. A `ProblemSet` of three with
+  one failing member → 9. In every case the `fetch` document's per-member
+  `outcome` and `failure.class` are the ones scripted.
+- `SG-40` **Fetch history**: a problem with a `committed`, a `rolled_back`, a
+  `conflict` and a `failed` history record, one `malformed` and one
+  `too_new` record → `cpf fetch --history <p>` lists exactly six records,
+  each by its txn, the four `valid` ones with their outcome and the other
+  two with their classification, then the latest attempt of `status.toml`;
+  exit 0; the workspace is byte-identical, no `.cpforge/lock` is created
+  where there was none, and the test adapter is never called. With no
+  records → nothing listed, exit 0; outside a workspace → 8.
+- `SG-41` **Status fetch member**: `cpf status --json` gives `fetch` = `null` for a
+  local problem; `record` `missing` with every other member `null` for a
+  remote problem without `status.toml`; after each attempt outcome
+  (`committed`, `unchanged`, `conflict`, `refused`, `failed`, and
+  `rolled_back` with `recovered = true`) `record` `valid` and exactly that
+  record's `attempted_at`, `outcome`, `txn` (`null` where the attempt
+  wrote no journal) and `recovered`; `status.toml` `malformed`, `too_new`
+  and `unreadable` (Unix permission) → that `record`, the other members
+  `null`; with a journal in each phase (`pending`, `committed`, `finished`,
+  `undetermined`) → `incomplete` that phase, `null` without a journal.
+  After a committed update the superseded pair is in `diagnostics`, and
+  the human output shows the counts by role and the latest txn, equal to
+  those of the Provenance row's fixtures; an edited pair kept beside its
+  unregistered upstream pair lists both. The documents of a committed
+  fetch and of a pending journal equal `status_fetch.json` and
+  `status_fetch_incomplete.json`. The workspace is byte-identical after
+  every `status`.
+- `SG-42` **fsync order** (trace recorder, `storage-test-hooks`; it checks call
   order only, not durability): for every fetch publication, file sync before
   rename, and on Linux and macOS rename before directory sync; the journal's
   directory sync before the first test-file publication; the last test
@@ -2971,9 +3090,9 @@ contest fetch completes its membership.
   directory sync before the journal unlink; the journal unlink followed by
   its directory sync (Linux, macOS). Windows records file flushes before each
   rename and no directory flush.
-- Every fetch test runs on Linux, macOS and Windows (fetch starts no
+- `SG-43` Every fetch test runs on Linux, macOS and Windows (fetch starts no
   process).
-- **Organisation harness.** Every test drives the
+- `SG-44` **Organisation harness.** Every test drives the
   actual `cpf` binary. A `storage-test-hooks` clock override fixes "now"
   (`2026-11-24T10:00:00.000Z` unless a row says otherwise); a bounds
   override lowers the search bounds E and B; pause barriers
@@ -2988,7 +3107,7 @@ contest fetch completes its membership.
   identity) before and after; "no write" additionally asserts the record's
   file identity and modification time are unchanged. Every row runs on
   Linux, macOS and Windows unless it names an OS.
-- **Grammars** (pure tables): tags `dp`, `DP`, `2-sat`, `a`, a 32-character
+- `SG-45` **Grammars** (pure tables): tags `dp`, `DP`, `2-sat`, `a`, a 32-character
   tag accepted; `""`, 33 characters, `-x`, `_x`, `a b`, `a.b`, `a/b`, `é`
   rejected. Status names `new`, `in-progress`, `a`, 32 characters accepted;
   `In-progress`, `-a`, `a-`, `1a`, `a_b`, 33 characters rejected. Valid
@@ -3007,7 +3126,7 @@ contest fetch completes its membership.
   `2026-11-25T00:00:00.000Z`; `..2026-11-24`, `2026-11-24..`,
   `2026-11-20..2026-11-24` inclusive at both ends; `2026-11-25..2026-11-24`,
   `..`, `2026-02-29`, `2026-11-24T10:00Z` rejected.
-- **Local-day tables** (zones passed to the evaluator through jiff's API
+- `SG-46` **Local-day tables** (zones passed to the evaluator through jiff's API
   on every OS, built with `TimeZone::posix` from the strings below; the
   end-to-end rows repeat them through `TZ` on Linux and macOS with the same
   expected results): `CET-1CEST,M3.5.0,M10.5.0/3` → `2026-11-24T23:30:00.000Z` is
@@ -3043,14 +3162,14 @@ contest fetch completes its membership.
   local dates equal those of the `Europe/Berlin` fixture for the CET rows;
   `tzutil /s "W. Europe Standard Time_dstoff"` → `2026-07-01T22:30:00.000Z`
   is 2026-07-01 (fixed +01, 23:30). Both restore the host zone afterwards.
-- **Argument errors before the workspace:** run outside any workspace, each
+- `SG-47` **Argument errors before the workspace:** run outside any workspace, each
   of `cpf tag p 'a b'`, `cpf tag p`, `cpf mark p Solved`, `cpf mark
   contest:c solved`, `cpf --problem a tag . dp`, `cpf ls --tag 'a b'`,
   `cpf ls --contests --status new`, `cpf status --solved 2026-02-29`,
   `cpf search` (no term), 17 terms, a 257-byte term, a non-UTF-8 term
   (Unix), `cpf notes contest:c`, `cpf tag p dp --json` exits 2 (not 8),
   and no file is created anywhere.
-- **`tag`/`untag` edits:** on a `problem.toml` with CRLF line endings,
+- `SG-48` **`tag`/`untag` edits:** on a `problem.toml` with CRLF line endings,
   comments, an unknown key and a `[config]` table, `cpf tag p dp graphs`
   → exit 0 and the record equals the expected fixture bytes: only `tags =
   ["dp", "graphs"]` and `updated_at = "2026-11-24T10:00:00.000Z"` added to
@@ -3060,7 +3179,7 @@ contest fetch completes its membership.
   `cpf untag p nope` → stderr note, exit 0, no write; untagging the last
   tags → `tags = []`. An existing multi-line `tags` array with a comment
   keeps the comment and layout after an append.
-- **`mark`:** `cpf mark p solved` → `status`, `solved_at`, `updated_at` all
+- `SG-49` **`mark`:** `cpf mark p solved` → `status`, `solved_at`, `updated_at` all
   equal the clock; again at a later clock → no write; `cpf mark p
   in-progress` (clock T2) → `status` changed, `solved_at` unchanged,
   `updated_at` = T2; `cpf mark p solved` at T3 → `status = "solved"`,
@@ -3073,7 +3192,15 @@ contest fetch completes its membership.
   `status.values = [1]` → 7; a phase-1 error in a language table only →
   `mark` succeeds with a warning. `mark p new` on a problem without
   `status` writes `status = "new"`.
-- **Invalid fields block only their writers:** `tags = "dp"` → `cpf tag`
+- `SG-50` **Workflow status untouched by jobs:** on a problem with `status =
+  "in-progress"` and on one without `status`, a `cpf test` in which every
+  test passes, a `cpf stress --iterations 3` that finds no failure and a
+  `cpf submit-prep --source-copy` (Linux and macOS) → `problem.toml`
+  byte-identical (no `status`, `solved_at` or `updated_at` written) and
+  `cpf status` still shows `workflow: in-progress`, respectively `new`. On
+  Windows the same `cpf test` command line exits 10, `--source-copy`
+  exits 0, and `problem.toml` is byte-identical.
+- `SG-51` **Invalid fields block only their writers:** `tags = "dp"` → `cpf tag`
   and `cpf untag` exit 8 naming `tags`, record byte-identical, and `cpf
   mark p solved` succeeds (it does not write `tags`); `updated_at = 5` →
   `tag`, `untag` and `mark` exit 8; `solved_at = "x"` → `mark p solved` 8,
@@ -3084,12 +3211,12 @@ contest fetch completes its membership.
   `findings`; `cpf ls --json` gives `[]` / `null` with the finding.
   Regression: the existing `status` fixtures and gate-1 status tests pass
   with only the added `findings` member.
-- **Tag count:** 63 tags + `cpf tag p a A b` → `a` added once, `b` → 65 →
+- `SG-52` **Tag count:** 63 tags + `cpf tag p a A b` → `a` added once, `b` → 65 →
   refused 8 `too_many_tags`, byte-identical; 63 tags + `cpf tag p a A` →
   64, committed; 63 tags, an editor adds the 64th at `org.before_validation`
   of the first attempt, `cpf tag p x` → the replay counts 65 → 8, the
   record equals the editor's version.
-- **Binding on replay:** at `org.before_validation` an editor changes
+- `SG-53` **Binding on replay:** at `org.before_validation` an editor changes
   `[problem] id` from `local:p` to `local:q` (a valid identity) → the
   replay refuses with `IdentityMismatch`, exit 8, the record equals the
   editor's; the same on the first attempt (the change made at the barrier
@@ -3101,14 +3228,14 @@ contest fetch completes its membership.
   byte-identical; `cpf tag p dp` started while a refetch holds the lock
   (paused at `fetch.before_metadata`) waits, then commits on the fetch's
   result with both the fetch's metadata and the tag present.
-- **Targets:** `.` from inside `problems/p/` tags `p`; `.` with a saved
+- `SG-54` **Targets:** `.` from inside `problems/p/` tags `p`; `.` with a saved
   selection and the root as cwd tags the saved problem; `.` with no
   selection → 8 `NoSelection`; a bare name naming only a contest → 8 with
   the contest note, `contest.toml` byte-identical; `cpf tag contest:c
   rated` adds top-level `tags = ["rated"]` to a local `contest.toml`, every
   `[[problem]]` record byte-unchanged and no `[contest]` table created; a
   `malformed` `contest.toml` → 8, byte-identical.
-- **Editor and concurrency:** at `org.before_validation` an editor saves
+- `SG-55` **Editor and concurrency:** at `org.before_validation` an editor saves
   `problem.toml` by atomic rename adding a comment → the replay commits and
   the record holds both the comment and the tag; an editor saving at the
   barrier of both attempts → 8, the record equals the editor's second
@@ -3118,18 +3245,31 @@ contest fetch completes its membership.
   are present in order of commit. Windows: a handle without write or delete
   sharing held for 3 s → 8, record unchanged; released after 0.5 s → the
   retry commits.
-- **Crash states:** kill at `org.edit_validated` → record byte-identical to
+- `SG-56` **Crash states:** kill at `org.edit_validated` → record byte-identical to
   before and one `.cpf-tmp-` file beside it; the next `cpf tag` removes it
   (leftover recovery) and commits. Kill at `org.edit_committed` → record
   equals the expected new bytes. Both for `tag`, `untag`, `mark`.
-- **Size:** a `problem.toml` padded by a comment to 1 MiB − 10 bytes →
+- `SG-57` **Size:** a `problem.toml` padded by a comment to 1 MiB − 10 bytes →
   `cpf tag p dp graphs` 8 (`record_too_large`), byte-identical.
-- **Creation dates:** `cpf add two-sum` → `[problem] created_at` equals the
+- `SG-58` **Clock outside the domain:** with the clock override at
+  `9999-12-30T22:00:01.000Z`, and separately at
+  `1969-12-31T23:59:59.999Z`, each of `cpf tag p dp`, `cpf untag p x`,
+  `cpf mark p solved` and `cpf add q` → 8 naming the clock, the record
+  byte-identical, no `problems/q`, no `.cpf-tmp-` file; at
+  `9999-12-30T22:00:00.999Z` and at `1970-01-01T00:00:00.000Z` the same
+  commands commit and write exactly that value.
+- `SG-59` **Creation dates:** `cpf add two-sum` → `[problem] created_at` equals the
   clock in the published record; at each existing `add` crash point the
   published problem, when present, has it; `cpf add --contest c two-sum`
   on the existing problem leaves its `problem.toml` byte-identical.
   (Fetch creation: with the fetch creation tests.)
-- **`notes`:** absent → stdout exactly the absolute path and `\n`, stderr
+- `SG-60` **`updated_at` writers:** on problems with `updated_at` absent and with
+  `updated_at = "2026-01-01T00:00:00.000Z"`: a committed metadata refetch
+  (a title change, scenarios R and M of the fetch harness), `cpf adopt`, `cpf
+  test add`, `register`, `enable`, `disable` and `cpf notes` → an absent
+  `updated_at` stays absent and a present one keeps its bytes; the next
+  `cpf tag p x` sets it to the clock.
+- `SG-61` **`notes`:** absent → stdout exactly the absolute path and `\n`, stderr
   `created`, a 0-byte regular file; again → `exists`, no write; an existing
   file with content → unchanged; `notes.md` a directory, a symlink (target
   untouched), a FIFO (Unix, returns without blocking) → 8, stdout empty; an
@@ -3142,7 +3282,7 @@ contest fetch completes its membership.
   created, exit 0 for absent, existing and directory `notes.md`, stderr
   naming each state. `cpf status` never lists `notes.md` as untracked.
   `--json`: document vectors for `created`, `existing`, `absent`.
-- **Filters (fixture workspace F):** twelve valid problems covering status
+- `SG-62` **Filters (fixture workspace F):** twelve valid problems covering status
   absent, `new`, `in-progress`, `solved`, `skipped`, `wa` (not in the
   vocabulary) and `5` (invalid); tags `dp`, `DP`, `graphs`, none and the
   invalid `"dp"`; sites `local` and `atcoder`; dates in all three
@@ -3158,30 +3298,50 @@ contest fetch completes its membership.
   appears in no `--status` result and in every listing's findings.
   `cpf status contest:c1 --status solved` → the solved members in
   `contest.toml` order. `--contest nope` → 8.
-- **Invalid entries:** F plus `problems/broken/` with a malformed
+- `SG-63` **Invalid entries:** F plus `problems/broken/` with a malformed
   `problem.toml`, a link `problems/l`, and a regular file `problems/f` →
   `cpf ls` exit 0 listing all three under `invalid` with their reasons and
   the twelve problems as before; `cpf status --all --tag dp` → 8 naming
   `broken`, as without the filter.
-- **Contest status:** a contest of five members (two `solved`, one without
+- `SG-64` **Contest status:** a contest of five members (two `solved`, one without
   `status`, one with an invalid status, one whose directory is missing) →
   `cpf ls --contests` shows `solved 2, new 1, invalid 1, unresolved 1`;
   after `cpf mark` of the `new` member to `solved` → `solved 3, …`, and
   `contest.toml` is byte-identical.
-- **Readers:** after each of `cpf ls`, `cpf ls --contests`, `cpf status`
+- `SG-65` **Contest listing:** contests `atcoder-abc400` (`[contest] id =
+  "atcoder:abc400"`, tag `rated`), `c` (local, no `[contest]` table, tag
+  `Rated`), `broken` (malformed `contest.toml`) and a regular file
+  `contests/f` → `cpf ls --contests` exit 0 listing the two valid contests
+  with their tags and member counts and `broken` and `f` with their
+  reasons; `--site atcoder` → only `atcoder-abc400`; `--site local` → only
+  `c`; `--tag rated` → both valid contests; `--tag dp`, where only a member
+  problem has `dp` → none.
+- `SG-66` **`ls` exit statuses:** outside a workspace → 8 (with `--json` the
+  `error` document); `problems/` unreadable (Unix) → 8; `contests/`
+  unreadable with `--contests` (Unix) → 8; `--contest broken` (malformed
+  `contest.toml`) → 8; invalid entries and field findings → 0; a closed
+  stdout with `--json` → 11; `cpf ls --contests --status new` → 2.
+- `SG-67` **Readers:** after each of `cpf ls`, `cpf ls --contests`, `cpf status`
   with filters, `cpf search` and `cpf notes --path` on F, the workspace is
   byte-identical and no `.cpforge/lock` exists where there was none;
   `cpf ls --archived` tests are in the archive contract
   §10.10. Document vectors
   for `ls` (problems and contests) and `search`.
-- **Search hits (fixture F with notes):** expected hit lists, with matched
+- `SG-68` **Search hits (fixture F with notes):** expected hit lists, with matched
   fields and note line numbers, for at least: `DP` (case), a precomposed
   `é` term against decomposed notes text and the reverse, `e` matching
   `é`, two terms matched in different fields, a term only in notes with and
   without `--no-notes`, a term plus `--status solved`, a term matching only
   a contest tag (no hit), and a term matching nothing (zero hits, exit 0,
   `no matches` and the findings).
-- **Notes bounds:** a `notes.md` of exactly 65 536 bytes → not truncated,
+- `SG-69` **Search output:** a `notes.md` with the term on 20 lines → the hit
+  lists exactly the first 16 line numbers; on 16 lines → all 16. A
+  complete search writes no `search incomplete` line; a search ending with
+  `byte_limit` and `notes_truncated` → the last stderr line is `search
+  incomplete: ` followed by those two reasons in that order; zero hits with
+  an unreadable `notes.md` → `no matches`, the `unreadable_source`
+  finding, then the incompleteness line.
+- `SG-70` **Notes bounds:** a `notes.md` of exactly 65 536 bytes → not truncated,
   complete; 65 537 bytes → `notes_truncated` on that problem and the reason
   in `incomplete`; a term only in byte 65 537 onward → no hit; a 3-byte
   UTF-8 character straddling 65 536 → dropped, no `notes_not_utf8`; a `0xFF`
@@ -3190,7 +3350,7 @@ contest fetch completes its membership.
   `unreadable_source`, the run finishes; unreadable notes (Unix mode 000,
   Windows deny-read ACL) → `unreadable_source`; `--no-notes` on the same
   workspace → no notes finding and complete.
-- **Search bounds** (bounds override; ten problems `p01`–`p10`, each with a
+- `SG-71` **Search bounds** (bounds override; ten problems `p01`–`p10`, each with a
   `problem.toml` of 1 000 bytes and a `notes.md` of 2 000 bytes, every one a
   hit): E = 30 → complete, ten hits, E used 30; E = 24 → seven hits
   (`p01`–`p07`), `entry_limit`; E = 5 → zero hits, `entry_limit`, five
@@ -3211,7 +3371,7 @@ contest fetch completes its membership.
   complete, the recorder shows no `contests/` access; `cpf search x
   --contest c` → `entry_limit` during the `contests/` enumeration, no
   problem examined.
-- **Cancellation:** SIGINT at `search.before_action#20` (Unix) → hits only
+- `SG-72` **Cancellation:** SIGINT at `search.before_action#20` (Unix) → hits only
   among the actions before it, `cancelled`, death by SIGINT; with `--json`
   the delivered document has `cancelled`; Windows Ctrl-Break → 6. The
   workspace is byte-identical. **Blocked I/O:** a test hook stalls the
@@ -3220,19 +3380,33 @@ contest fetch completes its membership.
   candidates finished before the stall plus `cancelled`, and the process
   exits (death by SIGINT / 6) within 1 s; a second signal ≥ 100 ms after a
   first one that is ignored by an injected stalled stdout → force exit.
-- **In-place writers:** with the reader paused after reading the first half
+- `SG-73` **In-place writers:** with the reader paused after reading the first half
   of `problem.toml` (hook `org.read_partial`) and the file rewritten in
   place, `cpf ls` classifies exactly the bytes read (the expected
   `malformed` finding for the fixture's torn bytes), exits 0 and reads the
   file once; the same for `notes.md` in `cpf search` (searched as read, no
   error).
-- **Search exit statuses:** outside a workspace → 8 with the `error`
+- `SG-74` **Search exit statuses:** outside a workspace → 8 with the `error`
   document under `--json`; no `problems/` → 0, complete, zero hits;
   `problems/` unreadable (Unix) → 8; closed stdout with `--json` → 11;
   incomplete for each reason except `cancelled` → 0; cancelled with
   `--json` and a closed stdout → 11 (report §5.2 row 4 before row 5); a
   usage error (`cpf search`) with `--json` and a closed stdout → 2.
-- **Archive.** The archive contract §10 lists the
+- `SG-75` **Organisation maintenance:** a workspace with `tags = "dp"`, `status =
+  "5"` and `solved_at = "x"` on three problems, a contest with `tags = [1]`,
+  a `notes.md` that is a directory and one that is a FIFO (Unix) → `cpf
+  fsck` exit 0 reporting each with its problem or contest, field and
+  reason, and each non-regular `notes.md`; `cpf fsck --apply` and `cpf
+  clean --apply` → every record and `notes.md` byte-identical (with file
+  identities).
+- `SG-76` **`gitignore` lines:** `cpf gitignore` prints exactly the lines of §5.5
+  in that order: the seven active lines ending with `.cpforge/archive/`
+  and `.cpforge/quarantine/`, then the comments `# optional:
+  .cpforge/facts/`, `# optional: .cpforge/fetch/` and `# optional:
+  problems/*/stress/failures/`, and no active line naming `facts/`,
+  `fetch/` or `stress/`; `--write` on a fresh workspace publishes exactly
+  that block between the markers.
+- `SG-77` **Archive.** The archive contract §10 lists the
   archive, cleanup, trash, quarantine, restore, contest and archived-search
   tests, each killing the real `cpf` binary at every crash point it names
   and asserting the recovered content; they run on Linux, macOS and Windows
@@ -3241,6 +3415,6 @@ contest fetch completes its membership.
   each crash cell of those tables, a locked command that is not an archive
   command (`cpf tag`) performs exactly rule R and nothing else (retired and
   quarantined files byte-identical before and after it).
-- Real runs on Linux, macOS and Windows on the supported filesystems;
+- `SG-78` Real runs on Linux, macOS and Windows on the supported filesystems;
   power-loss behaviour is not tested. Platform floor and toolchain as in
   [README](../../README.md) (platform floor).

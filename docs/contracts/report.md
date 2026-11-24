@@ -2670,6 +2670,15 @@ clock), `events.enqueue`, `delivery.write`, `stderr.write`,
   admission refused (`job-seq` malformed) → switch 0, warning, no hook run;
   Ctrl-C during a hook → cancellation status; injected panic in the hook
   job → 70; the saved selection is the new one in every case.
+- **Warning slots** (§4.10; injected executor, all OSes): 24 ordinary
+  warnings and intent at `finalize.snapshot` (late cancellation) →
+  `warnings` holds 24 entries, the first 23 ordinary ones in occurrence
+  order and `late_cancellation` last, `warnings_dropped` 1; the same 24
+  warnings without intent → all 24 ordinary, `warnings_dropped` 0; 30
+  ordinary warnings with late cancellation → 23 ordinary, then
+  `late_cancellation`, `warnings_dropped` 7; 5 ordinary with late
+  cancellation → 5 ordinary, then `late_cancellation`, `warnings_dropped`
+  0.
 
 ### 9.3 Transport
 
@@ -2895,6 +2904,9 @@ same records to show it is deterministic.
 | J-B48 | each role's build failing (checker, validator, interactor), and each with `not_started{create_failed}`, with tests and with zero selected tests | later builds coverage `skipped{build_not_succeeded}`, build result `skipped{build_not_succeeded}`, every test execution `skipped{build_not_succeeded}`; job `build_failed` (3), respectively `infrastructure` (10); zero tests: the same, never `no_tests` |
 | J-B49 | intent set while a role build runs (it is stopped), and intent set before a later build's admission after a failed build | the stopped build `cancelled`; every later build coverage `skipped{cancelled}` with build result `cancelled`, test executions `skipped{cancelled}` (cancellation precedes `build_not_succeeded`, §2.1); job `cancelled`, cancellation status; in the second case the failed build stays `failed` and the job is `cancelled` (row 3 precedes row 4) |
 | J-B44 | intent after the checker finished | completed verdict, `cancellation.phase: primary`, fact `not_attempted{cancelled}` |
+| J-B50 | prebuilt roles: a `testlib` checker and a `simple` checker given by `program` (compiled beforehand), each accepting | `roles[0].origin` `prebuilt`, `build` `null`, `provenance` `{"kind":"declared"}` for both; the `testlib` one with exactly one `testlib_header` warning with `detail` `declared`, the `simple` one with none; verdicts `passed` |
+| J-B51 | pure, a points problem of scale 100 with tests scored 12.5, 100 (`passed`) and 0 (`wrong_answer`), under `sum` and under `min`; then every test `passed`; then one test `checker_failed` | `sum`: value `112.5`, max `300`, `full` false, status 1; `min`: value `0`, max `100`, status 1; all passed: `sum` `300`/`300` and `min` `100`/`100`, `full` true, status 0; with the `checker_failed` test: `incomplete`, `missing` 1, status 5 |
+| J-B52 | real `simple` checker writing 2 000 bytes to stderr, then exiting 1 | `judges[0].stderr` head the first 1 024 bytes, `len` 2 000, `truncated` true, `sha256` of all 2 000 bytes; `message` `null`; verdict `wrong_answer` |
 
 #### 9.6.2 Interactive tests (§2.12)
 
@@ -2985,6 +2997,10 @@ row allows it. Ids cite the design's normative statements one by one.
 | J-P11 | seeded rerun of a failing session, deterministic and nondeterministic | `rerun.reproduced` true / false |
 | J-P12 | `cpf interactor-test`: a passing `good` list; a `bad` solution that passes | success; the command fails |
 | J-P13 | interactive, `cwd_bytes` configured small: an interactor writing a valid `accepted` report and a large `tout` (mode `interactor`), and the same with a follow-up checker (mode `checker`) | `tout` and report extracted to `judge/` before the interactor's `cwd/` is measured and cleared (`CwdOverflow` diagnostic); OK in mode `interactor`; in mode `checker` the checker receives the extracted `tout` and decides; injected extraction failures, each → verdict `infrastructure`, the closed record passes step 0, no `AuthorityComplete`, never `artefact_invalid` or `internal_policy_error`: (a) mode `interactor`, reservation refusal for the interactor's `tout` → `ValidationDone{interactor, NotRead}` reason `extraction_failed` + `Infrastructure{judge_extraction}`, no checker fact; (b) mode `checker`, write error for the interactor's report → the same, and the checker `CheckerSkipped{NotEligible}` (coverage `skipped{not_eligible}`); (c) mode `checker`, intent set before (b)'s checker decision → `CheckerSkipped{Cancelled}`, verdict still `infrastructure` (step 1); (d) mode `checker`, interactor accepted, the follow-up checker started and its report extraction fails → the checker keeps `Started`, `RootExited`, `CleanupResult`, gets `ValidationDone{checker, NotRead}`, no `CheckerSkipped`; (e) S's cleanup `Incomplete` already recorded `Infrastructure`, then the interactor's extraction fails → no second fact, `suppressed` = 1 |
+| J-P14 | wiring: the solution fixture records its argv, its environment and the types of its descriptors 0 and 1; the interactor records its argv | the solution's argv is the target run argv with nothing appended; no argument or environment value of the solution names the interactor's private directory or the test's input or answer path; its stdin and stdout are pipes; the interactor's argv ends with the absolute `input`, `tout`, `answer` and `report` paths of its private directory and `-appes` |
+| J-P15 | retention of a failed session: mode `interactor+checker`, the interactor accepting and the follow-up checker rejecting (WA); the same problem with a passing test | failed test: the job's frozen input and answer, `<interactor run>/judge/tout`, `judge/report` of both the interactor and the checker run, and the stderr captures of both are present after the job, each byte-equal to what the judges received or wrote; passing test: `tout` and the transcript removed (`transcript.kind` `removed`), both reports kept |
+| J-P16 | session record: interactor with `seed = "env"`, `solution_seed = "env"`, a declared asset, mode `relay` | the persisted `spec.json` of the solution and of the interactor execution holds its effective argv and environment, with `CPF_SEED_INTERACTOR` and `CPF_SEED_SOLUTION` equal to `session.seeds`, and its digest equals `executions[].spec.digest`; `executions[].program` names each resolved executable; the asset's bytes are covered by `roles[].capture.content_sha256`; the frozen answer's hash in the job's input manifest equals the test answer's SHA-256; `session.mode` and `session.deadlines` equal the configured values |
+| J-P17 | `cpf interactor-test` undecided: a `good` solution whose every test is `unchecked{checking_unverified}` (interactor cleanup `unverified`, injected); a `bad` solution whose tests are all `unchecked` the same way; a `good` solution whose job ends `checker_failed`, listed before two other solutions | 4; 4; 5, and the two later solutions are never admitted (no job directory for them) |
 
 ### 9.7 Stress
 
@@ -3047,6 +3063,20 @@ status (§5.2); the configuration rows are C §11.
 | F-32 | `stdout_cap = 4096`; a file of 4 000 bytes at the `fstat` that a barrier-controlled descendant grows to 8 192 bytes before the copy ends; the same with an injected failure to remove the partial copy | the operation log shows the 1-byte probe read into memory after 4 096 copied bytes; the extracted copy's on-disk length never exceeds 4 096 (accounting counter maximum) and the job's charged bytes never exceed the reservation; `too_large{bytes: 4097, budget: 4096}`, `output_budget`; with the removal failure, `io_scratch` `partial_copy_kept` and the 4 096 bytes stay charged until the job's owner is released |
 | F-33 | a stub filesystem blocking the staged-input write, cancellation intent set during it; the same block released after the job ended | the run `not_started{cancelled_before_start}` (published without waiting for the creation thread, E §3.4), later runs `skipped{cancelled}`, the report produced; the staged file and its charge stay with the creation thread until it returns and removes the file, or until the job's owner is released; nothing else touches it |
 | F-34 | wrongly spelled `OUT.TXT` (for `out.txt`) as a symbolic link, as a directory, as a mode-`000` regular file; a mode-`000` `out.txt` renamed to `OUT.TXT` between the pathname observation and the confirming listing | `misnamed` in every case on Linux and on macOS (case-insensitive APFS), never `not_regular` or `unreadable`; the link is never followed and nothing is opened |
+
+### 9.9 Command surface
+
+Every row drives the actual `cpf` binary and runs on Linux, macOS and
+Windows unless it names an OS; "nothing created" means the workspace is
+byte-identical, no `.cpforge/lock` is created where there was none, and
+no request is sent.
+
+| Id | Fixture | Expected |
+|---|---|---|
+| R-U01 | `cpf --help`; `cpf <command> --help` for every command of §5.5 | the first lists every command of §5.5; each exits 0 |
+| R-U02 | each command of §5.5 in a build where its implementation has not landed | stderr names the command and says it is not available yet, exit 2, nothing created; in a release build no command does so |
+| R-U03 | usage errors of §5.1 code 2: `--problem` with `fetch`, `archive`, `restore` and `quarantine`; `fetch --history --json`; `fetch --only A` and `--all-in-section` with a selection they do not apply to; `archive --plan <hash>` without `--apply`; `archive --resume` with a target; `archive --close <txn>` with `--keep-profile`; `restore --into x` with a contest snapshot; `interactor-test --json` and `--events` | each exit 2, nothing created; on Windows the job commands among them also exit 2 (usage before the platform refusal) |
+| R-U04 | Windows: errors found only in phase-3 planning, with phases 1–2 valid: a `cpf test` plan of 10 001 runs (repeat), 1 001 judged tests, a `cpf stress` whose start seed + iterations wraps | exit 10 before admission, no job directory; the same command lines on Linux and macOS exit 7 |
 
 ## 10. Amendments to other documents
 

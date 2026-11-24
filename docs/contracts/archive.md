@@ -1385,7 +1385,7 @@ pre-archive file's bytes are found in at least one of them.
 
 ### 10.2 Plan
 
-- **Classification table** on a fixture problem holding: `problem.toml`,
+- `AR-2.01` **Classification table** on a fixture problem holding: `problem.toml`,
   `tests.toml`, `notes.md`, an unedited registered download pair, an edited
   download (answer changed), a superseded pair, a revision pair, a pair from
   a rolled-back fetch (`unreferenced`), a hand-written test, an unregistered
@@ -1394,51 +1394,70 @@ pre-archive file's bytes are found in at least one of them.
   `helpers.hpp`, `brute.py` (a configured language), `README.txt`: each
   file's class equals the table of §3.3; `helpers.hpp` (no configured
   extension) and `README.txt` are `other`, kept and listed by path.
-- **Fetch history decides**: the same bytes under `tests/` are `tests:sample`
+- `AR-2.02` **Fetch history decides**: the same bytes under `tests/` are `tests:sample`
   with a valid history record naming them and `tests:custom` after the
   record is replaced by a `malformed` one.
-- **Keep/discard**: default config keeps every class and omits `submit`;
+- `AR-2.03` **Keep/discard**: default config keeps every class and omits `submit`;
   `discard = ["tests:sample"]` drops exactly the unedited download files;
   `--keep-profile minimal` replaces the lists; `discard = ["metadata"]`,
   `discard = ["fetch"]`, a class in both lists, an unknown class → 7.
-- **Layout vectors** (pure): `{site}/{problem_id}` → `atcoder/abc400_a`;
+- `AR-2.04` **Layout vectors** (pure): `{site}/{problem_id}` → `atcoder/abc400_a`;
   values `CON`, `con.txt`, `a.`, `a `, `a/b`, `a\b`, `a:b`, `C:`, `\\x`,
   `.hidden`, a 256-byte value, a control character → refused before
   anything is written; `{label}` outside a contest archive →
   `layout_value_missing`; `{snapshot_id}`, `{tags}`, `{title}`, an empty
   segment, 9 segments → 7; an existing `Atcoder/` beside a value `atcoder`
   → `layout_collision`.
-- **Payload names**: a file `a:b` (Unix), `CON.txt`, `x.` (Unix), two names
+- `AR-2.05` **Payload names**: a file `a:b` (Unix), `CON.txt`, `x.` (Unix), two names
   `A.txt` and `a.txt` (Linux), a symlink, a FIFO (Unix), a junction
   (Windows), a 1 025-byte path, 33 components → each refused with the path
   listed, workspace and root byte-identical.
-- **Limits**: inventories of 10 000 entries, 256 MiB for one file and 1 GiB
+- `AR-2.06` **Limits**: inventories of 10 000 entries, 256 MiB for one file and 1 GiB
   in total (with the bounds override scaling sizes, and one unscaled 1 GiB
   run on Linux) plan successfully; 10 001 entries, 256 MiB + 1 and 1 GiB + 1
   → `snapshot_too_large` before any root write; 20 001 entries →
   `inventory_too_large`.
-- **Binding**: the plan hash changes after each single change of: one byte
+- `AR-2.07` **Binding**: the plan hash changes after each single change of: one byte
   of a kept file, one byte of a discarded file, a new file, an executable
   bit, `archive.layout`, `--keep-profile`, `--cleanup`, the root, the selection,
   a contest listing the problem; `--apply --plan <old>` → 8
   `plan_changed`, nothing written. Two plans of an unchanged workspace have
   the same hash.
-- **Integration**: a workspace after three refetches with edited and
+- `AR-2.08` **Integration**: a workspace after three refetches with edited and
   upstream-changed pairs, a restart and `cpf test register`, is classified
   from its fetch history: every downloaded file's class equals the
   expected table computed from the records.
+- `AR-2.09` **Plan refusals** (§3.7): a fetch journal of the problem in each
+  classification → `fetch_incomplete`; a transaction of the problem left
+  `retiring` with `source_missing` (as in AR-4.06) → `archive_incomplete{txn}` naming it; `problem.toml`
+  `malformed`, `too_new` and with an identity not bound to the directory;
+  `tests.toml` `malformed`, `unreadable` (Unix permission) and `too_new` →
+  each refused with exit 8 and its reason, plan and `--apply` alike; the
+  workspace and the root byte-identical and no transaction directory
+  created.
+- `AR-2.10` **Root paths** (§3.1): `--to rel/dir`, `--to ~other/x` and `--root rel`
+  → 7, nothing written; `~/cp-archive` in `roots` resolves under the home
+  directory; `default_root` absent with `roots = [a, b]` → the archive
+  goes to `a`; no `--to`, no `default_root` and `roots = []` → 7 "no
+  archive root", nothing written.
+- `AR-2.11` **`--to`**: `cpf archive p --to <dir> --apply` with `<dir>` absolute and
+  not in `archive.roots` → the plan carries the not-in-roots warning, the
+  snapshot is published under `<dir>`, every configuration file is
+  byte-identical afterwards, a later `cpf archive q --apply` without `--to`
+  goes to `default_root`, and `cpf ls --archived` does not list the `--to`
+  snapshot; `--to` naming a configured root → no warning.
 
 ### 10.3 Root guard, codec, snapshot
 
-- **Lock order**: a root-lock holder never acquires the workspace lock
+- `AR-3.01` **Lock order**: a root-lock holder never acquires the workspace lock
   (instrumented guard asserts on every acquisition); two processes
   archiving to one root serialise on the root lock; a held root lock gives
   `Busy` after the bound.
-- **Root recovery**: a staging leftover is removed only after the root lock
+- `AR-3.02` **Root recovery**: a staging leftover is removed only after the root lock
   is acquired; with the lock held by a paused archive at
   `archive.copied#2`, a second process waiting for the lock never removes
   that staging; after the first is killed, the second removes it.
-- **Codec vectors**: the worst-case manifest (10 000 entries, every field
+- `AR-3.03` **Codec vectors**: the worst-case manifest (10 000 entries, every field
   of §4.4 at its stated maximum) is encoded, its length recorded and
   asserted ≤ C, and read back; the largest entry the field limits allow
   encodes to at most 1 293 bytes (≤ the 1 536 budget), asserted by
@@ -1450,7 +1469,7 @@ pre-archive file's bytes are found in at least one of them.
   worst-case vectors for the summary (≤ 64 KiB, with `title_truncated`),
   `plan.json`, `cleanup.json`, `sweep-<n>.json`, `trash-result.json` and
   `record.json` at their item bounds.
-- **Publication** (kill at each crash point of §5.2, then rerun):
+- `AR-3.04` **Publication** (kill at each crash point of §5.2, then rerun):
   `archive.root_staged`, `archive.copied#1`, `#last`,
   `archive.manifest_written` → root has no snapshot, staging removed by the
   next root lock, workspace byte-identical; `archive.published` → one
@@ -1458,22 +1477,34 @@ pre-archive file's bytes are found in at least one of them.
   (Linux: a small tmpfs root; macOS: a small disk image; Windows: a small
   VHD where CI allows, otherwise an injected `ERROR_DISK_FULL`) → 8,
   nothing published, staging removed.
-- **Cross-filesystem root**: a root on another filesystem (Linux tmpfs,
+- `AR-3.05` **Cross-filesystem root**: a root on another filesystem (Linux tmpfs,
   macOS disk image) archives successfully; the snapshot's files and hashes
   equal the source.
-- **Overlap and links**: a root inside the workspace, equal to it, or an
+- `AR-3.06` **Overlap and links**: a root inside the workspace, equal to it, or an
   ancestor of it → `root_overlap`; a layout directory replaced by a link
   before the archive → `link_in_destination`; a concurrent creation of the
   layout path's last directory by another process between the check and
   `create_dir` → accepted when it is a directory, refused when it is a
   file.
-- **Edit during copy**: at barrier `archive.copied#1`, an editor save of a
+- `AR-3.07` **Network warning**: through a filesystem-type override of `storage-test-hooks`, the
+  root classified as each network type of §4.1 for the OS (Linux the NFS,
+  SMB/CIFS, 9P and FUSE magic numbers; macOS `nfs`, `smbfs`, `afpfs`,
+  `webdav`; Windows `DRIVE_REMOTE`) → the plan carries exactly one
+  `network_root` warning and `--apply` publishes the snapshot and retires
+  the problem as without it; the CI filesystem (ext4 or tmpfs, APFS, NTFS)
+  → no warning.
+- `AR-3.08` **Uncertain snapshot durability**: `Durability::Uncertain` injected on
+  the step-6 publication (a failed directory sync after the rename) →
+  `snapshot_only{snapshot_durability_uncertain}`, exit 9; the snapshot is
+  complete and listed by `cpf ls --archived`; the problem stays in
+  `problems/` with its selection and facts, and no transaction is left.
+- `AR-3.09` **Edit during copy**: at barrier `archive.copied#1`, an editor save of a
   file **not yet copied** → `source_changed` when it is copied, nothing
   published; a same-size save of the file **already copied** → the snapshot
   holds the bytes read, and cleanup later quarantines the edited file as
   `divergent` (content asserted); a new file created at the same barrier →
   `source_changed` at step 4.
-- **Writer boundary**: snapshots at each shared limit are published, and
+- `AR-3.10` **Writer boundary**: snapshots at each shared limit are published, and
   their manifests read back by the reader of §4.4; `archived_at` in the
   snapshot's `problem.toml` equals `created_at`, every other byte equals the
   source, and `source_sha256` equals the source hash. **Transformed
@@ -1482,11 +1513,11 @@ pre-archive file's bytes are found in at least one of them.
   is published and restores; a source total of exactly 1 GiB is refused
   `snapshot_too_large` before any root write; the same for the per-file
   limit with a 256 MiB `problem.toml` boundary under the bounds override.
-- **Sync order** (Linux, macOS; trace): every snapshot file synced before
+- `AR-3.11` **Sync order** (Linux, macOS; trace): every snapshot file synced before
   the manifest is written, the manifest before the publication, the parent
   after it; the journal synced before commit point B. Windows: file flushes
   before each rename, no directory flush.
-- **`reuse-identical`**: an unchanged problem archived twice → second run
+- `AR-3.12` **`reuse-identical`**: an unchanged problem archived twice → second run
   `reused`, no new snapshot; one changed byte, a changed executable bit, a
   changed `config.json`, or a corrupted payload byte in the existing
   snapshot → not equivalent → refused as `error`; `--on-existing new` → a
@@ -1494,16 +1525,16 @@ pre-archive file's bytes are found in at least one of them.
 
 ### 10.4 Retirement
 
-- **Lease rule**: an independent process holding a job lease of another
+- `AR-4.01` **Lease rule**: an independent process holding a job lease of another
   problem → every mode refused (`lease_held`), on Linux, macOS and Windows;
   an unreadable lease file (Unix permission, Windows deny ACL) → refused; a
   lease taken between the snapshot and retirement (barrier after
   `archive.published`) → `snapshot_only{lease_held}`, exit 9, problem
   unchanged.
-- **`keep`**: the active problem, `state.toml`, every fact, every
+- `AR-4.02` **`keep`**: the active problem, `state.toml`, every fact, every
   `contest.toml` and the fetch records are byte-identical (with file
   identities) after `--cleanup keep --apply`; one snapshot exists.
-- **Kill at each step** of §5.3 (`archive.txn_created`,
+- `AR-4.03` **Kill at each step** of §5.3 (`archive.txn_created`,
   `archive.plan_published`, `archive.journal_published`,
   `archive.retired`, `archive.side_retired#1..3`,
   `archive.selection_cleared`, `archive.facts_removed`,
@@ -1513,37 +1544,37 @@ pre-archive file's bytes are found in at least one of them.
   selected, facts intact), otherwise rolled forward: problem gone from `problems/`,
   side trees in `<txn>/`, `current_problem` absent from `state.toml`, no
   facts of the problem, journal `retired`; content asserted.
-- **Selection**: archiving the selected problem clears the selection and
+- `AR-4.04` **Selection**: archiving the selected problem clears the selection and
   reports `selection_cleared`; archiving another problem leaves
   `state.toml` byte-identical; a `malformed` `state.toml` is left
   byte-identical and reported.
-- **Contest member**: a problem listed by `contests/c/contest.toml` →
+- `AR-4.05` **Contest member**: a problem listed by `contests/c/contest.toml` →
   `snapshot_only{member_of_active_contest}`, exit 9, the contest file and
   problem unchanged; a contest file that is `malformed` counts as listing.
-- **Replacement after a crash**: kill at `archive.retired`, then create a
+- `AR-4.06` **Replacement after a crash**: kill at `archive.retired`, then create a
   new `problems/<p>` (by `cpf add` after recovery has run, and by hand
   before it) → recovery never touches the new directory; kill at
   `archive.journal_published`, then replace `problems/<p>` by hand with
   another directory → recovery leaves it, reports `source_missing`.
-- **Windows busy directory**: a process whose current directory is inside
+- `AR-4.07` **Windows busy directory**: a process whose current directory is inside
   the problem → `snapshot_only{retire_failed}`, problem unchanged.
 
 ### 10.5 Cleanup
 
-- **Revalidation** in every mode (`trash` through the trash double,
+- `AR-5.01` **Revalidation** in every mode (`trash` through the trash double,
   `quarantine`, `delete`): an editor save to a kept file and a new
   `helper2.hpp` written into the retired tree at barrier
   `archive.phase_retired` → both quarantined (`divergent`, `new`), the other
   files settled by the mode; under `delete` both still quarantined.
-- **Late write through a pre-retirement handle**: a child opens `main.cpp`
+- `AR-5.02` **Late write through a pre-retirement handle**: a child opens `main.cpp`
   for writing before `--apply`, waits at the barrier between the cleanup
   hash and the move (`archive.before_unlink#i` under `delete`, the move of
   that item under `trash` and `quarantine`), writes 1 KiB, closes: the new
   bytes are present in the trash test directory or in quarantine; under
   `delete` they are gone and the plan output contained the fixed warning.
-- **Discarded under `delete`**: `tests:sample` discarded with `--cleanup
+- `AR-5.03` **Discarded under `delete`**: `tests:sample` discarded with `--cleanup
   delete` → those files in quarantine with `delete_discarded`.
-- **Kill between items**: kill at `archive.item_moved#i` for i = 1, 2 and
+- `AR-5.04` **Kill between items**: kill at `archive.item_moved#i` for i = 1, 2 and
   the last, and at `archive.cleanup_planned`, `archive.trash_marked`,
   `archive.trash_called`, `archive.swept`, `archive.record_published`,
   `archive.teardown#1`; then `cpf archive --resume --apply`: the result is
@@ -1551,30 +1582,30 @@ pre-archive file's bytes are found in at least one of them.
   snapshot-only}, or `incomplete` with the exact list of the items left;
   a second `--resume --apply` advances it or reports the same list;
   content asserted, no loss in any cell.
-- **More kill points**: `archive.sweep_planned#2`, `#3`, `archive.trash_result`,
+- `AR-5.05` **More kill points**: `archive.sweep_planned#2`, `#3`, `archive.trash_result`,
   `archive.finishing`, each `archive.teardown#k`, `archive.closing`,
   `archive.close_moved#k`: after each, `cpf tag` (rule R) then `--resume
   --apply` reach the same terminal state as an uninterrupted run; a
   transaction directory left with `finishing` and no journal, or empty, is
   removed by rule R; an existing equal `record.json` is accepted, a
   hand-altered one stops with `record_mismatch` and nothing is removed.
-- **Generations**: a process whose current directory is inside the retired
+- `AR-5.06` **Generations**: a process whose current directory is inside the retired
   tree recreates `main.cpp` right after its pass-1 quarantine move (barrier
   `archive.item_moved#i`), with and without a kill there: both
   generations end in quarantine (`files/1/…` and `files/2/…`), each with
   its own bytes; no move ever replaces an existing quarantine path
   (an injected existing destination → `destination_taken`, nothing
   replaced).
-- **Unrecordable and oversized**: a file with a non-UTF-8 name (Unix) and
+- `AR-5.07` **Unrecordable and oversized**: a file with a non-UTF-8 name (Unix) and
   a 2 000-byte path created in the retired tree → quarantined as one
   subtree item at their nearest recordable ancestor; 20 001 entries in the
   retired tree → each tree root quarantined as one subtree item; both
   records stay within their bounds.
-- **Live record publication**: with cleanup paused inside the publication
+- `AR-5.08` **Live record publication**: with cleanup paused inside the publication
   of `cleanup.json` (temporary file written, barrier before the rename), a
   concurrent `cpf tag` waits for the workspace lock and, once it gets it,
   finds no temporary file to remove; the publication completes.
-- **Delete replacement**: under `delete`, at barrier
+- `AR-5.09` **Delete replacement**: under `delete`, at barrier
   `archive.before_unlink#i` and at a barrier just before the rename into
   `<txn>/delete/`, a process inside the retired tree replaces the file's
   name with a new file: the new file ends in quarantine with its bytes; the
@@ -1603,7 +1634,7 @@ pre-archive file's bytes are found in at least one of them.
   at `delete/1/problem/extra.txt` → left in place, `incomplete` with
   `unexpected_in_staging`; `--close --apply` moves it with `delete/` into
   `files/close/delete/…`.
-- **`--close` cases**: a transaction with a malformed journal, one stuck in
+- `AR-5.10` **`--close` cases**: a transaction with a malformed journal, one stuck in
   `retiring` with `source_missing`, and one with unsettled items, each
   closed with kills at `archive.closing`, each `archive.close_moved#k`,
   `archive.record_published`, `archive.finishing` and each
@@ -1611,18 +1642,38 @@ pre-archive file's bytes are found in at least one of them.
   again) the transaction directory is gone, the closed subtrees are in
   `files/close/` with their bytes, and rule R never removed or rolled
   forward a transaction holding `closing`.
-- **Quarantine record bound**: 19 994 pass-1 items (all `delete`) and
+- `AR-5.11` **Quarantine record bound**: 19 994 pass-1 items (all `delete`) and
   2 × 4 096 sweep items with 1 024-byte paths, many `vanished`, one
   redirect per delete item, plus a `--close` → `record.json` encodes
   within 1 MiB + 56 390 × 1 600 and every item appears exactly once.
-- **Held lease**: `--resume --apply` while the owner is paused at
+- `AR-5.12` **Held lease**: `--resume --apply` while the owner is paused at
   `archive.item_moved#1` → that transaction is skipped, untouched.
-- **Fetch and submit trees**: matched records deleted; a history record
+- `AR-5.13` **Fetch and submit trees**: matched records deleted; a history record
   edited by hand after retirement → quarantined.
+- `AR-5.14` **Snapshot unavailable during cleanup**: kill at
+  `archive.phase_retired`, then make the root unavailable (renamed away),
+  and separately change one byte of the snapshot's `manifest.json` →
+  `cpf archive --resume --apply` ends `incomplete{snapshot_unavailable}`,
+  exit 9, with the retired trees byte-identical (nothing moved); after the
+  root is restored (or the byte put back) the next `--resume --apply`
+  completes the cleanup.
+- `AR-5.15` **Editor save at the old path**: after `--apply` retired `p`, an editor
+  writes `problems/p/main.cpp` (no `problem.toml`) → `cpf status --all`
+  and `cpf fsck` report `problems/p` as a directory without
+  `problem.toml`; `--resume --apply`, `cpf fsck --apply`, `cpf clean
+  --apply` and a rule-R locked command (`cpf tag`) leave
+  `problems/p/main.cpp` byte-identical, and cleanup of the retired tree
+  settles its items as without it.
+- `AR-5.16` **Exit statuses** (§5.4): cleanup `complete` → 0; `exported` (`keep`) →
+  0; cleanup `incomplete` (the trash double's partial case with a
+  discarded item, AR-6.01) → 9; each `snapshot_only` reason → 9; a refusal
+  before the snapshot → 8 (a configuration error 7); `--resume` and
+  `--close` → 0 when every transaction they touched ended `complete`, 9
+  otherwise.
 
 ### 10.6 Trash
 
-- **Reconciliation** (trash double): all moved + error →
+- `AR-6.01` **Reconciliation** (trash double): all moved + error →
   `trash_error_after_move`, items trash; none moved + error → fallback to
   quarantine; first k of n moved + error → n − k quarantined, k matched
   items snapshot-only, a discarded item among the k → `incomplete` with
@@ -1631,7 +1682,7 @@ pre-archive file's bytes are found in at least one of them.
   `archive.trash_result` in the partial case: recovery publishes (or keeps)
   the same result, and the discarded item stays unsettled; the transaction
   never reports `complete` while it is.
-- **Unavailable** (Linux): bundle on a tmpfs with the home trash elsewhere,
+- `AR-6.02` **Unavailable** (Linux): bundle on a tmpfs with the home trash elsewhere,
   also with a user-owned `$topdir/.Trash-$uid` present whose `files/` is
   not writable → `trash_unavailable{cross_filesystem}`, items in
   quarantine, the crate never called (trace); a home trash on the same
@@ -1645,7 +1696,7 @@ pre-archive file's bytes are found in at least one of them.
   call, `trash-result.json` all `fallback` before any move, kills at
   `archive.trash_result` and during the fallback moves → every item ends
   in quarantine.
-- **Real backends**, each on its OS, with the workspace on a dedicated
+- `AR-6.03` **Real backends**, each on its OS, with the workspace on a dedicated
   volume or temporary home so the trash is test-owned (Linux:
   `XDG_DATA_HOME` in the same tmpfs; macOS: an APFS disk image; Windows: a
   dedicated NTFS VHD or the system volume's Recycle Bin of the CI user):
@@ -1666,22 +1717,22 @@ pre-archive file's bytes are found in at least one of them.
 
 ### 10.7 Quarantine
 
-- `cpf quarantine ls` lists ready, pending (an open transaction) and
+- `AR-7.01` `cpf quarantine ls` lists ready, pending (an open transaction) and
   `record_missing` entries and leaves the workspace byte-identical.
-- **Retention boundaries** (clock override): `retention_days = 30`, an
+- `AR-7.02` **Retention boundaries** (clock override): `retention_days = 30`, an
   entry created exactly 30 × 86 400 000 ms before now → selected; 1 ms
   later → not selected; `retention_days = 0` → every ready entry;
   `created_at` in the future → not selected; a pending entry named by id →
   8; an entry with a malformed record → selected only by id.
-- **Never automatic**: after 1 000 locked operations at a clock past
+- `AR-7.03` **Never automatic**: after 1 000 locked operations at a clock past
   retention, every entry is still present.
-- **Kill points**: `purge.renamed`, `purge.deleting#1` → the next locked
+- `AR-7.04` **Kill points**: `purge.renamed`, `purge.deleting#1` → the next locked
   operation finishes the deletion; nothing outside the selected entries is
   touched.
 
 ### 10.8 Restore
 
-- **Hostile manifests** (pure, each refused with its reason): absolute
+- `AR-8.01` **Hostile manifests** (pure, each refused with its reason): absolute
   path, `C:\x`, `\\?\x`, `..`, `a/./b`, empty component, a component with
   `:` or a trailing dot, a reserved device name, `A.txt` and `a.txt`, `é`
   and `e`+U+0301, a file whose parent is not listed, duplicate member
@@ -1689,40 +1740,40 @@ pre-archive file's bytes are found in at least one of them.
   entries, a missing `sha256`, uppercase hex, a manifest of C + 1 bytes, a
   `snapshot` differing from the directory name, an identity whose `dir`
   differs, a newer schema.
-- **Payload checks**: a payload file replaced by a symlink, a FIFO (Unix),
+- `AR-8.02` **Payload checks**: a payload file replaced by a symlink, a FIFO (Unix),
   a junction (Windows), a byte flipped, a truncated file → refused or
   aborted before publication, workspace byte-identical.
-- **`--into` vectors**: a remote snapshot restored `--into b` →
+- `AR-8.03` **`--into` vectors**: a remote snapshot restored `--into b` →
   `id = "local:b"`, `origin` = the remote identity, every other byte of
   `problem.toml` unchanged, `tests.toml` byte-identical, stress failure
   directories unchanged, no `.cpforge/fetch/b/`, finding
   `fetch_history_not_restored`; restoring that problem's own snapshot
   `--into c` keeps the first `origin`.
-- **Conflicts**: an existing `problems/<d>` (same identity, other
+- `AR-8.04` **Conflicts**: an existing `problems/<d>` (same identity, other
   identity, other spelling on Linux, a file) → refused with the entry;
   existing fetch records → refused; nothing written.
-- **Containment**: `problems/` replaced by a link to another directory
+- `AR-8.05` **Containment**: `problems/` replaced by a link to another directory
   before the final check (barrier before step 5's check) → refused; the
   destination created by another process at the barrier → `Exists`, staging
   removed, nothing clobbered; a read-only `problems/` (Unix permission,
   Windows read-only ACL) → refused with the OS error. The swap after the
   final check is documented, not tested as a guarantee.
-- **Payload metadata**: a correctly hashed payload whose `problem.toml`
+- `AR-8.06` **Payload metadata**: a correctly hashed payload whose `problem.toml`
   declares `local:b` under a manifest identity `local:a`, a `problem.toml`
   with `schema = 99`, malformed TOML, a `tests.toml` that is `malformed`,
   and a contest payload whose `[[problem]]` records differ from the
   manifest members → `payload_invalid`, nothing published.
-- **Kill points** `restore.journal`, `restore.staged`, `restore.published`,
+- `AR-8.07` **Kill points** `restore.journal`, `restore.staged`, `restore.published`,
   `restore.fetch_published`, `restore.finished`, then any locked command:
   the §7.3 table; content asserted. At `restore.published`, a
   `.cpforge/fetch/<d>` created by hand before recovery → `history_conflict`,
   that directory untouched.
-- **Unchanged fetch, then restore**: restore a remote snapshot; run an
+- `AR-8.08` **Unchanged fetch, then restore**: restore a remote snapshot; run an
   actual `cpf fetch` of that problem through the fetch harness with
   unchanged upstream data (outcome `unchanged`: `status.toml` replaced, no
   new history record); then `cpf restore` of the same snapshot →
   `already_restored`, exit 0, nothing written.
-- **History rerun**: step 6 failing (injected) → exit 9; a rerun of the same
+- `AR-8.09` **History rerun**: step 6 failing (injected) → exit 9; a rerun of the same
   `cpf restore` → history restored alone, problem untouched, exit 0; a
   further rerun → `already_restored`, 0, nothing written; with a later
   `txn-*.toml` and `status.toml` added by a fetch → still
@@ -1730,19 +1781,31 @@ pre-archive file's bytes are found in at least one of them.
   `malformed`) → still `already_restored`; with one snapshot `txn-*.toml`
   changed or removed, a later record of another identity, or a journal
   present → `fetch_records_present`, 8.
-- **Externals**: a 2 000-byte template path → `value` truncated, `exists`
+- `AR-8.10` **Externals**: a 2 000-byte template path → `value` truncated, `exists`
   `null` in the `restore` document.
-- **`--partial` validation**: an incomplete contest whose `contest.toml`
+- `AR-8.11` **`--partial` validation**: an incomplete contest whose `contest.toml`
   payload lists members other than `intent.json`'s → `payload_invalid`.
-- **Externals and hooks**: a snapshot whose externals name a missing
+- `AR-8.12` **Externals and hooks**: a snapshot whose externals name a missing
   template and a program → both reported; an `on_switch` hook configured
   with hooks enabled → not run (trace: no process).
-- **Round trip**: a snapshot made by cpf at each shared limit restores with
+- `AR-8.13` **Round trip**: a snapshot made by cpf at each shared limit restores with
   every file, executable bit and hash equal to the snapshot's.
+- `AR-8.14` **Snapshot lookup** (§7.1): the same snapshot id in two roots →
+  `cpf restore <id>` exit 8 listing both, nothing written; with `--root`
+  naming one → restored from it; an id in one root → found there; an id in
+  no root → 8; a path to a snapshot directory outside every root (no
+  marker) → restored; a path whose last component is not a snapshot id →
+  refused, nothing written.
+- `AR-8.15` **Submission versions**: a snapshot made with `keep = ["submit"]` holding
+  two versions, restored → the problem restored, nothing created under
+  `.cpforge/submit/`, `submit_not_restored` in the human output and the
+  `restore` document; a snapshot without `submit/` → no such report.
+- `AR-8.16` **`--into` with a contest**: `cpf restore <contest snapshot> --into x` →
+  exit 2, nothing written, no `.cpforge/lock` created.
 
 ### 10.9 Contests
 
-- **Kill mid-contest**: kill at `archive.contest_published`,
+- `AR-9.01` **Kill mid-contest**: kill at `archive.contest_published`,
   `archive.member_marked#1`, `#2` of four members, and before
   `archive.contest_manifest`; `cpf ls --archived --contests` shows the
   contest snapshot `incomplete`; `cpf restore c-…` → 8, `--partial`
@@ -1750,50 +1813,50 @@ pre-archive file's bytes are found in at least one of them.
   references reported; the rerun resumes the same contest snapshot and
   completes it with every member snapshot present; no member was retired
   before the manifest.
-- **Members in two contests**: a member also listed by another contest →
+- `AR-9.02` **Members in two contests**: a member also listed by another contest →
   snapshotted, not retired, still active; the contest directory is retired
   (exit 9 for the member's `snapshot_only`).
-- **Partial retirement**: kill at `archive.contest_run`, at
+- `AR-9.03` **Partial retirement**: kill at `archive.contest_run`, at
   `archive.member_retired#1` and `#2` of four, and at
   `archive.contest_retired`; then `cpf archive contest:<c> --apply` resumes
   the contest run (no `on_existing` refusal, no unresolvable-member
   refusal) and ends with every member and the contest directory retired;
   a member replaced by hand at `problems/<dir>` before the resume →
   `member_replaced`, left alone, contest directory kept.
-- **Non-crash partial failure**: member A retired, member B's recheck fails
+- `AR-9.04` **Non-crash partial failure**: member A retired, member B's recheck fails
   (a lease taken at the barrier before B's retirement) → exit 9, contest
   run still open; after the lease is released, `cpf archive contest:<c>
   --apply` resumes the run (A `member_absent`, B retired, contest
   directory retired) and removes it.
-- **Contest restore rerun**: kill after the second member's
+- `AR-9.05` **Contest restore rerun**: kill after the second member's
   `restore.published` → the rerun skips the restored members and completes.
 
 ### 10.10 Listing and search
 
-- `cpf ls --archived` over two roots: results in root, then path order,
+- `AR-10.01` `cpf ls --archived` over two roots: results in root, then path order,
   `origin: snapshot`, values from the frozen layout (a later tag change of
   a restored copy does not move or change the listed snapshot); a malformed
   summary, a missing manifest, an unreadable directory (Unix permission), a
   link inside a root, a missing root and a root without a marker are each
   reported with the path, never hidden behind "no matches".
-- `cpf search` over the workspace and a root: hits from both, with origins;
+- `AR-10.02` `cpf search` over the workspace and a root: hits from both, with origins;
   E and B are shared (an entry bound reached inside the root after the
   workspace hits → `entry_limit`, workspace hits kept); a stalled root
   (a FUSE or test filesystem that blocks `readdir`, Linux) → Ctrl-C prints
   the results so far within 200 ms; `--no-archives` reads no root
   (trace).
-- `--archived-in` matches `archived_at` of snapshots and restored active
+- `AR-10.03` `--archived-in` matches `archived_at` of snapshots and restored active
   problems; `ls --archived` before any root is configured lists nothing and
   says no roots are configured.
 
 ### 10.11 Maintenance
 
-- `cpf fsck` reports each state of §9 on a fixture with an open
+- `AR-11.01` `cpf fsck` reports each state of §9 on a fixture with an open
   transaction of each phase, a pending and a malformed quarantine entry, a
   `.purge-*` leftover and an unexpected entry; `--apply` changes only what
   rule R changes (byte-identical retired trees and quarantine).
-- `cpf clean --apply` leaves `archive/` and `quarantine/` byte-identical.
-- `too_new` journal, manifest, cleanup record, quarantine record and
+- `AR-11.02` `cpf clean --apply` leaves `archive/` and `quarantine/` byte-identical.
+- `AR-11.03` `too_new` journal, manifest, cleanup record, quarantine record and
   `root.toml` → never acted on, byte-identical, reported.
 
 ## 11. Amendments to other documents
