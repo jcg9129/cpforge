@@ -2380,7 +2380,10 @@ enabled = true
   `cpf interactor-test`, `cpf submit-prep` stage mode) that selects such
   an entry is refused with a configuration planning error, "unsupported in
   this version", exit 7, before admission; it is never ignored. Every
-  other unknown key of an entry stays preserved and inert.
+  other unknown key of an entry stays preserved and inert. This refusal
+  is a gate-2 addition: the gate-1 catalog reader drops unknown entry
+  keys, so until it lands a selected entry with `check` is judged by the
+  problem-level settings.
 - **Classification** (§9 user-editable): `missing` (no file: an empty
   catalog; `add` and `register` create it), `unreadable`, `malformed`
   (including any invalid known field or duplicate), `too_new` (raw display
@@ -3001,9 +3004,15 @@ contest fetch completes its membership.
   a 57-character AtCoder native id, `cses:0`, `cses:01`, `cses:12345678`,
   `cses:a`, `Atcoder:abc400_a`, `1x:a`, a site of 33 characters. Binding:
   `problems/atcoder-abc400_a/problem.toml` with `id = "atcoder:abc400_a"`
-  is bound; with `"atcoder:abc400_b"`, `"local:atcoder-abc400_a"` or
-  `"cses:1068"` → `IdentityMismatch`; `problems/cses-1068` holding
-  `id = "local:cses-1068"` → `IdentityMismatch`. Then through the actual
+  is bound; with `"atcoder:abc400_b"` or `"cses:1068"` →
+  `IdentityMismatch`. Local names with remote-looking spellings stay valid
+  (§2.1: `cpf add` does not reserve them): `problems/cses-1068` holding
+  `id = "local:cses-1068"` and `problems/atcoder-abc400_a` holding
+  `id = "local:atcoder-abc400_a"` are valid local problems, selectable as
+  `cses-1068` and `local:cses-1068`; the remote references `cses:1068` and
+  `atcoder:abc400_a` to those directories fail (another identity is
+  bound there, exit 8), and fetch creation of those identities is refused
+  (SG-34). Then through the actual
   binary on a workspace whose remote problem and contest the fetch harness
   created: `cpf status atcoder:abc400_a` and `cpf fsck` report no identity
   finding; after the `id` is edited by hand to `"atcoder:abc400_b"`, both
@@ -3256,13 +3265,17 @@ contest fetch completes its membership.
   equals the expected new bytes. Both for `tag`, `untag`, `mark`.
 - `SG-57` **Size:** a `problem.toml` padded by a comment to 1 MiB − 10 bytes →
   `cpf tag p dp graphs` 8 (`record_too_large`), byte-identical.
-- `SG-58` **Clock outside the domain:** with the clock override at
-  `9999-12-30T22:00:01.000Z`, and separately at
+- `SG-58` **Clock outside the domain:** each case starts from a fresh
+  fixture in which every command would write: problem `p` with `tags =
+  ["x"]` (no `dp`) and no `status`, and no `problems/q`. With the clock
+  override at `9999-12-30T22:00:01.000Z`, and separately at
   `1969-12-31T23:59:59.999Z`, each of `cpf tag p dp`, `cpf untag p x`,
   `cpf mark p solved` and `cpf add q` → 8 naming the clock, the record
-  byte-identical, no `problems/q`, no `.cpf-tmp-` file; at
-  `9999-12-30T22:00:00.999Z` and at `1970-01-01T00:00:00.000Z` the same
-  commands commit and write exactly that value.
+  byte-identical, no `problems/q`, no `.cpf-tmp-` file. At
+  `9999-12-30T22:00:00.999Z`, and separately at
+  `1970-01-01T00:00:00.000Z`, each command on its own fresh fixture
+  commits and writes exactly that value (`updated_at`; also `solved_at`
+  for `mark`, `created_at` for `add`).
 - `SG-59` **Creation dates:** `cpf add two-sum` → `[problem] created_at` equals the
   clock in the published record; at each existing `add` crash point the
   published problem, when present, has it; `cpf add --contest c two-sum`

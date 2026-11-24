@@ -1552,8 +1552,9 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
 - `[sites]` and `[http]` (sites contract §11.1): absent → `cpf config
   show` gives `sites.atcoder.language = "en"` and `http.offline = false`,
   and no `http.cache_dir`; user `language = "ja"` with workspace `"en"` →
-  `"en"`; user `http.cache_dir = "/abs/c"` → accepted with user-layer
-  provenance; `http.cache_dir` in the workspace file or in a `problem.toml`
+  `"en"`; user `http.cache_dir` set to a native absolute path (`/abs/c` on Linux
+  and macOS, `C:\abs\c` on Windows) → accepted with user-layer
+  provenance; `"/abs/c"` on Windows (root-relative) → phase-1 type error; `http.cache_dir` in the workspace file or in a `problem.toml`
   `[config]` → phase-1 layer error; `http.cache_dir = "rel"` and `""`,
   `sites.atcoder.language = "jp"`, `http.offline = "yes"` → phase-1
   diagnostics with provenance; `sites.atcoder.language` or `http.offline`
