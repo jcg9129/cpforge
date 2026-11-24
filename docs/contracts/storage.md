@@ -1586,7 +1586,8 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
      `DynamicDaylightTimeDisabled` is TRUE **and** `DaylightDate.wMonth` is
      0 (the "adjust for daylight saving time automatically" setting is off:
      no transitions at all), the zone is `TimeZone::fixed` with offset
-     −(`Bias` + `StandardBias`) minutes. Otherwise, including
+     −`Bias` minutes (`StandardBias` is ignored when `StandardDate` is
+     absent). Otherwise, including
      `DynamicDaylightTimeDisabled` TRUE with transition dates present (fixed
      yearly rules instead of dynamic ones), jiff's system lookup (the
      Windows zone mapped to its IANA name) is used; the year-specific
@@ -2826,7 +2827,8 @@ contest fetch completes its membership.
   DST disabled and `wMonth` 0, `Bias` −60, `StandardBias` 0 → fixed +01:00;
   DST disabled with transition dates → jiff lookup; dynamic DST → jiff
   lookup; `Bias` 300, `StandardBias` 0, disabled, `wMonth` 0 → fixed
-  −05:00. Windows CI: zone set by `tzutil /s "W. Europe Standard Time"` →
+  −05:00; `Bias` −60, `StandardBias` −30, disabled, `wMonth` 0 → fixed
+  +01:00 (`StandardBias` ignored). Windows CI: zone set by `tzutil /s "W. Europe Standard Time"` →
   local dates equal those of the `Europe/Berlin` fixture for the CET rows;
   `tzutil /s "W. Europe Standard Time_dstoff"` → `2026-07-01T22:30:00.000Z`
   is 2026-07-01 (fixed +01, 23:30). Both restore the host zone afterwards.
