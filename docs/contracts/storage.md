@@ -1398,10 +1398,15 @@ stays `user_status` (report §6.1). Contests have no stored workflow status;
   *date*; only the report encoder writes a date as `T00:00:00.000Z`
   (report §6.1), and nothing else converts it. Every
   component is range-checked (month 01–12, day valid for the month and leap
-  year, hour 00–23, minute and second 00–59; no leap second), the year is
-  1970–9999. A TOML date-time value, a local time, another offset or any
-  other string is `invalid`. A system clock outside 1970–9999 refuses the
-  writing command (8) before anything is written. Times are informative: a
+  year, hour 00–23, minute and second 00–59; no leap second). **Domains:**
+  an instant lies in `1970-01-01T00:00:00.000Z` ..
+  `9999-12-30T22:00:00.999Z` inclusive (the upper end is jiff's
+  `Timestamp::MAX` truncated to milliseconds, so every accepted instant
+  converts to a local date in every zone); a date lies in `1970-01-01` ..
+  `9999-12-31`. A value outside its domain, a TOML date-time value, a local
+  time, another offset or any other string is `invalid`. A system clock
+  outside the instant domain refuses the writing command (8) before
+  anything is written. Times are informative: a
   clock step can make `updated_at` earlier than `created_at`; nothing
   depends on their order.
 
@@ -1572,20 +1577,38 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
   added (dependency review as for the HTTP stack, including an MSRV build on
   every release target). cpf writes no time zone parser of its own.
 - **Time zone source**, read once per invocation, before any filter is
-  evaluated: jiff's system lookup (`TimeZone::try_system`), used
-  unmodified, so `TZ` (zone name, `:`-path or POSIX string) and
-  `/etc/localtime` follow jiff's documented rules, and Windows uses the
-  mapped IANA zone. cpf's only own rule is the failure case: if the lookup
-  fails (an invalid `TZ`, an unreadable `/etc/localtime`, an unmappable
+  evaluated, in this order:
+  1. `TZ` set and non-empty (every OS) → jiff's interpretation of it
+     (zone name, `:`-path, absolute path or POSIX string).
+  2. Linux, macOS → jiff's system lookup (`TimeZone::try_system`:
+     `/etc/localtime`), unmodified.
+  3. Windows → cpf reads `GetDynamicTimeZoneInformation` first. If
+     `DynamicDaylightTimeDisabled` is TRUE **and** `DaylightDate.wMonth` is
+     0 (the "adjust for daylight saving time automatically" setting is off:
+     no transitions at all), the zone is `TimeZone::fixed` with offset
+     −(`Bias` + `StandardBias`) minutes. Otherwise, including
+     `DynamicDaylightTimeDisabled` TRUE with transition dates present (fixed
+     yearly rules instead of dynamic ones), jiff's system lookup (the
+     Windows zone mapped to its IANA name) is used; the year-specific
+     differences of that fixed-rule case are not modelled. The decision is
+     a pure function of the structure's fields.
+  cpf's own rules are rule 3's fixed-offset case and the failure case: if
+  the lookup fails (an invalid `TZ`, an unreadable `/etc/localtime`, an unmappable
   Windows zone), date filters use UTC and the command prints one stderr
   warning naming the cause; nothing else changes, and commands without a
   date filter never look the zone up. Conversions use the zone's complete
   rules (TZif transitions, then its POSIX footer for later instants).
 - **Test seam**: the filter evaluator takes a `jiff::tz::TimeZone` as a
-  parameter; production passes the system zone, unit tests pass zones built
-  through jiff's API (`TimeZone::posix`, `TimeZone::tzif` from fixture TZif
-  bytes, `TimeZone::get` from the bundled database), so date tests never
-  depend on the host. End-to-end tests set `TZ` on Linux and macOS.
+  parameter; production passes the discovered zone. Unit tests pass zones
+  built through jiff's API from data in the repository only:
+  `TimeZone::posix` strings, and `TimeZone::tzif` with **fixture TZif
+  files** copied from one pinned IANA tzdata release (public domain, with
+  a provenance note naming the release and file hashes). No test uses
+  `TimeZone::get` or a system or bundled database, so results never depend
+  on the host. End-to-end tests set `TZ` on Linux and macOS to a POSIX
+  string or to the absolute path of a fixture TZif file. The rule-3
+  decision function is unit-tested on every OS with constructed
+  structures.
 - Different flags combine with AND. A problem whose field is `invalid` or
   `absent` (dates) never matches a filter on that field and is still
   reported (§5.9.9).
@@ -1677,13 +1700,19 @@ cpf search <term>... [filters] [--no-notes] [--json]
   - *bytes* B ≤ 64 MiB (67 108 864): every byte read from those files.
   **One inventory.** `problems/` is enumerated once per invocation, and
   `contests/` at most once (only when a `--contest` value must be
-  resolved); each is counted in E. Candidate resolution applies the §5.7
-  reader lookup and the §2.1 rules (spelling, collision key, link and type
-  checks, identity binding) **against that inventory** and the entry's own
-  metadata, never by re-enumerating a directory. Every other filesystem
-  operation the search performs (enumeration, open, `symlink_metadata`)
-  counts one entry, and every byte read counts in B; nothing the search
-  does is outside the two counters.
+  resolved). Candidate resolution applies the §5.7 reader lookup and the
+  §2.1 rules (spelling, collision key, link and type checks, identity
+  binding) **against that inventory**, never by re-enumerating a directory.
+  **Charged operations** (a closed set): (a) each entry returned by an
+  enumeration, which includes the entry's type query (the type the
+  enumeration reports, or one no-follow `symlink_metadata` of that entry
+  when the platform reports none); (b) each file open attempt
+  (`problem.toml`, `notes.md`, `contests/<c>/contest.toml`), which includes
+  every query on the opened handle (type, length, identity) and the
+  no-follow check of the final component. Each charged operation counts one
+  in E; reads count only in B. The search performs no filesystem operation
+  outside this set: the directories `problems/<p>/` are known from the
+  inventory and never queried again.
   `problems/` is enumerated completely first (counting entries), then the
   candidates are examined in directory-name byte order. Before reading a
   file, the length reported by its open handle (for `notes.md`, at most
@@ -2754,7 +2783,10 @@ contest fetch completes its membership.
   `tags` fields: `[]`, 64 tags; invalid: `"dp"`, `[1]`, `["dp", "DP"]`
   (reason names element 2), 65 tags. Timestamps accepted:
   `2026-11-24T10:00:00.000Z`, `2026-11-24T10:00:00Z`, `2026-11-24`,
-  `2024-02-29`, `1970-01-01`, `9999-12-31T23:59:59.999Z`; rejected:
+  `2024-02-29`, `1970-01-01`, `1970-01-01T00:00:00.000Z`,
+  `9999-12-30T22:00:00.999Z`, `9999-12-31` (date); rejected:
+  `9999-12-30T22:00:01.000Z`, `9999-12-31T00:00:00Z`,
+  `9999-12-31T23:59:59.999Z`, `1969-12-31T23:59:59.999Z`,
   `2026-02-29`, `2026-13-01`, `2026-11-31`, `T24:00:00Z`, `T10:60:00Z`,
   `T10:00:60Z`, `+01:00` offset, lowercase `z`, `.12Z`, no `Z`, a TOML
   date-time value, `1969-12-31`, year `10000`. Effective status: absent →
@@ -2778,22 +2810,26 @@ contest fetch completes its membership.
   23:00–24:00 hour belongs to the earlier day and the following midnight
   instant to the new day. A date-only stored `2026-11-24` matches
   `--solved 2026-11-24` under every zone above and is never converted.
-  TZif rows (`TimeZone::tzif` with fixture bytes and `TimeZone::get` from
-  the bundled database): `America/Sao_Paulo` → `2018-12-01T02:30:00.000Z`
-  is local 2018-11-30 (−02, DST then in force) and `2026-12-01T02:30:00.000Z`
-  is 2026-11-30 (−03, DST abolished since 2019); `Europe/Berlin`
-  `2100-07-01T22:30:00.000Z` → 2100-07-02 (beyond the TZif transitions,
-  from its POSIX footer). Discovery: `TZ=Nowhere/Invalid` (Unix) → one
-  stderr warning and UTC-day results; `TZ=Europe/Berlin` and
-  `TZ=:Europe/Berlin` give the Berlin rows; a command without a date
-  filter under the invalid `TZ` prints no warning. Windows: the CI host's
-  zone is set (`tzutil /s`) to `W. Europe Standard Time` and to the same
-  with dynamic DST disabled (`_dstoff`); the expected local dates are those
-  jiff's mapped zone gives (asserted equal to `TimeZone::get("Europe/Berlin")`
-  for the first, and to the fixed standard offset +01 for the second, the
-  latter verified against jiff's behaviour by the first organisation task;
-  if jiff does not honour disabled DST, cpf reads
-  `DynamicDaylightTimeDisabled` itself and uses `TimeZone::fixed`).
+  TZif rows (`TimeZone::tzif` with the fixture files): `America/Sao_Paulo`
+  → `2018-12-01T02:30:00.000Z` is local 2018-12-01 (00:30 at −02, DST then
+  in force) and `2026-12-01T02:30:00.000Z` is 2026-11-30 (23:30 at −03, DST
+  abolished since 2019); `Europe/Berlin` `2100-07-01T22:30:00.000Z` →
+  2100-07-02 (beyond the TZif transitions, from its POSIX footer). Domain
+  edges: under `<+14>-14`, `9999-12-30T22:00:00.999Z` has local date
+  9999-12-31 and matches `--solved 9999-12-31`; under `<-12>12`,
+  `1970-01-01T00:00:00.000Z` has local date 1969-12-31 and matches
+  `--solved ..1970-01-01` but not `--solved 1970-01-01`. Discovery:
+  `TZ=Nowhere/Invalid` (Unix) → one stderr warning and UTC-day results;
+  `TZ=/<fixture>/Europe/Berlin` and `TZ=:/<fixture>/Europe/Berlin` give the
+  Berlin rows; a command without a date filter under the invalid `TZ`
+  prints no warning. Rule-3 decision (constructed structures, every OS):
+  DST disabled and `wMonth` 0, `Bias` −60, `StandardBias` 0 → fixed +01:00;
+  DST disabled with transition dates → jiff lookup; dynamic DST → jiff
+  lookup; `Bias` 300, `StandardBias` 0, disabled, `wMonth` 0 → fixed
+  −05:00. Windows CI: zone set by `tzutil /s "W. Europe Standard Time"` →
+  local dates equal those of the `Europe/Berlin` fixture for the CET rows;
+  `tzutil /s "W. Europe Standard Time_dstoff"` → `2026-07-01T22:30:00.000Z`
+  is 2026-07-01 (fixed +01, 23:30). Both restore the host zone afterwards.
 - **Argument errors before the workspace:** run outside any workspace, each
   of `cpf tag p 'a b'`, `cpf tag p`, `cpf mark p Solved`, `cpf mark
   contest:c solved`, `cpf --problem a tag . dp`, `cpf ls --tag 'a b'`,
@@ -2950,10 +2986,12 @@ contest fetch completes its membership.
   by a writer during the read at the barrier never makes B exceed the
   bound. One real-bound test on Linux: 100 001 empty directories in
   `problems/` → `entry_limit` with E = 100 000 and no file opened.
-  **Operation accounting:** a `storage-test-hooks` recorder counts every
-  enumeration entry, open and `symlink_metadata` the search performs; in
-  every bounds test the recorder's count equals the reported `entries`
-  and its byte total equals `bytes_read`. `problems/` with spelling
+  **Operation accounting:** a `storage-test-hooks` recorder logs every
+  filesystem call the search makes, tagged with the charged operation it
+  belongs to (§5.9.8); in every bounds test each call belongs to a charged
+  operation, the number of charged operations equals the reported
+  `entries` (30 in the E = 30 row: 10 entries + 20 opens), and the byte
+  total equals `bytes_read`. `problems/` with spelling
   variants (`P1`, `p1`, Linux) → both reported `name_collision` with no
   second enumeration. A `contests/` of 100 001 entries: `cpf search x` →
   complete, the recorder shows no `contests/` access; `cpf search x
