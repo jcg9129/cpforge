@@ -938,7 +938,7 @@ Serialized maxima include quotes; they feed §3.7.
 | `text` | cpf-generated text, serialized ≤ 260 bytes including quotes (the writer cuts at a character boundary and ends with `…`); informative | 260 |
 | `dec` | a TOML float as `{"text": shortest round-trip, "bits": 16 hex}` (compare spec §6 `F`) | 69 |
 | `ns` | full native value (§3.3), n source bytes | max(2n + 11, 4⌈n/3⌉ + 16) |
-| `nsum(P)` | bounded native summary (§3.3) | 2P + 143 (exact for P ≥ 8; rows below computed with the earlier 2P + 149 keep 6 B of slack per summary) |
+| `nsum(P)` | bounded native summary (§3.3) | 132 + max(2P + 11, 4⌈P/3⌉ + 16), the `ns` bound of its head; this equals 2P + 143 for P = 9 and every P ≥ 11 (every P used in this contract is ≥ 128) and exceeds it for P ≤ 8 and P = 10 (e.g. 156 at P = 4); rows below computed with the earlier 2P + 149 keep 6 B of slack per summary |
 | `bytes` | `{"bytes_b64": …}` of n bytes | 4⌈n/3⌉ + 17 |
 | `score` | a fixed-point value in units of 10⁻⁹ (§2.13) as a JSON string: the integer part in minimal decimal (`"0"` when zero), then, only if the value has a fraction, `.` and 1–9 digits without a trailing zero; no sign, no exponent. ≤ 14 integer digits (10 000 tests × 10⁹) | 26 |
 
@@ -2145,10 +2145,21 @@ and the oracle round trip).
 
 **`fetch` document** (`cpf fetch --json`; sites contract §11.2, storage
 contract §5.8): `{"schema":1,"document":"fetch","platform":…,"selection":
-FetchSelection,"problems":[FetchProblem],"network":FetchNetwork}`, written
-once a problem transaction has begun; not persisted. `problems` holds one
-entry per selected member in selection order (≤ 50, S §5.8.1), or the one
-problem.
+FetchSelection,"problems":[FetchProblem],"network":FetchNetwork,
+"cancelled":bool}`, written once a problem transaction has begun; not
+persisted. `problems` holds one entry per selected member whose attempt
+began, in selection order (≤ 50, S §5.8.1), or the one problem.
+
+- **Cancellation.** The document is written also when cancellation intent
+  ends the command (then the §5.3 status follows, §5.2 row 5; a delivery
+  failure gives 11, row 4). `cancelled` is true iff intent was set before
+  the command finished. A member whose attempt was cut by cancellation
+  before its commit has `outcome` `cancelled` (nothing committed; what its
+  attempt left is S §5.8.8's); a member already committing finishes and
+  reports its own outcome (`../commands.md`, "Interrupting"); members not
+  started are omitted, so `problems` may hold fewer entries than
+  `selection.members`. Intent before the first problem transaction began
+  writes the §4.12 `error` document (class `cancelled`) instead.
 
 - `FetchSelection`: `{kind: token, identity: string?, url: string,
   members: u32}`; `kind` `problem`, `contest`, `problem_set` (the S §5.8.1
@@ -2159,7 +2170,8 @@ problem.
   FetchFailure?, provenance: Provenance?, warnings: [FetchNote], findings:
   [FetchNote], txn: jid?}`; `outcome` the S §5.8.9 status outcome
   (`committed`, `unchanged`, `conflict`, `refused`, `failed`,
-  `rolled_back`); `txn` the transaction id when a journal was written.
+  `rolled_back`), or `cancelled` (above, document only); `txn` the
+  transaction id when a journal was written.
 - `FetchFailure` (`null` unless the problem failed with a sites §8.3
   class): `{class: token, reason: token?, http_status: u32?, retry_at:
   time?}`; `class` one of `auth_required`, `challenge`, `rate_limited`,
@@ -2178,17 +2190,28 @@ problem.
   upstream}`, `limits_unparsed{field}`), `null` otherwise. `warnings`
   holds the sites §8.2 hints and warnings (`no_samples`,
   `tolerance_hint`, `multiple_answers_hint`, `language_fallback`,
-  `limits_unparsed`, `title_unparsed`) and the storage warnings of the
-  attempt (`edited_sample_kept`, a status or durability warning);
-  `findings` the storage findings of S §5.8.4–§5.8.8, in the order they
-  were recorded.
+  `limits_unparsed`, `title_unparsed`, `interactive_samples_skipped`,
+  sites §8.4) and the storage warnings of the attempt (`zero_samples`,
+  `edited_sample_kept`, S §5.8.5; `status_not_written`, S §5.8.9;
+  `durability_uncertain`, `cleanup_pending`, S §5.8.8); `findings` the
+  storage findings of S §5.8.4–§5.8.8, in the order they were recorded:
+  the ambiguity findings `duplicate_ordinal`, `duplicate_recorded`,
+  `duplicate_upstream`, `moved`; the pair outcomes `added`, `updated`,
+  `kept_edited`, `removed_upstream`, `removed_locally` (with `ordinal`,
+  and `test` where an entry exists); `name_taken`, `base_changed`,
+  `edited_during_commit`, `metadata_conflict`, `metadata_not_applied`,
+  `metadata_pending`, `history_pending`, `history_blocked`,
+  `journal_pending`, `abort_unrecorded`.
 - `FetchNetwork`: `{wire_requests: u32, connection_attempts: u32,
   redirects: u32, retries: u32, revalidated: u32, offline: bool,
   elapsed_ms: u64, budget_requests: u32, budget_seconds: u32}`;
   `budget_requests` is `200` and `budget_seconds` `900` (sites §3.4).
 
-Fixtures: `fetch.json`, `fetch_contest_partial.json` (encoder vectors and
-the oracle round trip).
+Fixtures: `fetch.json`, `fetch_contest_partial.json`, `fetch_cancelled.json`
+(a contest of three members, intent set during the second member's
+network phase: the first `committed`, the second `cancelled`, the third
+omitted, `selection.members` 3, `cancelled` true, cancellation status)
+(encoder vectors and the oracle round trip).
 
 ### 6.2 Output
 
@@ -3347,7 +3370,8 @@ Every document starts `{"schema":1,"document":"<kind>"` and has
 `hex64`, `hex32`, `token`, `rid`, `irid`, `fid`, `jid`, `ident`, `pident`
 (local and remote), `ver`, `rel`, `text`, `dec`, `ns` (`utf8` |
 `bytes_b64`), `nsum(P)` (`head`, `len`, `truncated`, `sha256`), `bytes`
-(`bytes_b64`), `score`. Reader rejections: §3.5.
+(`bytes_b64`), `score`; `dec` is {`text`, `bits`}. Reader rejections:
+§3.5.
 
 ### A.3 `job_report` members
 
@@ -3469,7 +3493,20 @@ Top level (§4.1): `schema`, `document`, `platform`, `outcome` (`finished`,
   `output_dir_too_large`). `Diag` reasons: `token_mismatch`,
   `line_mismatch`, `byte_mismatch`, `count_mismatch`, `class_mismatch`,
   `integer_mismatch`, `tolerance`, `ulp_excess`, `out_of_range`,
-  `incomplete_output`, `invalid_answer`. Test verdicts (§2.5): `passed`,
+  `incomplete_output`, `invalid_answer`. `Diag` (compare spec §6, wire
+  form there; `kind` then): `token_mismatch` {`index`, `o`, `a`},
+  `line_mismatch` {`line`, `o`, `a`}, `byte_mismatch` {`offset`, `o`, `a`
+  (byte as a JSON number, `null` at EOF)}, `count_mismatch` {`unit`
+  (`tokens`, `lines`), `o`, `a`, `first_extra`}, `class_mismatch`
+  {`index`, `o`, `a`, `expected` (`int`, `dec`, `special`, `other`,
+  `numeric`)}, `integer_mismatch` {`index`, `o`, `a`}, `tolerance`
+  {`index`, `o`, `a`, `o_val`, `a_val`, `scale`, `diff_scaled`,
+  `b_abs_scaled`, `b_rel_scaled` (each `[F, bool]` or `null`), `diff`
+  (`F` or `null`)}, `ulp_excess` {`index`, `o`, `a`, `dist`, `ulps`},
+  `out_of_range` {`index`, `o`}, `invalid_answer` {`index`, `a`},
+  `incomplete_output`; `Item` {`offset`, `line`, `col`, `excerpt`,
+  `truncated`}; `F` {`text`, `bits`}; `u64`/`u128` as decimal strings.
+  Test verdicts (§2.5): `passed`,
   `wrong_answer`, `unchecked`, `checker_failed`, `wall_deadline`,
   `output_budget`, `signal`, `nonzero_exit`, `cancelled`,
   `infrastructure`, `not_run{reason}`, `internal_error{invariant}` (with
@@ -3709,13 +3746,14 @@ final envelope `report` {`report`}.
   `selection`, `contests`, `delete_warning`}], `warnings`
   (`network_root`, `root_not_in_roots`); token values of `reason`,
   `cleanup`, `class`, `what` and `kind`: archive contract §§3.1–3.7.
-- `archive`: `plan`, `problems` and `resumed` [`ArchiveOutcome`
-  {`problem`, `snapshot`, `reused`, `retirement` (`retired`, `exported`,
-  `snapshot_only`, `refused`), `reason`, `txn`, `selection_cleared`,
-  `cleanup` (`ArchiveCleanup` {`state` (`complete`, `incomplete`),
-  `trashed`, `quarantined`, `deleted`, `snapshot_only`, `quarantine`,
-  `unsettled` [{`path`, `reason`}; 64] + dropped})}], `contest`
-  (`ContestOutcome` {`contest`, `snapshot`, `complete`, `retired`}).
+- `archive`: `plan`, `problems` [`ArchiveOutcome`], `contest`
+  (`ContestOutcome` {`contest`, `snapshot`, `complete`, `retired`}),
+  `resumed` [`ArchiveOutcome`]; `ArchiveOutcome` {`problem`, `snapshot`,
+  `reused`, `retirement` (`retired`, `exported`, `snapshot_only`,
+  `refused`), `reason`, `txn`, `selection_cleared`, `cleanup`
+  (`ArchiveCleanup` {`state` (`complete`, `incomplete`), `trashed`,
+  `quarantined`, `deleted`, `snapshot_only`, `quarantine`, `unsettled`
+  [{`path`, `reason`}; 64] + dropped})}.
 - `restore`: `snapshot`, `restored` [{`problem`, `dir`, `origin`,
   `history` (`restored`, `not_restored`, `pending`)}], `contest`,
   `omissions` [{`what`, `count`, `bytes`}], `externals` [{`kind`,
@@ -3730,9 +3768,20 @@ final envelope `report` {`report`}.
   `reason`, `http_status`, `retry_at`}), `provenance` {`url`,
   `final_url`, `fetched_at`, `status`, `body_sha256`, `from_cache`},
   `warnings`, `findings` (`FetchNote` {`kind`, `ordinal`, `test`,
-  `detail`}), `txn`}], `network` {`wire_requests`,
-  `connection_attempts`, `redirects`, `retries`, `revalidated`,
-  `offline`, `elapsed_ms`, `budget_requests`, `budget_seconds`}.
+  `detail`}; warning kinds `no_samples`, `tolerance_hint`,
+  `multiple_answers_hint`, `language_fallback`, `limits_unparsed`,
+  `title_unparsed`, `interactive_samples_skipped`, `zero_samples`,
+  `edited_sample_kept`, `status_not_written`, `durability_uncertain`,
+  `cleanup_pending`; finding kinds `duplicate_ordinal`,
+  `duplicate_recorded`, `duplicate_upstream`, `moved`, `added`,
+  `updated`, `kept_edited`, `removed_upstream`, `removed_locally`,
+  `name_taken`, `base_changed`, `edited_during_commit`,
+  `metadata_conflict`, `metadata_not_applied`, `metadata_pending`,
+  `history_pending`, `history_blocked`, `journal_pending`,
+  `abort_unrecorded`), `txn`}] (outcome also `cancelled`), `network`
+  {`wire_requests`, `connection_attempts`, `redirects`, `retries`,
+  `revalidated`, `offline`, `elapsed_ms`, `budget_requests`,
+  `budget_seconds`}, `cancelled`.
 - `config_show`: C §10.
 
 ### A.6 Exit statuses
@@ -3757,13 +3806,44 @@ final envelope `report` {`report`}.
   `no_tests`, `no_iterations` → 4; 15 `scored` not full → 1; 16 → 0.
   The several-problems rule and the `interactor-test` expectation rule
   (§5.2), the `cpf switch` rules (§2.10, §5.2).
-- Per-command rows (§5.5): `build`, `test`, `run`, `cmd`, `init`, `add`,
-  `current`, `switch`, `test add` (also `--from-stress`), `stress` (search
-  and replay), `stress ls`, `test register`/`enable`/`disable`, `test
-  ls`, `config show`, `config check`, `config paths`, `doctor`,
-  `status`, `clean`, `submit-prep` (source copy, stage mode), `fsck`,
-  `adopt`/`ignore`/`gitignore`, `tag`/`untag`, `mark`, `notes`, `ls`,
-  `search`, `archive` (plan, `--apply`, `--resume`, `--close`),
-  `restore`, `quarantine ls`, `quarantine purge`, `ls --archived`,
-  `fetch`, `fetch --history`, `interactor-test`, `--help`/`--version`:
-  37 rows, each with its status set.
+- Per-command rows (§5.5), 37 rows, each with its status set:
+
+| Command | Possible statuses (besides 2, row 2, 70) |
+|---|---|
+| `cpf build` | 0, 3, 7, 8, 10, 11, cancellation |
+| `cpf test` | 0, 1, 3, 4, 5, 7, 8, 10, 11, cancellation |
+| `cpf run` (raw, decision D2) | 0, 1, 3, 7, 8, 10, cancellation |
+| `cpf cmd <name>` | 0, 1, 3 (`needs_build`), 7, 8, 10, 11, cancellation |
+| `cpf init` | 0, 8 |
+| `cpf add` | 0, 7 (template, language), 8, 9 |
+| `cpf current` | 0, 8 |
+| `cpf switch` | 0, 8, cancellation (during its `hook` job) |
+| `cpf test add` | 0, 8, 9; also with `--from-stress` |
+| `cpf stress` (search, `--replay`, `--replay-binaries`) | 0, 1, 3, 4, 5, 7, 8, 10, 11, cancellation |
+| `cpf stress ls` | 0 (any entries, any classification), 8, 11 (`--json`) |
+| `cpf test register`, `enable`, `disable` | 0, 8 |
+| `cpf test ls` | 0; 8 when the catalog is not `missing` or `valid` (listing still printed) |
+| `cpf config show` | 0, 7, 11 (`--json`, C §10) |
+| `cpf config check` | 0, 7 (no `--json` in schema 1) |
+| `cpf config paths` | 0 |
+| `cpf doctor` | 0, 7; an unsupported capability is never an error |
+| `cpf status` | 0, 8, 11 (`--json`); filters add only 2 for a filter value outside its grammar |
+| `cpf clean` | 0, 8; `--apply`: 9 when a selected candidate could not be renamed or deleted (held leases are skipped) |
+| `cpf submit-prep`, source copy | 0, 7, 8, 9, 11 (`--json`) |
+| `cpf submit-prep`, stage mode | 0, 1, 3, 4, 5, 7, 8, 9, 10, 11, cancellation |
+| `cpf fsck` | 0, 8 (findings are reported with 0) |
+| `cpf adopt`, `ignore`, `gitignore` | 0, 8 |
+| `cpf tag`, `cpf untag` | 0, 8 |
+| `cpf mark` | 0, 7, 8 |
+| `cpf notes` | 0, 8, 11 (`--json`); `--path`: 0, 8, 11 |
+| `cpf ls` | 0 (also with invalid entries and findings), 8, 11 (`--json`) |
+| `cpf search` | 0 (hits or none, complete or incomplete), 8, 11 (`--json`), cancellation |
+| `cpf archive` | plan: 0, 7, 8, 11 (`--json`); `--apply`: 0, 7, 8, 9, 11; `--resume`: 0, 8, 9, 11 (`--json`); `--close`: 0, 8, 9 (archive contract §5.4) |
+| `cpf restore` | 0, 8, 9, 11 (`--json`); 7 when a snapshot id is looked up and the configuration that holds `archive.roots` is invalid (a snapshot path loads no configuration) |
+| `cpf quarantine ls` | 0, 8 |
+| `cpf quarantine purge` | 0, 8; `--apply`: 9 when a selected entry could not be renamed or deleted |
+| `cpf ls --archived` | as `cpf ls`, plus cancellation |
+| `cpf fetch` | 0, 7, 8, 9, 11 (`--json`), 12, cancellation |
+| `cpf fetch --history` | 0, 8 |
+| `cpf interactor-test` | 0, 1, 3, 4, 5, 7, 8, 10, cancellation |
+| `cpf --help`, `--version` | 0 |
