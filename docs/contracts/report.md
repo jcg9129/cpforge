@@ -1,6 +1,7 @@
 # Report contract
 
-Status: v1 (decisions of 2026-11-21, §11). Normative for the `report` module, the result
+Status: v1 (decisions of 2026-11-21, §11), with the judging amendment
+(draft). Normative for the `report` module, the result
 derivation in `jobs`, and the process exit status of every `cpf` command.
 It is the **report transport** and **report schema** that the other
 contracts refer to: execution contract §§6.2, 6.4, 8, 9; storage contract
@@ -9,6 +10,17 @@ contracts refer to: execution contract §§6.2, 6.4, 8, 9; storage contract
 labelled *E*, *S*, *C*, *compare spec*, *checkers design* and *workspace
 design* point to `execution.md`, `storage.md`, `config.md`,
 `../compare-spec.md`, `../design-checkers.md` and `../design-workspace.md`.
+
+**Judging amendment: draft.** Checkers, validators, interactors, answer
+policies, scores, presentation errors and interactive sessions extend schema
+1 in place (§3.6 permits it before the first release): roles and stages
+(§1, §4.4, §4.5), the batch and interactive derivations (§§2.11–2.13), the
+job verdicts and exit rows (§2.7, §5), display profiles (§2.8), the members
+of §4, the size bound and its reservation (§3.7) and their fixtures (§9.6).
+Amended content is marked *(judging, draft)*. The schema is closed by one
+reconciliation that merges every other schema-1 addition (stress,
+submission, archive, fetch documents) before the first release; after it no
+enum value is added and no meaning changes within schema 1.
 
 MUST / MUST NOT / never are requirements. This contract derives results
 from records the other contracts define, encodes them, and maps them to
@@ -21,13 +33,13 @@ and the exit rows of `tag`, `untag`, `mark`, `notes`, `ls`, `search`
 (§5.1, §5.5); storage contract §5.9. Marked *(organisation, draft)*; merged
 into schema 1 by the final reconciliation.
 
-**Scope of schema 1.** Built-in batch comparison only (compare spec):
-`batch` problems, comparators `exact`, `tokens`, `lines`, `float`.
-Checkers, interactors, scores, presentation errors and connected runs are
-**not** part of schema 1; they arrive with schema 2 (§3.6), which will
-extend the check outcome, the verdict set, stages and roles. Names are
-chosen to stay compatible with checkers design §1, but schema 1 readers
-need to know only the values listed here.
+**Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
+problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
+draft)* judged problems (configuration contract §9.1): checkers and
+validators (profiles `testlib`, `simple`), answer policies, scores,
+presentation errors and interactive sessions (checkers design §§1–6). Names
+follow checkers design §1. Every value a schema-1 reader must know is listed
+here; schema 2 is not needed for judging.
 
 ## 1. Terms
 
@@ -35,7 +47,9 @@ need to know only the values listed here.
   `cpf run`, E §8.1), `cmd` (`cpf cmd <name>`), `hook` (the `on_switch`
   hooks of a successful `cpf switch`, C §8.3, §2.10).
 - **Planned execution**: one entry of the plan (C §8.2 planned runs):
-  builds, tests × repeats (or repeats), the raw run, hooks. It has a **plan
+  builds, tests × repeats (or repeats), the raw run, hooks; *(judging,
+  draft)* in a judged plan also the role builds and every test's
+  validator, checker and interactor runs (C §8.2). It has a **plan
   index** (from 0, plan order) and a **coverage** (§2.1) independent of its
   outcome. An execution that is admitted also gets a **run id** (§3.4).
 - **Primary executions**: for job kinds `build`, `test`, `run`, `cmd`, every
@@ -44,6 +58,13 @@ need to know only the values listed here.
   hooks of a `test` job never do.
 - **Run class** (§2.2), **check outcome** (§2.4), **test verdict** (§2.5),
   **job verdict** (§2.7).
+- *(judging, draft)* **Judge roles**: checker, validator, interactor (E
+  §2.1); a **judge run** is a run of one of them, a **role build** the
+  build of a built role (C §9.1.2). A **judged test** is a test of a
+  problem whose `[check]` declares a role (C §8.2); a **batch judged test**
+  is one of a problem whose effective kind is not `interactive` (§2.11);
+  an **interactive test** is decided by its session (§2.12). Judge runs and
+  role builds are primary executions.
 - **Report**: the job's in-memory document (E §9), immutable from phase F
   (§2.9); `report.json` is its persisted copy (S §6.1); the **stdout
   document** is the report plus `persistence` (§4.11).
@@ -124,6 +145,14 @@ outcome:
 | `stop_policy` | job kind `cmd`, `keep_going = false`, an earlier primary execution failed (C §8.2) |
 | `cancelled` | cancellation intent was set before its admission |
 | `job_not_eligible` | an `after_test` hook, and phase H does not run (§2.9) |
+| `input_not_validated` | *(judging, draft)* a solution, interactor or checker run of a test whose validator run has a final record that does not report the input valid (§2.11) |
+| `not_eligible` | *(judging, draft)* a checker run whose test's solution run is not eligible for checking (§2.11), or a follow-up checker after `CheckerSkipped{NotEligible}` (§2.12) |
+
+*(judging, draft)* Reasons apply in this order when several conditions hold:
+`cancelled`, `build_not_succeeded`, `admission_closed`,
+`input_not_validated`, `not_eligible`. Inside a judged test the runs are
+admitted in plan order (validator, solution, interactor with the solution,
+checker), each only after the earlier one's record is final.
 
 - **Partial**: `result.partial = true` iff some **primary** execution is not
   `started` (`admitted` included: it is not shown to have started). Hook coverage of a `test` job never makes it partial.
@@ -177,16 +206,37 @@ For an execution with a record, first matching row:
 | `exited_zero` | generated program invalid (C §4.5) | `failed{cause: generated_program_invalid}` |
 | `exited_zero` | output beyond the build cap (S §6.4) | `failed{cause: output_too_large}` |
 | `exited_zero` | all pass | `succeeded` |
+| *(judging, draft)* `skipped{build_not_succeeded}` (a role build after an earlier build that did not succeed) | – | `skipped{build_not_succeeded}` |
+| *(judging, draft)* `skipped{admission_closed}` (a role build after a `retention_budget` refusal) | – | `skipped{admission_closed}` |
 
 Any other build coverage is an orphan (`internal_error{invariant}`). A
 build that is not `succeeded` starts nothing that depends on it (design
 §6.6); its dependants are `skipped{build_not_succeeded}`.
+
+*(judging, draft)* **Role builds** use the same table, each with its own
+result (§4.4 `roles[].build`). In a judged job each build depends on the
+builds before it in plan order (solution, checker, validator, interactor)
+and every test execution depends on every build: a build that is not
+`succeeded` makes the later builds and all test executions
+`skipped{build_not_succeeded}`, except that an execution whose admission
+comes after cancellation intent is `skipped{cancelled}` (build result
+`cancelled`), which takes priority by the §2.1 order. A skipped build result never decides a
+job verdict; the earlier build that did not succeed does (§2.7 rows 2–4
+take every build result, solution and role). With zero selected tests the
+builds still run and a failed role build gives `build_failed`, as for the
+solution build (decision D7). `cpf build` builds the solution target
+only.
 
 `cpf build` on a build-free target (e.g. Python without a build stage)
 performs no executions and yields job verdict `succeeded` (§2.7),
 `build: null` (§4.4), and exit status 0 (§5.2).
 
 ### 2.4 Check outcome (test jobs)
+
+*(judging, draft)* This section and §2.5 derive tests of kind `compare`
+without a validator. A batch judged test is derived by §2.11 (whose rows
+end in this section for kind `compare` with a validator), an interactive
+test by §2.12.
 
 Evaluated once per test, after its record (if any) is finalized:
 
@@ -244,6 +294,9 @@ Over (coverage, class, check); first matching row. Every combination
 | `started` | `exited_zero` | `unchecked` | `unchecked` |
 | `started` | `exited_zero` | `passed` | `passed` |
 
+*(judging, draft)* Further test verdicts, produced only by §§2.11–2.12:
+`presentation_error`, `scored`, `session_limit`, `idle`.
+
 Orphans include: `exited_zero` with `failed{incomplete_output}` (an
 incomplete capture is a row-1 loss or a row-4 breach, §2.2), a `skipped`
 reason whose condition (§2.1) fails, `stop_policy` or `job_not_eligible`
@@ -271,19 +324,26 @@ infrastructure test (earlier rows precede it).
 only**, first matching value:
 
 1. `internal_error`: any internal failure recorded before V (§2).
-2. `infrastructure`: the build result, any test verdict, or any `cmd`,
-   `run` or `hook`-job class is `infrastructure`.
-3. `cancelled`: the build result, any test verdict, any such class, or any
+2. `infrastructure`: the build result (*(judging, draft)* or any role
+   build result), any test verdict, or any `cmd`, `run` or `hook`-job class
+   is `infrastructure`.
+3. `cancelled`: the build result (or any role build result), any test
+   verdict, any such class, or any
    primary coverage is cancelled (`skipped{cancelled}`,
    `not_started{cancelled_before_start}`).
-4. `build_failed`: the build result is `failed`.
-5. `wall_deadline`, 6. `output_budget`, 7. `signal`, 8. `nonzero_exit`: the
-   first present among test verdicts (`test`) or classes (other kinds).
-9. `checker_failed`, 10. `wrong_answer`, 11. `unchecked`: among test
-   verdicts.
-12. `no_tests`: a `test` job with zero selected tests (decision D7: still
+4. `build_failed`: the build result, or *(judging, draft)* any role build
+   result, is `failed`.
+5. `wall_deadline`; *(judging, draft)* 6. `session_limit`, 7. `idle`;
+   8. `output_budget`, 9. `signal`, 10. `nonzero_exit`: the first present
+   among test verdicts (`test`) or classes (other kinds), in this order.
+11. `checker_failed`, 12. `wrong_answer`, *(judging, draft)* 13.
+    `presentation_error`, 14. `unchecked`: among test verdicts.
+15. `no_tests`: a `test` job with zero selected tests (decision D7: still
     built; a build failure gives `build_failed`).
-13. `passed` (`test`) or `succeeded` (`build`, `run`, `cmd`, `hook`).
+16. *(judging, draft)* `scored`: a `test` job on a problem with a points
+    `scoring` (C §9.1.5) whose every test verdict is `passed` or `scored`;
+    `result.score` (§2.13) says whether the aggregate is full.
+17. `passed` (`test`) or `succeeded` (`build`, `run`, `cmd`, `hook`).
 
 - **Intent in phase P that cancelled nothing.** If intent was set during P
   but every primary execution had already been admitted and every check
@@ -296,7 +356,7 @@ only**, first matching value:
 - `result.verdict` equals `primary_verdict`, except `internal_error` when an
   internal failure is recorded after V and before F (§2).
 - `passed` means at least one selected test and every test verdict
-  `passed`. Persistence, durability and cleanup warnings, fact outcomes
+  `passed`, on a problem without a points `scoring`. Persistence, durability and cleanup warnings, fact outcomes
   and ordinary `after_test` hook outcomes never change a verdict; a hook
   `internal_error` does (§2.6).
 - A refusal has the verdict `refused`, outside this order (§4.12).
@@ -321,12 +381,39 @@ Human output uses these labels; the report stores tokens, never labels.
 | `not_run` | `NOT RUN` | reason |
 | build `failed` | `CE` | cause |
 | `succeeded` (`run`, `cmd`, hook execution) | `OK` | |
+| *(judging, draft)* `presentation_error` | `PE` (display `cpf`), `WA` (display `judge-cf`) | "presentation error", then the judge's role and message head |
+| *(judging, draft)* `scored` | `SCORE` | "<raw>/<scale>" (per test); job: "<value>/<max> (<aggregation>)", or "incomplete: <n> tests without a score" |
+| *(judging, draft)* `session_limit` | `TLE` | "session deadline <d>" |
+| *(judging, draft)* `idle` | `IDLE` | "no successful forwarding observed for <N> s" |
+
+*(judging, draft)* Qualifiers of judged tests: `OK`, `WA` and `PE` name the
+deciding judge ("checker", "interactor") and the head of its message
+(§4.6; a `simple` checker's stderr); `CHECKER-FAILED` names the class and
+role ("checker crashed: signal 11", "interactor: report invalid
+(disagreement)", "validator: invalid input") instead of "invalid answer";
+`UNCHECKED` says "cleanup not verified: report not read" for
+`checking_unverified`; `TLE` of an interactive test decided by
+`PeerAllowanceExpired` says "did not exit after the interactor finished";
+`CE` of a role build says "<role> build" and its cause. A judge's message
+is the judge's text, quoted and sanitized like every line (§8); it is never
+a summary template.
+
+*(judging, draft)* **Display profiles** (checkers design §6.6), selected by
+`[check] display` (C §9.1.1) and recorded in `target.check.display`: `cpf`
+(default) uses the labels above; `judge-cf` shows `presentation_error` with
+the label `WA` (qualifier still "presentation error"). A display profile
+changes human labels only: the stored verdict, `by_verdict`, the exit
+status and every document keep the raw token.
 
 The label set is exhaustive. Summary templates (design §6.1), each fixed
 and table-tested (§9.5):
 
-- Job summary: "<passed>/<selected> passed (<comparator> comparison)"; no
-  template contains "accepted" or "correct".
+- Job summary: "<passed>/<selected> passed (<comparator> comparison)";
+  *(judging, draft)* "<passed>/<selected> passed (<profile> checker)",
+  "<passed>/<selected> passed (interactive, checking <checking>)", and on a
+  points problem "<value>/<max> points (<aggregation>) over <selected>
+  tests"; a validator adds "(inputs validated)". No template contains
+  "accepted" or "correct".
 - `unchecked`: "<n> unchecked (no answer): not verified"; `no_tests`: "no
   tests: nothing verified"; a completed verdict with recorded intent adds
   "(interrupted after completion)".
@@ -345,7 +432,8 @@ Order: **P → V → A → H → W → E → F → S → D**. *(lock)* marks a s
 under the verdict lock, atomic with respect to cancellation intent.
 
 - **P Primary execution.** Each test verdict is derived once its record is
-  final (§§2.4–2.5). Intent stops admission and arbitrates checks (E §6.4).
+  final (§§2.4–2.5; *(judging, draft)* a judged test once all its records
+  are final, §§2.11–2.12). Intent stops admission and arbitrates checks (E §6.4).
 - **V Primary freeze** *(lock)*: after the last primary derivation,
   `primary_verdict` (§2.7) is computed and frozen.
 - **A Fact publication** (`test` jobs, S §6.5 as amended). **Eligible** iff
@@ -451,6 +539,178 @@ committed (stderr says so whenever the status is not 0):
 | internal failure: verdict `internal_error`, a caught panic in admission or in the job (class `internal`) | 70 |
 | forced cancellation | §5.2 row 2 |
 
+### 2.11 Batch judged tests *(judging, draft)*
+
+A batch judged test has, contiguous in plan order, the executions v (its
+validator run, if a validator is declared), s (its solution run) and c (its
+checker run, kind `checker`). Admission follows §2.1 (each run admitted
+only after the earlier one's record is final; `skipped{input_not_validated}`
+after a validator that did not report the input valid; c
+`skipped{not_eligible}` when s has no record, coverage `not_started` or
+`transferred`, or class `infrastructure` or `cancelled`) and the
+cancellation arbitration of E §6.4: intent set before a judge run's
+admission skips it (`skipped{cancelled}`), intent set while it runs stops
+it (class `cancelled`), intent set after it finished changes nothing. A
+checker admitted after an s class other than `exited_zero` is
+**diagnostic** (`diagnostic: true`): its outcome is evidence and never
+decides, like a diagnostic comparison (§2.4).
+
+The test is derived once, after the last of its records is final, under
+the verdict lock: the **first** matching row gives the check and the test
+verdict. Judge outcomes are read by the profiles of E §2.1; "class" is the
+judge run's own §2.2 class.
+
+| # | Condition | Check | Test verdict |
+|---|---|---|---|
+| B1 | v `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
+| B2 | v `skipped{build_not_succeeded \| admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
+| B3 | v `not_started{≠ cancelled_before_start}`, or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
+| B4 | v `not_started{cancelled_before_start}`, or class `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
+| B5 | v profile `testlib`, class other than `exited_zero` | `judge_failed{test_data_error, validator, validation_failed}` | `checker_failed` |
+| B6 | v profile `simple`, class `nonzero_exit{1}` | `judge_failed{test_data_error, validator, invalid_input}` | `checker_failed` |
+| B7 | v profile `simple`, any other class except `exited_zero` | `judge_failed{crashed, validator, <class reason>}` | `checker_failed` |
+| B8 | kind `compare` (v `exited_zero`) | §2.4 and §2.5 over s, unchanged | §2.5 |
+| B9 | s `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
+| B10 | s `skipped{build_not_succeeded \| admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
+| B11 | s `not_started{≠ cancelled_before_start}`, or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
+| B12 | s `not_started{cancelled_before_start}`, `transferred`, or class `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
+| B13 | c `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
+| B14 | s `exited_zero`; c `skipped{admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{admission_closed}` |
+| B15 | c `not_started{cancelled_before_start}`, `transferred`, or class `cancelled` | `unchecked{checking_interrupted}` | `cancelled` |
+| B16 | s class `wall_deadline`, `output_budget`, `signal` or `nonzero_exit` | c's outcome by B18–B37 with `diagnostic: true`, or `not_admitted{run_not_eligible}` when c is `skipped{admission_closed}`, `not_started` or `infrastructure` | the s class |
+| B17 | s `exited_zero`; c `not_started{≠ cancelled_before_start}` or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
+| B18 | `simple` c, `exited_zero`, cleanup not `unverified` | `passed` | `passed` |
+| B19 | `simple` c, `nonzero_exit{1}`, cleanup not `unverified` | `rejected{wrong_answer, checker}` | `wrong_answer` |
+| B20 | `simple` c, any other class | `judge_failed{crashed, checker, <class reason>}` | `checker_failed` |
+| B21 | `testlib` c, stage 1: class `signal`, `wall_deadline` or `output_budget` | `judge_failed{crashed, checker, <class reason>}` | `checker_failed` |
+| B22 | c of either profile, cleanup `unverified` (after B20–B21: a crash or own limit decides first) | `unchecked{checking_unverified}` | `unchecked` |
+| B23 | `testlib` c, the report read fails with an OS error E §2.1 does not classify as `ReportInvalid`, or its extraction fails (reservation refused, I/O error) | `check_error{os_error}` | `infrastructure` |
+| B24 | stage 2: report missing, a link, not a regular file, not readable (permission) | `judge_failed{report_invalid, checker, report_missing \| report_not_regular \| report_unreadable}` | `checker_failed` |
+| B25 | stage 2: report larger than 64 KiB | `judge_failed{report_invalid, checker, report_too_large}` | `checker_failed` |
+| B26 | stage 2: undecodable (an undeclared report that is not UTF-8, an unsupported declared encoding, bytes invalid in the declared one) | `judge_failed{report_invalid, checker, report_undecodable}` | `checker_failed` |
+| B27 | stage 3: not well-formed, or forbidden markup | `judge_failed{report_invalid, checker, report_malformed}` | `checker_failed` |
+| B28 | stage 4: element, outcome or attribute unknown or misplaced | `judge_failed{report_invalid, checker, report_schema}` | `checker_failed` |
+| B29 | stage 4: `points` outside the grammar or the range 0 ≤ raw ≤ scale | `judge_failed{report_invalid, checker, points_invalid}` | `checker_failed` |
+| B30 | stage 5: exit code not 0, 1, 2, 3 or 7 (checked before the outcome, so an unsupported exit with an unsupported outcome is this row) | `judge_failed{protocol_unsupported, checker, exit_unsupported}` | `checker_failed` |
+| B31 | stage 5: supported exit code, outcome unsupported (`partially-correct`, another known outcome, `points` under `pass_fail`) | `judge_failed{protocol_unsupported, checker, outcome_unsupported \| points_not_enabled}` | `checker_failed` |
+| B32 | stage 6: a supported pair outside the matrix (e.g. exit 0 + `wrong-answer`) | `judge_failed{report_invalid, checker, disagreement}` | `checker_failed` |
+| B33 | (0, `accepted`) | `passed` | `passed` |
+| B34 | (1, `wrong-answer`) | `rejected{wrong_answer, checker}` | `wrong_answer` |
+| B35 | (2, `presentation-error`) | `rejected{presentation_error, checker}` | `presentation_error` |
+| B36 | (3, `fail`) | `judge_failed{declared_fail, checker, declared_fail}` | `checker_failed` |
+| B37 | (7, `points`) | `scored{raw, scale, checker}` | `scored` |
+
+- Rows B1–B7 decide on v; rows B8–B37 apply only when there is no v or v
+  was `exited_zero` (input valid); rows B13–B37 only with kind `checker`. With an answer that is
+  deliberately none under `answer = "none"` the judge received an empty
+  file and the rows apply unchanged; `answer` stays `absent` in §4.6.
+- `<class reason>` is the judge run's class token (`signal`,
+  `wall_deadline`, `output_budget`) or `exit_code` for a `nonzero_exit`.
+- Every combination not listed (for example c `skipped{not_eligible}`
+  after an s with class `exited_zero`, or `skipped{input_not_validated}`
+  after a valid input) is an orphan: check and test verdict
+  `internal_error{invariant}` (§2).
+- A checker after a solution failure never yields success (B16); a
+  checker failure is never `wrong_answer` and never a zero score (B20, B21,
+  B24–B32, B36; §2.13).
+- Compatibility (compare spec §8): kind `compare` keeps the comparator's
+  outcomes exactly (B8); a comparator's invalid answer stays
+  `checker_failed{test_data_error, invalid_answer}` (§2.4).
+
+### 2.12 Interactive tests *(judging, draft)*
+
+An interactive test has the executions v (if a validator is declared), s
+and i (one session, admitted atomically, E §9a) and c (the follow-up
+checker, checking `checker` or `interactor+checker`). Rows B1–B7 decide
+first. Then:
+
+| # | Condition | Test verdict |
+|---|---|---|
+| I1 | s and i `skipped{cancelled}` | `cancelled` |
+| I2 | s and i `skipped{build_not_succeeded \| admission_closed}` | `not_run{reason}` (`input_not_validated` never reaches this row: B3–B7 decide first) |
+| I3 | **cancellation snapshot**: s and i `transferred` (cancellation during committed pair creation, E §3.4; the record holds `CancelRequested` and no start facts), or the follow-up checker `transferred` | `cancelled`, without reduction (below) |
+| I4 | otherwise (the pair was admitted) | the session verdict of `reduce(record, checking, scoring)`, policy `interactive_v7` (checkers design §6.2), over the closed session record (checkers design §6.1), mapped below |
+
+| Session verdict | Test verdict | Score (§2.13) |
+|---|---|---|
+| OK (`AuthorityComplete{Passed}`) | `passed` | scale |
+| WA / PE (I's valid rejection, or `AuthorityComplete{Failed}`) | `wrong_answer` / `presentation_error` | 0 |
+| score (`AuthorityComplete{Scored}`) | `scored` | raw |
+| TLE (`StopRequested{S, OwnLimit(Wall)}` or `{S, PeerAllowanceExpired}`) | `wall_deadline` | 0 |
+| OLE (`StopRequested{S, OwnLimit(DialogueOutput)}`) | `output_budget` | 0 |
+| RE (S's natural nonzero exit or signal, not normalised) | `signal` or `nonzero_exit`, by S's `RootExited` status | 0 |
+| `session_limit` | `session_limit` | 0 |
+| `idle` | `idle` | 0 |
+| `CheckerFailed{class}` | `checker_failed` | none |
+| `Unchecked{CheckingUnverified}` | `unchecked` | none |
+| `cancelled` | `cancelled` | none |
+| `infrastructure` | `infrastructure` | none |
+| `internal_policy_error` | `internal_error{internal_policy_error}`: an internal failure before V (§2), `result.internal` locus `test` | none |
+
+- **Cancellation snapshots** (I3) are not closed records, so they never
+  reach the reducer or its step 0: the session member has `verdict`
+  `cancelled`, `decided_by` `{"kind":"transferred","role":token}` (the
+  first transferred role: `solution` for the pair, else `checker`) and
+  `facts` as recorded; s and i (or c) have coverage `transferred` and class
+  `cancelled` (§4.5 creation cancellation); a follow-up checker never
+  started after a transferred pair is `skipped{cancelled}`; `judges[]`
+  entries of transferred runs have `result: null`; no score. A transferred
+  follow-up checker can follow only an eligible record (checkers design
+  §6.1 item 6: no decisive fact, no cancellation, no infrastructure), so
+  `cancelled` is the verdict step 4 gives a cancellation before execution
+  completes. The later cleanup ticket outcome changes nothing (E §3.4).
+- The test's `class` is s's §2.2 class, as evidence only (a teardown stop
+  shows as `signal`); `check` is `null` and `diagnostic` `false`; the
+  decision is in `session` (§4.6). `CheckingInterrupted` is unreachable
+  (checkers design §6.2 completeness) and never written for a session.
+- Coverage of c: `Started` → `started`, `NotStarted` → `not_started`,
+  `CheckerSkipped{NotEligible}` → `skipped{not_eligible}`,
+  `CheckerSkipped{Cancelled}` → `skipped{cancelled}`; in mode
+  `interactor` no c is planned.
+- **Prerequisites of the reducer**, each fixed by checkers design §6.1–6.2
+  and tested in §9.6: the record is lossless and distinct from the lossy
+  event transport; it is closed (every applicable emission item has
+  happened) before reduction, and step 0 rejects any record violating the
+  emission contract, its consistency rules, the `Stopped(n)` reference,
+  the cancel-before-start order, distinct decisive positions or the bound
+  (`internal_policy_error`, never success); positions are `decision_pos`,
+  so a report read after its judge exited is attributed to that exit;
+  facts of one wakeup are ordered by the same-wakeup rule; **authority
+  completion** is the only path to a success or a score; **peer
+  shutdown** (peer allowance, teardown stops) is decisive only for the
+  late role's own limit, never through teardown; **cleanup uncertainty**
+  is `NotRead` (`Incomplete`: infrastructure) or `Unverified` (unchecked)
+  for a judge, and for S follows E §6.4 (`Unverified` does not block, a
+  note only).
+
+### 2.13 Scores *(judging, draft)*
+
+On a problem with a points `scoring` (C §9.1.5):
+
+- **Per-test score** (`tests[].score`), from the test verdict: `passed` →
+  scale; `scored` → raw; `wrong_answer`, `presentation_error` → 0;
+  `wall_deadline`, `session_limit`, `idle`, `output_budget`, `signal`,
+  `nonzero_exit` → 0; every other verdict (`checker_failed`, `unchecked`,
+  `cancelled`, `infrastructure`, `not_run`, `internal_error`) → no score
+  (`null`). A diagnostic check never gives a score. Without a points
+  `scoring` every `score` is `null`.
+- **Values** are `i128` fixed point in units of 10⁻⁹ (checkers design §4),
+  written as `score` (§3.2). raw keeps the received digits' value; more
+  than 9 fractional digits never reaches here (stage 4, B29).
+- **Aggregate** (`result.score`), computed at V over the job's selected
+  tests: zero tests → `no_tests`; any selected test without a score →
+  `incomplete{missing}` (the count); otherwise `points{value}` with value
+  = Σ scores (`sum`) or the minimum (`min`), `max` = number of tests ×
+  scale (`sum`) or scale (`min`), and `full` iff value = max. Never a
+  number when incomplete; a score is final only once its test's authority
+  completed (checkers design §6.1).
+- `incomplete` always comes with a job verdict of a higher §2.7 row (each
+  score-less test verdict has its own row), so it never decides the exit
+  status alone; `scored` exits 0 iff `full` (§5.2).
+- With `scoring = "pass_fail"` a judge's points are
+  `ProtocolUnsupported` (B31; for a session, checkers design §6.3) and
+  `result.score` is `null`.
+
 ## 3. JSON encoding
 
 Applies to `report.json`, the capture manifest (§4.2), every `--json`
@@ -501,6 +761,7 @@ Serialized maxima include quotes; they feed §3.7.
 | `ns` | full native value (§3.3), n source bytes | max(2n + 11, 4⌈n/3⌉ + 16) |
 | `nsum(P)` | bounded native summary (§3.3) | 2P + 149 |
 | `bytes` | `{"bytes_b64": …}` of n bytes | 4⌈n/3⌉ + 17 |
+| `score` | *(judging, draft)* a fixed-point value in units of 10⁻⁹ (§2.13) as a JSON string: the integer part in minimal decimal (`"0"` when zero), then, only if the value has a fraction, `.` and 1–9 digits without a trailing zero; no sign, no exponent. ≤ 14 integer digits (10 000 tests × 10⁹) | 26 |
 
 Object cost: 2 (braces) + Σ (|key| + 3 + value) + (members − 1) commas.
 List of n items: 2 + Σ items + (n − 1).
@@ -597,20 +858,57 @@ to check the arithmetic. Sizes in bytes.
 | **report header** | job 225, workspace `nsum(1024)` 2 191, problem 509, target 1 587, capture 13 311, fingerprints, build 6 664, result 1 784, fact 453, 32 × hook 244, 24 × warning 741, events, timing, persistence 448, scalars, keys | 53 645 | **64 KiB** |
 | **report** | header + Σ per planned execution (entry 8 851 + test 2 868 + aggregate 224 + 3 commas = 11 946) | | **64 KiB + 12 KiB × N** |
 | `Diagnostic` | file `nsum(256)` 655, key text, 2 × `u32`, message text | 1 237 | |
+| *(judging, draft)* message | `nsum(4096)` | 8 341 | |
+| *(judging, draft)* diagnostic | `nsum(1024)` | 2 197 | |
+| *(judging, draft)* **`judges[]` entry** | role, `u32`, profile, result 130 (`judge_failed`: kind, class, reason), message 8 341, stderr 2 197, report `{path, bytes, encoding}` 100, keys | 10 928 | **11 KiB** |
+| *(judging, draft)* **`validation`** | `u32`, profile, outcome, stderr 2 197, keys | 2 321 | **2.5 KiB** |
+| *(judging, draft)* session facts | ≤ 17 facts (32 reserved), each ≤ 512 bytes plus text ≤ 256 bytes after escaping (checkers design §6.1) | 13 056 | **16 KiB** (16 384) |
+| *(judging, draft)* **`session`** | policy, checking, mode, verdict 172, `decided_by`, facts 16 384, deadlines, 2 × direction 353, transcript 347, seeds, 2 bool, timing, idle 243, rerun, keys | 18 842 | **19 KiB** |
+| *(judging, draft)* **`tests[]` entry** of a shape | base 2 926 (the entry above with `score`, `validation`, `judges`, `session` null or empty) + v × `validation` + j × `judges[]` entry + s × `session` + `score` 26 | | **T = 3 KiB + v × 2.5 KiB + j × 11 KiB + s × 19 KiB** |
+| *(judging, draft)* **`roles[]` entry** | role, profile, origin 709, build 6 664, capture 13 355 (§4.2 capture plus `content_sha256`), provenance 594, keys | 21 454 | **21 KiB** |
+| *(judging, draft)* **report header** | the header above 53 645 + `roles` 3 × 21 454 + `target.check` 630 + `fingerprints.judge` + `result.score` 173 + 4 `by_verdict` members, keys | 119 044 | **128 KiB** |
+| *(judging, draft)* **report** | header + Σ per planned execution (entry + comma ≤ 9 KiB) + Σ per test (T + comma) + Σ per aggregate (≤ 256) | | **B = 128 KiB + 9 KiB × N + T × N_t + 256 × N_a** |
 | **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 966 | **104 KiB** |
 | **event line** | max of: `run_finished` (summary + 99) 6 873; `output_chunk` (4 096 bytes → 5 464 base64 + 157) 5 621; others ≤ 400 | 6 873 | **7 KiB** (final envelope: report bound + 28, 29 with the line feed) |
 
 N is the number of planned executions (≤ 10 000, C §8.2); the test and
 aggregate terms are charged per planned execution because each test has at
-least one. The comparator value is budgeted at 8 `dec`-sized members (the
+least one. *(judging, draft)* The judging rows **report header** and
+**report** (B) replace the two earlier rows of those names for every job: N_t is the number of `tests[]` entries (selected tests, ≤ N),
+N_a the number of `aggregates[]` entries (≤ N), and T the per-test bound of
+the job's **shape**, which all its tests share: v = 1 iff a validator is
+declared, j the number of judges per test (0 for kind `compare`, 1 for kind
+`checker` or checking `interactor`, 2 for checking `checker` or
+`interactor+checker`), s = 1 iff the problem is interactive. Worst cases:
+kind `compare` at the cap, B = 128 KiB + 10 000 × (9 KiB + 3 KiB + 256) =
+125 571 072 B (119.8 MiB); 1 000 interactive tests with a validator and a
+follow-up checker (4 004 executions), B = 84 647 936 B (80.7 MiB). The comparator value is budgeted at 8 `dec`-sized members (the
 float comparator has 6, compare spec §5.1). The capture manifest has an
 exact size computed before it is written (§4.2).
 
 **Reservations** (amendment to E §5.4/§6.2 and S §6.4, §10): before the
 first run the job reserves, through the S §6.4 interface, the report bound
-(64 KiB + 12 KiB × N) for `report.json` plus the same again for its
-temporary file during replacement; the capture manifest's exact size (plus
-its temporary) is reserved before it is written during freezing.
+for `report.json` plus the same again for its temporary file during
+replacement; the capture manifest's exact size (plus its temporary) is
+reserved before it is written during freezing.
+
+*(judging, draft)* The report reservation is exactly **2 × B** of the plan,
+taken once before the first run and held until report publication settles
+(E §5.4). It is never taken lazily: a reservation made at finalization
+could find the job budget consumed by runs, captures and judge staging, and
+final-report headroom would no longer be guaranteed. A plan with 2 × B >
+256 MiB is a plan error (C §8.2); with the judged-test cap of 1 000 this is
+reachable only through planned hooks. Kind `compare` at the cap reserves
+2 × 125 571 072 B = 251 142 144 B (239.5 MiB); a hook-heavy judged plan can
+come closer to the cap (1 000 interactive tests with a validator and a
+follow-up checker plus 5 378 hooks: N = 9 382, 2 × B = 268 423 168 B, just
+below 256 MiB = 268 435 456 B), and every admitted plan is ≤ 256 MiB by the
+cap. The other job reservations are separate and additive: the
+capture manifest (exact size plus temporary, during freezing), frozen
+copies and captured files (S §6.4), each run's stream and metadata
+reservations, judge staging and session transcripts (E §5.4). At the first
+run's admission the job's reserved bytes are therefore 2 × B plus that
+run's own reservations; the capture manifest is already retained.
 
 ## 4. Report schema (`job_report`, schema 1)
 
@@ -629,8 +927,9 @@ its temporary) is reserved before it is written during freezing.
 | `problem` | object? | §4.2 |
 | `target` | object? | §4.3 |
 | `capture` | object? | §4.2 |
-| `fingerprints` | object? | `{source: hex64, tests: hex64}` once run facts compute them (storage contract §6.5); `null` until then |
+| `fingerprints` | object? | `{source: hex64, tests: hex64, judge: hex64?}` once run facts compute them (storage contract §6.5); `null` until then. *(judging, draft)* `judge` is the judge fingerprint (C §9.1.3), `null` for a problem without a role |
 | `build` | object? | §4.4 |
+| `roles` | `[Role; ≤3]` | *(judging, draft)* §4.4, order checker, validator, interactor; empty without roles |
 | `executions` | `[Execution; ≤10000]` | §4.5, plan order |
 | `tests` | `[Test; ≤10000]` | §4.6, frozen-manifest order |
 | `aggregates` | `[Aggregate; ≤10000]` | §4.7; empty unless `cmd` |
@@ -663,7 +962,10 @@ its temporary) is reserved before it is written during freezing.
   - `manifest`: `inputs/capture.json`, the **capture manifest** (decision
     O2), a document `{"schema":1,"document":"capture_manifest","platform":
     …,"job":jid,"check":Check,"sources":[ns…],"support_files":[ns…],
-    "lists_sha256":hex64}` holding the complete lists with full values. It
+    "lists_sha256":hex64,"roles":[{"role":token,"files":[ns…]}]}` holding
+    the complete lists with full values (*(judging, draft)* `roles`: each
+    role's captured files in capture order, C §9.1.3; empty without roles).
+    It
     is written during freezing as the last capture step (S §6.2, §7), after
     every copy, by no-clobber publication (S §4.3) into the job directory
     under the lease, with its exact size reserved first (§3.7). Publication
@@ -682,6 +984,19 @@ bool, compare: Comparator?, run_deadline: {us: dur, source: token}?,
 published_limits: {time_ms: u32?, memory_bytes: u64?}?, local_limits:
 [LocalLimit; ≤2]}`.
 
+- *(judging, draft)* `check` (member after `compare`; `CheckConfig?`, `null`
+  for a job without checks): `{kind: token, answer: token, scoring:
+  Scoring, display: token, interactive: Interactive?}` with `kind`
+  `compare`, `checker`, `interactive`; `answer` `file`, `none`; `display`
+  `cpf`, `judge_cf`; `Scoring`: `{"kind":"pass_fail"}` or
+  `{"kind":"points","scale":score,"aggregation":token}` (`sum`, `min`);
+  `Interactive` (`null` unless interactive): `{checking: token, mode:
+  token, idle_us: dur?, early_reader_close: bool, interactor_allowance_us:
+  dur, peer_allowance_us: dur, solution_seed: token, interactor_seed:
+  token}`, `checking` `interactor`, `checker`, `interactor_checker`, `mode`
+  `relay`, `direct`, `idle_us` `null` when the watchdog is off, seeds
+  `none`, `env`, `argv`. A test job always has a non-null `check` (kind
+  `compare` by default).
 - `compare`: `{"kind":"tokens"}`, `{"kind":"exact"}`, `{"kind":"lines"}` or
   `{"kind":"float","abs":dec?,"rel":dec?,"rel_base":token?,"combine":
   token?,"ulps":i64?,"int_exact":bool}` (compare spec §5.1, fully expanded);
@@ -703,7 +1018,9 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
   (`builds/<build_id>`) are `null` iff the build was skipped; after
   `output_too_large` the directory is removed and `output_root` names what
   was removed.
-- `BuildResult`: `{"kind":"succeeded"}`, `{"kind":"cancelled"}`,
+- `BuildResult`: *(judging, draft)* `{"kind":"skipped","reason":token}`
+  (`build_not_succeeded`, `admission_closed`; role builds only, §2.3),
+  `{"kind":"succeeded"}`, `{"kind":"cancelled"}`,
   `{"kind":"infrastructure","causes":[Cause; 8],"causes_dropped":u32}`,
   `{"kind":"failed","cause":BuildCause}`, `{"kind":"internal_error",
   "invariant":token}`. `BuildCause`: a class object (§4.5) other than
@@ -714,6 +1031,28 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 - `artifacts`: the validated artifact set (first 16) for `succeeded`; empty
   otherwise.
 
+*(judging, draft)* **Roles.** `roles[]` entry (C §9.1):
+
+| Member | Type | Content |
+|---|---|---|
+| `role` | `token` | `checker`, `validator`, `interactor` |
+| `profile` | `token` | `testlib`, `simple` |
+| `origin` | object | `{"kind":"built","language":ident,"entry":nsum(128)?}` or `{"kind":"prebuilt","program":nsum(128)}` (problem-relative path) |
+| `build` | object? | the role build, in the `build` form above; `null` for a prebuilt or build-free role |
+| `capture` | object | `{check: Check, sources: [nsum(128); 16], support_files: [nsum(128); 16], counts: {sources: u32, support_files: u32}, bytes: u64, lists_sha256: hex64, content_sha256: hex64}` as `capture` (§4.2), for the role's captured files (a prebuilt role: its program as the one source); `check` is the capture check of the role's source-consuming stage; `content_sha256` covers the copied bytes in the workspace design §3.2 file encoding |
+| `provenance` | object | `{"kind":"built","header":Header}` or `{"kind":"declared"}` (prebuilt: custom exit remaps or the unexpected-EOF option cannot be detected, E §2.1) |
+
+`Header` (candidate-only, E §2.1: never a claim about the header the
+compiler used): `{"kind":"candidate","path":nsum(128),"sha256":hex64,
+"pinned":bool}` (the single captured `testlib.h` beside every captured
+source, the file a quoted include would resolve to first; `pinned` iff
+its SHA-256 equals the tested header's), `{"kind":"not_identified",
+"reason":token}` (profile `testlib`; reason `none`, `ambiguous`,
+`not_beside_sources`, `angle_include`) or `{"kind":"not_applicable"}`
+(profile `simple`). Human output says "header candidate", never "compiled
+header". The compiler and flags are the role build's `executions[]`
+entry (`program`, `spec`), named by `build.execution`.
+
 ### 4.5 Executions
 
 `executions[]` entry, one per planned execution:
@@ -721,8 +1060,8 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 | Member | Type | Content |
 |---|---|---|
 | `index` | `u32` | plan index |
-| `stage` | `token` | `build`, `run`, `command`, `hook` |
-| `role` | object | `{"kind":"build"}`, `{"kind":"test","test":ident}`, `{"kind":"command","test":ident?,"iteration":u32}`, `{"kind":"raw"}`, `{"kind":"hook","name":ident,"trigger":token}` |
+| `stage` | `token` | `build`, `run`, `command`, `hook`; *(judging, draft)* `checker`, `validator`, `interactor` |
+| `role` | object | `{"kind":"build"}`, `{"kind":"test","test":ident}`, `{"kind":"command","test":ident?,"iteration":u32}`, `{"kind":"raw"}`, `{"kind":"hook","name":ident,"trigger":token}`; *(judging, draft)* `{"kind":"role_build","role":token}`, `{"kind":"checker","test":ident}`, `{"kind":"validator","test":ident}`, `{"kind":"interactor","test":ident}` (a role build has stage `build`; the solution run of an interactive test keeps `{"kind":"test"}`) |
 | `coverage` | object | `{"kind":"started"}`, `{"kind":"transferred"}`, `{"kind":"not_started","reason":NotStarted}`, `{"kind":"skipped","reason":token}` |
 | `run` | `rid?` | `null` iff `skipped` |
 | `program` | `nsum(256)?` | resolved executable (E §2); `null` iff `skipped` or interrupted preparation (below) |
@@ -836,9 +1175,93 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 | `answer_sha256` | `hex64?` | `null` iff `absent` |
 | `executions` | object | `{first: u32, count: u32}`: contiguous plan-index range (test-major order, C §8.2) |
 | `class` | object? | the test's run class (`test` jobs); `null` without a record or for `cmd` |
-| `check` | object? | `null` for `cmd`; else §2.4: `{"kind":"passed"}`, `{"kind":"failed","fail":"wrong_answer","reason":token,"diag":Diag}`, `{"kind":"unchecked","reason":"no_answer"}`, `{"kind":"checker_failed","class":"test_data_error","reason":"invalid_answer","diag":Diag}`, `{"kind":"check_error","os_error":i32?}`, `{"kind":"not_admitted","reason":token}` (`run_not_eligible`, `cancelled`), `{"kind":"internal_error","invariant":token}` (underivable, §2) |
+| `check` | object? | `null` for `cmd` and *(judging, draft)* for an interactive test (§2.12); else §2.4, §2.11: `{"kind":"passed"}`, `{"kind":"failed","fail":"wrong_answer","reason":token,"diag":Diag}`, `{"kind":"unchecked","reason":"no_answer"}`, `{"kind":"checker_failed","class":"test_data_error","reason":"invalid_answer","diag":Diag}`, `{"kind":"check_error","os_error":i32?}`, `{"kind":"not_admitted","reason":token}` (`run_not_eligible`, `cancelled`), `{"kind":"internal_error","invariant":token}` (underivable, §2); *(judging, draft)* `{"kind":"rejected","fail":token,"role":token}` (`wrong_answer`, `presentation_error`), `{"kind":"scored","raw":score,"scale":score,"role":token}`, `{"kind":"judge_failed","class":token,"role":token,"reason":token}`, and `unchecked` with the reasons `no_answer`, `checking_unverified`, `checking_interrupted` |
 | `diagnostic` | `bool` | the check was admitted after an unsuccessful class |
-| `verdict` | object? | `null` for `cmd`; `{"kind":<§2.5 token>}`, `{"kind":"not_run","reason":token}`, `{"kind":"internal_error","invariant":token}` |
+| `verdict` | object? | `null` for `cmd`; `{"kind":<§2.5 token>}`, `{"kind":"not_run","reason":token}`, `{"kind":"internal_error","invariant":token}` (*(judging, draft)* invariant `internal_policy_error` for a session, §2.12); §2.5 tokens include `presentation_error`, `scored`, `session_limit`, `idle` |
+| `score` | `score?` | *(judging, draft)* §2.13; `null` without a points `scoring` or without a score |
+| `validation` | object? | *(judging, draft)* `null` without a validator; `{execution: u32, profile: token, outcome: token, stderr: nsum(1024)?}`, `outcome` `valid`, `invalid` (B6), `validation_failed` (B5), `validator_failed` (B7), `not_run` (B1–B4); `stderr`: the first 1 024 bytes of its stderr capture, `null` if none was stored |
+| `judges` | `[Judge; ≤2]` | *(judging, draft)* the test's checker (batch), or interactor then follow-up checker (interactive), in plan order; empty for kind `compare` |
+| `session` | object? | *(judging, draft)* `null` unless interactive; below |
+
+*(judging, draft)* `judge_failed`: `class` `declared_fail`,
+`protocol_unsupported`, `report_invalid`, `artefact_invalid`, `crashed`,
+`test_data_error` (checkers design §1); `role` `checker`, `validator`,
+`interactor`; `reason` `declared_fail`, `exit_unsupported`,
+`outcome_unsupported`, `points_not_enabled`, `outside_authority`,
+`report_missing`, `report_not_regular`, `report_unreadable`,
+`report_too_large`, `report_undecodable`, `report_malformed`,
+`report_schema`, `points_invalid`, `disagreement`, `tout_missing`,
+`tout_not_regular`, `tout_unreadable`, `tout_too_large`, `signal`, `exit_code`,
+`wall_deadline`, `output_budget`, `dialogue_output`,
+`peer_allowance_expired`, `invalid_input`, `validation_failed`.
+
+*(judging, draft)* `Judge`: `{role: token, execution: u32, profile: token,
+result: JudgeResult?, message: nsum(4096)?, stderr: nsum(1024)?, report:
+{bytes: u64, encoding: token?}?}`. `result` is the judge's own outcome as
+its profile reads it (E §2.1): `{"kind":"passed"}`,
+`{"kind":"rejected","fail":token}`, `{"kind":"scored","raw":score,
+"scale":score}`, `{"kind":"judge_failed","class":token,"reason":token}`,
+`{"kind":"unverified"}`, `{"kind":"not_read","reason":token}` (`stopped`,
+`cleanup_incomplete`, `extraction_failed`); `null` when the run has no
+record or did not start.
+`report` (below) also names the extracted copy (E §2.1).
+`message`: the report's message (`testlib`), its first 4 096 bytes as
+UTF-8, `len` and `sha256` over the whole decoded message; `null` for
+`simple` judges and when not read. `stderr`: the first 1 024 bytes of the
+judge's stderr capture (the message of a `simple` checker). `report`:
+`{path: rel? (≤ 20), bytes: u64, encoding: token?}`, the extracted copy
+`<run>/judge/report`; `path` is `null` both for a report rejected before
+extraction (missing, unsafe or oversized: `result` is then
+`judge_failed{report_invalid}`, a judge failure) and for an extraction
+failure (`result` `not_read{extraction_failed}` in batch and session
+alike; in a batch test `tests[].check` is then B23's `check_error`,
+infrastructure); the `result` tells them apart. Then the bytes read
+(≤ 65 537) and the encoding (`windows_1251`, `utf_8`, `null` if
+undecodable); `null` when not read.
+
+*(judging, draft)* `session` (checkers design §§5–6):
+
+| Member | Type | Content |
+|---|---|---|
+| `policy` | `token` | `interactive_v7` |
+| `checking`, `mode` | `token` | as `target.check.interactive` |
+| `verdict` | object | `{"kind":"passed"}`, `{"kind":"rejected","fail":token,"role":token}`, `{"kind":"scored","raw":score,"scale":score,"role":token}`, `{"kind":"wall_deadline"}`, `{"kind":"output_budget"}`, `{"kind":"runtime_error"}`, `{"kind":"session_limit"}`, `{"kind":"idle"}`, `{"kind":"checker_failed","class":token,"role":token,"reason":token}`, `{"kind":"unchecked","reason":"checking_unverified"}`, `{"kind":"cancelled"}`, `{"kind":"infrastructure"}`, `{"kind":"internal_policy_error"}` |
+| `decided_by` | object | `{"kind":"infrastructure","fact":u32}`, `{"kind":"decisive","fact":u32}`, `{"kind":"cancelled","fact":u32}` (the `CancelRequested`), `{"kind":"authority","fact":u32}` (`AuthorityComplete`), `{"kind":"invariant","rule":token}`, `{"kind":"transferred","role":token}` (cancellation snapshot, §2.12 I3); `fact` is the deciding fact's `obs_seq` |
+| `facts` | `[Fact; ≤32]` | the closed record in `obs_seq` order (≤ 17 by construction), ≤ 16 384 bytes serialized |
+| `deadlines` | object | `{solution_us: dur, interactor_us: dur, session_us: dur, peer_allowance_us: dur, idle_us: dur?}` |
+| `directions` | `[Direction; ≤2]` | `s_to_i`, then `i_to_s` |
+| `transcript` | object | `{"kind":"complete","dir":rel}`, `{"kind":"gapped","dir":rel,"gaps":u32,"dropped_records":u64,"dropped_bytes":u64}`, `{"kind":"failed","error":text,"at_offset":u64}`, `{"kind":"unavailable"}` (direct mode), `{"kind":"removed"}` (judge scratch, E §2.1); `dir` is `<run>/transcript` (≤ 19) |
+| `seeds` | object | `{solution: Seed, interactor: Seed}`; `Seed`: `{"kind":"none"}` (not seed-controlled), `{"kind":"env","value":u64}`, `{"kind":"argv","value":u64}` |
+| `early_reader_close`, `sigpipe_normalised` | `bool` | declared; whether checkers design §6.5 normalisation applied |
+| `timing` | object | `{elapsed_us: dur, solution_cpu_us: dur?, interactor_cpu_us: dur?}`: the solution's deadline is not compensated for waiting on the interactor (checkers design §5.6) |
+| `idle` | object? | `{limit_us: dur, elapsed_us: dur, read: [u64; ≤2], forwarded: [u64; ≤2], queued: [u64; ≤2]}` when the watchdog fired |
+| `rerun` | object? | `{of_job: jid, of_test: ident, reproduced: bool}` for a seeded rerun (same seeds; `reproduced` iff the session verdict equals the original's; never a determinism, acceptance or timing claim, checkers design §7) |
+
+- `Direction`: `{direction: token, read: u64?, forwarded: u64?,
+  discarded_over_cap: u64?, delivery_incomplete: u64?, unread: token,
+  queue_bytes: u64, queue_records: u32, end: token}`; the counters are
+  `null` in direct mode (unavailable, never zero); `unread` is `none` or
+  `unknown` (bytes never read from the pipe are not counted, checkers
+  design §5.6); `end` is `eof`, `sink_gone` or `teardown`.
+- `Fact`: a tagged object `{"kind":…,"obs_seq":u32,"decision_pos":u32,…}`
+  with the variant's members after those two: `started` (`role`),
+  `not_started` (`role`, `reason: {kind: token, code: i32, text:
+  BText}`), `checker_skipped` (`reason`: `not_eligible`, `cancelled`),
+  `stop_requested` (`role`, `cause`: `{"kind":"own_limit","limit":token}`
+  with `wall` or `dialogue_output`, `{"kind":"peer_allowance_expired"}`,
+  `{"kind":"session_limit"}`, `{"kind":"idle"}`,
+  `{"kind":"teardown","reason":token}` with `peer_decided`, `cancel`,
+  `infrastructure`), `cancel_requested`, `root_exited` (`role`, `status:
+  Status` (§4.5), `provenance`: `{"kind":"natural"}` or
+  `{"kind":"stopped","by":u32}`), `cleanup_result` (`role`, `cleanup:
+  Cleanup` (§4.5)), `validation_done` (`role`, `outcome`:
+  `{"kind":"ok","result":JudgeResult}`, `{"kind":"failed","class":token,
+  "reason":token}`, `{"kind":"unverified"}`, `{"kind":"not_read"}`),
+  `authority_complete` (`result: JudgeResult`), `infrastructure`
+  (`detail: {kind: token, text: BText}`, `suppressed: u32`). Roles are
+  `solution`, `interactor`, `checker`. `BText`: `{text: string, truncated:
+  bool}`, the text ≤ 256 bytes after escaping, cut at an escape boundary.
+  `Scored` values are canonical `score` strings.
 
 `Diag` reason tokens: `token_mismatch`, `line_mismatch`, `byte_mismatch`,
 `count_mismatch`, `class_mismatch`, `integer_mismatch`, `tolerance`,
@@ -857,7 +1280,13 @@ count is the lower middle; `null` when none succeeded.
 `result`: `{verdict: token, primary_verdict: token, partial: bool,
 cancellation: {requested_at_us: dur, source: token, phase: token}?,
 pre_delivery_exit: {code: code, reraise: token?}, counts: Counts,
-internal: {invariant: token, locus: Locus, message: text}?}`.
+internal: {invariant: token, locus: Locus, message: text}?, score:
+Score?}`.
+
+- *(judging, draft)* `score` (§2.13): `null` without a points `scoring`;
+  else `{"kind":"points","aggregation":token,"value":score,"max":score,
+  "full":bool}`, `{"kind":"incomplete","aggregation":token,"missing":u32}`
+  or `{"kind":"no_tests"}`.
 
 - `verdict`, `primary_verdict`: §2.7 (`refused` for §4.12).
 - `cancellation`: snapshot at F; source `console` (Ctrl-C, `SIGINT`,
@@ -874,8 +1303,9 @@ internal: {invariant: token, locus: Locus, message: text}?}`.
   executions of the population with a non-null `invariant`. `ByVerdict` has a `u32` member for every §2.5
   token (`passed`, `wrong_answer`, `unchecked`, `checker_failed`,
   `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `cancelled`,
-  `infrastructure`, `not_run`, `internal_error`), `0` when absent, all zero
-  without tests. `ByClass` has a `u32` member for each §2.2 class token and
+  `infrastructure`, `not_run`, `internal_error`, and *(judging, draft)*
+  `presentation_error`, `scored`, `session_limit`, `idle`), `0` when
+  absent, all zero without tests. `ByClass` has a `u32` member for each §2.2 class token and
   `skipped` and `unknown`, over primary executions, counting observed
   classes (an orphan execution with a record still counts under its
   observed class; its invalidity is counted only in `invalid`); an
@@ -932,6 +1362,8 @@ occurrence order, and count every omitted ordinary warning in
 | `hooks_disabled` | `reason: token` | C §8.3 |
 | `late_cancellation` | `phase: token` | §2.9 |
 | `progress_dropped` | `lines: u32` | §8, final at E |
+| `judge_scratch` | *(judging, draft)* `run: rid`, `detail: token` (`staged_copy_kept`, `transcript_kept`) | E §2.1 judge scratch |
+| `testlib_header` | *(judging, draft)* `role: token`, `detail: token` (`not_identified`, `not_pinned`, `declared`) | §4.4 `provenance` |
 
 ### 4.11 `persistence`
 
@@ -978,12 +1410,12 @@ within the §3.7 reservation; never rewritten; classified by S §9
 
 | Code | Name | Meaning |
 |---|---|---|
-| 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded` |
-| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit` |
+| 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded`, *(judging, draft)* `scored` with a full aggregate |
+| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full |
 | 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9) |
 | 3 | `build_failed` | the build failed |
-| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked`, `no_tests` |
-| 5 | `checker_failed` | judging could not decide (schema 1: invalid answer) |
+| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests` |
+| 5 | `checker_failed` | judging could not decide: the comparator's invalid answer; *(judging, draft)* a checker, validator or interactor failure of any class (checkers design §1), including invalid test data |
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
 | 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5) |
 | 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O |
@@ -1014,9 +1446,10 @@ condition:
 | 9 | job verdict `infrastructure` | 10 |
 | 10 | job verdict `build_failed` | 3 |
 | 11 | job verdict `checker_failed` | 5 |
-| 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer` | 1 |
+| 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error` | 1 |
 | 13 | job verdict `unchecked`, `no_tests` | 4 |
-| 14 | otherwise | 0 |
+| 14 | *(judging, draft)* job verdict `scored` and `result.score.full = false` | 1 |
+| 15 | otherwise (including `scored` with a full aggregate) | 0 |
 
 - Rows 6–8 apply to job refusals and to non-job command failures alike
   (`cpf current` with `NoSelection` → class `workspace` → 8; `cpf config
@@ -1026,7 +1459,11 @@ condition:
   failure + any verdict other than `internal_error` → 11; refusal +
   delivery failure → 11; `infrastructure` + `wrong_answer` → 10 (via the
   verdict).
-- `pre_delivery_exit` is rows 3 and 5–14 evaluated at F.
+- `pre_delivery_exit` is rows 3 and 5–15 evaluated at F.
+- *(judging, draft)* A display profile (§2.8) never changes the status:
+  `presentation_error` exits 1 under `judge-cf` too. An `incomplete`
+  score never reaches row 14 (§2.13). `internal_policy_error` is an
+  internal failure (row 3, 70).
 - For `cpf switch`, the `hook` job selects a row only through row 3
   (verdict `internal_error` or a caught panic, class `internal`) or row 5
   (cancellation); its ordinary verdicts and its admission failures of class
@@ -1153,6 +1590,11 @@ platform. `Target`:
 | `last_verdict` | token? | the fact's verdict summary iff `fact_state` is `valid` |
 | `finished_at` | `time?` | the fact's `finished_at` iff `valid` |
 | `capture_check` | `Check?` (§4.2) | the fact's capture check iff `valid` |
+| `judge` | token | *(judging, draft)* the judge fingerprint (C §9.1.3) of the fact against the current one: `none` (neither has one), `unchanged`, `changed` (they differ, including one of them `null` or absent), `unknown` (fact not `valid`, or the current value not computable) |
+
+*(judging, draft)* Human `status` says "unchanged" only when `comparison`
+is `unchanged` and `judge` is `unchanged` or `none`; a checker,
+validator, interactor or `[check]` edit is reported as "judge changed".
 
 Fixture: `src/report/wire/fixtures/status.json`.
 
@@ -1794,7 +2236,26 @@ clock), `events.enqueue`, `delivery.write`, `stderr.write`,
   `3221225477`, `ntstatus` `status_access_violation`.
 - Worst cases serialised for every row of §3.7 (all caps full, every string
   at its maximum, `"`-heavy UTF-8 values, base64 values) stay within the
-  stated bounds; 10 000 planned executions within 64 KiB + 12 KiB × N.
+  stated bounds; *(judging, draft)* 10 000 planned executions of kind
+  `compare` within B.
+- *(judging, draft)* Worst-case vectors: a `judges[]` entry with a 4 096-byte
+  message of `"` and `\` characters, a message of control characters (base64
+  form) and a 4 097-byte message (truncated, digest of all bytes), each with
+  a 1 024-byte stderr diagnostic at its maximum; a `session` with 17 facts
+  at their maximum (both text fields at 256 escaped bytes, truncated at an
+  escape boundary) and every optional member set; a `roles[]` entry with 16
+  + 16 maximal paths, a failed build with 16 names and a captured header; a
+  `score` of 14 integer and 9 fractional digits; each within its row. For
+  every shape of the T formula, a full plan (the most tests the caps allow)
+  serialised with every entry at its worst stays within B; the report
+  reservation equals 2 × B; a plan with 2 × B > 256 MiB is refused before
+  admission. Near-cap vectors: 1 000 interactive tests with a validator
+  and a follow-up checker plus 5 378 hooks (2 × B = 268 423 168 B,
+  admitted) and plus 5 379 hooks (refused); kind `compare` at 10 000
+  executions (251 142 144 B, admitted).
+- *(judging, draft)* `score` encoding: 0 → `"0"`; 10⁻⁹ → `"0.000000001"`;
+  12.5 → `"12.5"`; 10¹³ → `"10000000000000"`; readers reject `"012"`,
+  `"1.50"`, `"1."`, `".5"`, `"-1"`, `"1e3"` and a JSON number.
 - A `report.json` with `schema` 2 is never pruned, identified from its
   prefix.
 
@@ -1803,6 +2264,167 @@ clock), `events.enqueue`, `delivery.write`, `stderr.write`,
 - The label of every verdict and build result is exactly its §2.8 entry;
   each job summary equals its template; `passed` with cleanup `Unverified`
   → "OK (cleanup not verified)".
+- *(judging, draft)* `presentation_error` → `PE` under display `cpf` and
+  `WA` "presentation error" under `judge-cf`, with byte-identical documents
+  apart from `target.check.display` and status 1 in both; the checker,
+  interactive and points summary templates; `CHECKER-FAILED` qualifiers per
+  class and role; `SCORE` with a full and an incomplete aggregate; `CE`
+  "checker build"; a judge message containing "accepted" is shown quoted
+  and no template contains "accepted" or "correct".
+
+### 9.6 Judging *(judging, draft)*
+
+Every row below is one named test. **Pure** rows are table-driven over
+injected records (no process, all three OSes); **real** rows run real judge
+programs on Linux and macOS (§9 platform scope; Windows asserts the
+refusal, status 10, for the same command lines). Each row asserts the
+check, the test verdict, the coverage of every execution of the test, the
+counts (§4.8) and the status (§5.2), and the derivation is repeated on the
+same records to show it is deterministic.
+
+#### 9.6.1 Batch judged tests (§2.11)
+
+| Id | Fixture | Expected |
+|---|---|---|
+| J-B01 | validator skipped by intent set before the test | B1; solution, checker `skipped{cancelled}`; status by cancellation |
+| J-B02 | role build failed: validator `skipped{build_not_succeeded}`; a `retention_budget` refusal earlier: `skipped{admission_closed}` | B2, `not_run{reason}` for each reason |
+| J-B03 | validator `not_started{create_failed}`; another with stdout `write_error` | B3, `infrastructure`; later runs `skipped{input_not_validated}` |
+| J-B04 | validator `not_started{cancelled_before_start}`; another stopped by intent | B4, `cancelled` |
+| J-B05 | real `testlib` validator exiting 3, killed by its deadline, and dying by a signal | B5 each, `validation` outcome `validation_failed`, stderr kept |
+| J-B06 | real `simple` validator exiting 1 | B6, outcome `invalid`; solution never started; status 5 |
+| J-B07 | real `simple` validator exiting 2, by a signal, at its deadline | B7 with reasons `exit_code`, `signal`, `wall_deadline` |
+| J-B08 | kind `compare` with a valid input; with a mismatch; with an invalid float answer | B8: exactly the §2.4/§2.5 results of the same test without a validator |
+| J-B09 | intent after the validator, before the solution | B9 |
+| J-B10 | solution `skipped{build_not_succeeded}`, `skipped{admission_closed}` | B10; checker skipped with the same reason |
+| J-B11 | solution `not_started{setup}`; solution with cleanup `incomplete` | B11; checker `skipped{not_eligible}` |
+| J-B12 | solution `transferred`; solution stopped by intent | B12; checker `skipped{cancelled}` or `skipped{not_eligible}` by §2.1 order |
+| J-B13 | intent between the solution's record and the checker's admission | B13 |
+| J-B14 | `retention_budget` refusal of an earlier run, then this test's checker | B14, `not_run{admission_closed}` |
+| J-B15 | intent while a real checker runs (cancel during the checker); checker `not_started{cancelled_before_start}` | B15, check `unchecked{checking_interrupted}` |
+| J-B16 | solution at its deadline, by a signal, exit 1, at its output cap, each with a checker that accepts | B16: the solution class, `diagnostic: true`, check `passed`, never success; with the checker `infrastructure`: `not_admitted{run_not_eligible}` |
+| J-B17 | checker `not_started{create_failed}`, checker with cleanup `incomplete` | B17 |
+| J-B18 | real `simple` checker exit 0 | B18 |
+| J-B19 | real `simple` checker exit 1 | B19 |
+| J-B20 | real `simple` checker exit 2, signal, deadline, own stdout cap (`Kill`) | B20 with reasons; never `wrong_answer`, never a zero score |
+| J-B21 | real `testlib` checker by a signal, at its deadline, at its own output cap | B21; the report is not read even when present |
+| J-B22 | `testlib` checker with cleanup `unverified` (injected) and a valid `accepted` report; `simple` checker exiting 0 with cleanup `unverified`; `simple` checker by a signal with cleanup `unverified` | B22, `unchecked`, status 4, report not read; the last B20 |
+| J-B23 | report read failing with injected `EIO`; reservation refusal for the extracted report | B23: `tests[].check` `check_error`, `judges[0].result` `not_read{extraction_failed}`, `judges[0].report.path` `null`, `infrastructure` |
+| J-B24 | report missing; a symlink to a valid report; a FIFO; mode `000` | B24 with each reason; the FIFO is never waited on |
+| J-B25 | report of 65 536 bytes (valid) and 65 537 bytes | the first extracted (65 536 bytes) and decided by its content; the second rejected before extraction: B25, `judges[].report.path` `null`, never infrastructure |
+| J-B26 | `encoding="koi8-r"`; undeclared cp1251 bytes; declared windows-1251 with byte `0x98`; invalid UTF-8 | B26 each |
+| J-B27 | unclosed element; a `<!DOCTYPE>` with an entity; a processing instruction; `&nbsp;` | B27 each |
+| J-B28 | root `verdict`; unknown `outcome`; `points` with `accepted`; `pctype` with `points`; a child element | B28 each |
+| J-B29 | `points` = `1e3`, `-1`, `+1`, `1.0000000001` (10 fractional digits), 19 significant digits, raw = scale + 10⁻⁹ | B29 each; `0`, raw = scale, 18 significant digits and 9 fractional digits accepted (J-B37) |
+| J-B30 | a valid `accepted` report with exit 4, 42, 255; `partially-correct` with `pctype` and exit `PC_BASE_EXIT_CODE + n` (both unsupported) | B30, `exit_unsupported` |
+| J-B31 | `partially-correct` with `pctype` and exit 0; exit 7 + `points` under `pass_fail` | B31 with `outcome_unsupported`, `points_not_enabled` |
+| J-B32 | exit 0 + `wrong-answer`; exit 1 + `accepted`; exit 7 + `fail` | B32, `disagreement` |
+| J-B33 | real testlib checker: `quitf(_ok)` | B33 |
+| J-B34 | `quitf(_wa)` with a cp1251 Cyrillic message | B34; message decoded to UTF-8, exactly 4 096 bytes kept when longer, `len` and `sha256` of the whole |
+| J-B35 | `quitf(_pe)`; the header's unexpected-EOF presentation error | B35, `presentation_error`, status 1 |
+| J-B36 | `quitf(_fail)`; `quitpi()` without points (header's unset-points failure) | B36, `declared_fail`, status 5 |
+| J-B37 | `quitp(12.5)` on scale 100; `quitp(0)`; `quitp(100)` | B37, `scored`, raw canonical |
+| J-B38 | orphans: checker `skipped{not_eligible}` after `exited_zero`; `skipped{input_not_validated}` after a valid input | `internal_error`, `result.internal.locus` test, 70 |
+| J-B39 | paths with spaces and Unicode in the workspace path, real `simple` and `testlib` checkers | arguments are the absolute private-directory paths of E §2.1; `passed` |
+| J-B40 | answer policy `none`: one answerless test, one with an answer | the first judge's `answer` file is empty, the second's equals the frozen answer; `tests[].answer` `absent` / `present` |
+| J-B41 | injected `ENOSPC` while staging `output` | checker `not_started{setup}`, B17, `infrastructure`; staged bytes released |
+| J-B42 | judge scratch: after the verdict the staged copies are gone and their bytes released; injected removal failure | `judge_scratch` warning, verdict unchanged |
+| J-B43 | a role build failing (C++ checker with a syntax error) | later builds and every test run `skipped{build_not_succeeded}`, `build_failed`, status 3, label `CE` "checker build" |
+| J-B45 | a real `testlib` checker writing a valid `accepted` report while the staged input and answer exceed `cwd_bytes` (configured small), and one that itself writes beyond `cwd_bytes` | the first: staged copies removed before measurement, no `CwdOverflow`, `passed`; the second: report read first, `passed`, then `CwdOverflow` and `cwd/` cleared (diagnostic only) |
+| J-B46 | a checker opening a declared asset by a relative path | `passed`; the asset staged at its relative path and removed with the scratch |
+| J-B47 | header provenance: one `testlib.h` beside the checker source (pinned bytes, other bytes); two captured `testlib.h`; one in another directory; none captured; a source with `#include <testlib.h>` (and `#  include <testlib.h>`) beside a captured header; a build with `-include other.h`, an `-I` to an external `testlib.h`, a conditional `#if 0` include and a wrapper compiler, each with a pinned candidate beside the source | `candidate` with `pinned` true / false; `not_identified{ambiguous}`, `{not_beside_sources}`, `{none}`, `{angle_include}`; the last four still `candidate` (the claim is candidate-only and the human output says "header candidate", never "compiled header"); a `testlib_header` warning except for a pinned candidate |
+| J-B48 | each role's build failing (checker, validator, interactor), and each with `not_started{create_failed}`, with tests and with zero selected tests | later builds coverage `skipped{build_not_succeeded}`, build result `skipped{build_not_succeeded}`, every test execution `skipped{build_not_succeeded}`; job `build_failed` (3), respectively `infrastructure` (10); zero tests: the same, never `no_tests` |
+| J-B49 | intent set while a role build runs (it is stopped), and intent set before a later build's admission after a failed build | the stopped build `cancelled`; every later build coverage `skipped{cancelled}` with build result `cancelled`, test executions `skipped{cancelled}` (cancellation precedes `build_not_succeeded`, §2.1); job `cancelled`, cancellation status; in the second case the failed build stays `failed` and the job is `cancelled` (row 3 precedes row 4) |
+| J-B44 | intent after the checker finished | completed verdict, `cancellation.phase: primary`, fact `not_attempted{cancelled}` |
+
+#### 9.6.2 Interactive tests (§2.12)
+
+| Id | Fixture | Expected |
+|---|---|---|
+| J-I01 | pair skipped by intent before admission | I1, `cancelled` |
+| J-I02 | pair `skipped{build_not_succeeded}`, `{admission_closed}`, `{input_not_validated}` | I2 (the last after B5–B7 decided) |
+| J-I03 … J-I15 | one closed record per session-verdict row of §2.12, in table order (OK, WA, PE, score, TLE by wall, TLE by peer allowance, OLE, RE by signal, RE by exit, `session_limit`, `idle`, `CheckerFailed`, `Unchecked`) | that row's test verdict and score; `check: null`; `class` the solution's class |
+| J-I16 | cancelled and infrastructure records | `cancelled`, `infrastructure`, no score |
+| J-I17 | a record violating an invariant | `internal_error{internal_policy_error}`, `session.verdict` `internal_policy_error`, `result.internal.locus` test, 70 |
+| J-I19 | cancel inside committed pair creation (injected gate): both runs `transferred` | I3: `cancelled`, `decided_by.kind = "transferred"`, facts `[cancel_requested]`, no step-0 error, follow-up checker `skipped{cancelled}`, cleanup reaps both later without changing the report |
+| J-I20 | cancel inside the committed creation of the follow-up checker after I accepted | I3: `cancelled`, `decided_by` `transferred` role `checker`, c coverage `transferred` |
+| J-I18 | follow-up checker `Started`, `NotStarted`, `CheckerSkipped{NotEligible}`, `CheckerSkipped{Cancelled}`; mode `interactor` | coverage `started`, `not_started`, `skipped{not_eligible}`, `skipped{cancelled}`; no checker execution planned |
+
+#### 9.6.3 Reducer `interactive_v7` (checkers design §§6.1–6.2)
+
+Pure, over constructed closed records, in every checking mode where the
+row allows it. Ids cite the design's normative statements one by one.
+
+| Id | Design statement | Expected |
+|---|---|---|
+| J-R01 | §6.1 `obs_seq` unique, record order | facts serialised in strictly increasing `obs_seq` |
+| J-R02 | §6.1 `ValidationDone` attributed to its judge's `RootExited` | its `decision_pos` equals that `RootExited`'s |
+| J-R03 | §6.1 `AuthorityComplete` attributed to its completing `ValidationDone` | equal `decision_pos` |
+| J-R04 | §6.2 late-read report | I rejects; S's own-limit stop is observed after I's exit but before I's report is read → WA (I's exit precedes) |
+| J-R05 | §6.1 fact set exhaustive | each of the ten fact kinds round-trips (encoder, decoder, Python oracle); any other kind is rejected by the decoder |
+| J-R06 | §6.1 item 1 | exactly one `Started`/`NotStarted` per role; checker modes: one of `Started`/`NotStarted`/`CheckerSkipped`; mode `interactor`: no checker fact |
+| J-R07 | §6.1 item 2 | one `StopRequested` per role, the first trigger |
+| J-R08 | §6.1 item 3 | each teardown stop is preceded by its decisive fact, `CancelRequested` or `Infrastructure` |
+| J-R09 | §6.1 item 4 | every started role has one `RootExited`, then one `CleanupResult` |
+| J-R10 | §6.1 item 5 | every started judge has exactly one `ValidationDone`, after its `CleanupResult` |
+| J-R11 | §6.1 rule 5.1 | judge `Stopped`, or `Natural` with a signal (and a `simple`-style exit outside 0/1) → `NotRead`; the stop or crash decides |
+| J-R12 | §6.1 rule 5.2 | cleanup `Incomplete` → `NotRead`, verdict `infrastructure` |
+| J-R13 | §6.1 rule 5.3 | cleanup `Unverified` → `Unverified`, nothing read, for the interactor and for a follow-up checker of either profile (a `simple` checker exiting 0 included); a crash with `Unverified` → `NotRead` (rule 5.1 first) |
+| J-R14 | §6.1 rule 5.4 | `Confirmed` → `Ok(result)` or `Failed(class)`; exit 3 + `fail` → `Failed(DeclaredFail)`; I's `Ok` outside its row → `Failed(ProtocolUnsupported)`, never for `DeclaredFail` |
+| J-R15 | §6.1 item 6 | the checker decision is taken once, after both `CleanupResult`s and I's `ValidationDone`: eligible → `Started`/`NotStarted`; `CheckerSkipped{Cancelled}` with a `CancelRequested`; else `CheckerSkipped{NotEligible}` |
+| J-R16 | §6.1 item 7, mode `interactor` | `AuthorityComplete` iff `ValidationDone{I, Ok(Passed \| Scored)}`, immediately after it, with its result |
+| J-R17 | §6.1 item 7, checker modes | `AuthorityComplete` iff I `Ok(Passed)` and checker `Ok(r)`, with r |
+| J-R18 | §6.1 item 8 | one `Infrastructure` fact; later conditions increment `suppressed` (saturating `u32`) |
+| J-R19 | §6.1 bound, per fact | the largest instance of every variant: ≤ 512 bytes without text; each text ≤ 256 bytes after escaping, `truncated: true`, cut at an escape boundary |
+| J-R20 | §6.1 bound, record | 17 maximal facts ≤ 13 056 bytes ≤ 16 KiB; ≤ 17 facts in every generated record |
+| J-R21 | §6.1 canonical `Scored` | ≤ 20 characters, no leading or trailing zeroes |
+| J-R22 … J-R37 | §6.1 same-wakeup order: the 16 adjacent pairs of `NotStarted` < `RootExited` < `CleanupResult` < `ValidationDone` < `AuthorityComplete` < `CheckerSkipped` < `Started` < `StopRequested` (`OwnLimit(Wall)` < `OwnLimit(DialogueOutput)` < `PeerAllowanceExpired` < `SessionLimit` < `Idle` < `Teardown(PeerDecided)` < `Teardown(Cancel)` < `Teardown(Infrastructure)`) < `CancelRequested` < `Infrastructure` | each pair delivered in one wakeup in reverse order is recorded in the stated order |
+| J-R38 | §6.1 role order | S < I < checker, two pairs |
+| J-R39 | §6.1 prerequisites | a fact delivered in the same wakeup as its prerequisite is recorded after it (including `NotStarted{CancelledBeforeStart}` after `CancelRequested`) |
+| J-R40 | §6.1 exits before timers | an exit available at a timer wakeup is ordered first |
+| J-R41 | §6.1 item 2 + order | wall and dialogue cap of one role in one wakeup → only `OwnLimit(Wall)` |
+| J-R42 | §6.1 closure, determinism | reduction only on a closed record; the same record, mode and scoring always give the same verdict |
+| J-R43 … J-R53 | §6.2 decisive table, one per row in table order | that row's verdict |
+| J-R54 | §6.2 not decisive: `Teardown` stops | no effect on the verdict |
+| J-R55 | §6.2 not decisive: `ValidationDone{_, NotRead}` | no effect |
+| J-R56 | §6.2 not decisive: `Ok(_)` other than I's rejection | no effect without `AuthorityComplete` |
+| J-R57 | §6.2 not decisive: `NotStarted{_, CancelledBeforeStart}` | `cancelled` through steps 3–4 only |
+| J-R58 | §6.2 not decisive: `CheckerSkipped` | no effect |
+| J-R59 | §6.2 secondary I exit after a decisive S fact | evidence only |
+| J-R60 … J-R67 | §6.2 step 0, one mutation each: an emission item violated; `CheckerSkipped` inconsistent; `ValidationDone` inconsistent; `AuthorityComplete` missing or unjustified; `Stopped(n)` not naming the role's stop; `CancelledBeforeStart` without an earlier `CancelRequested`; two decisive facts at one `decision_pos`; 18 facts | `internal_policy_error`, never success |
+| J-R68 | §6.2 step 1 | `Infrastructure` decides even after an earlier decisive fact |
+| J-R69 | §6.2 step 2 | of two decisive facts the smaller `decision_pos` decides |
+| J-R70 | §6.2 step 3 | `CancelRequested` before d → `cancelled`; after d → d's verdict |
+| J-R71 | §6.2 step 4 without cancellation | `AuthorityComplete{Passed}` → OK, `{Failed}` → WA/PE, `{Scored}` → score |
+| J-R72 … J-R96 | §6.2 coverage table, one per row in table order (25 rows) | that row's verdict |
+| J-R97 … J-R111 | §6.2 cancellation in every mode (`interactor`, `checker`, `interactor+checker`) × {before d, after d, no d and before execution completion, execution complete but before `AuthorityComplete`, after both} | `cancelled`, d's verdict, `cancelled`, `cancelled`, the `AuthorityComplete` result |
+| J-R112 … J-R117 | §6.2 every `CheckerFailClass` | `DeclaredFail`, `ProtocolUnsupported`, `ReportInvalid`, `ArtefactInvalid`, `Crashed` through a session; `TestDataError` through the validator before a session (B5) |
+| J-R118 | §4, §6.3 points under `pass_fail` | I's points → `CheckerFailed{ProtocolUnsupported}`, `outcome_unsupported` |
+| J-R119 | §6.3 I's score under `checker` or `interactor+checker` | `CheckerFailed{ProtocolUnsupported}`, `outside_authority`, attributed to I's exit |
+| J-R120 | §6.3 the two checker modes | the same records reduce identically |
+| J-R121 | property: records generated from the emission contract over a small model (all interleavings) | never step 0, always a defined verdict |
+| J-R122 | property: a record mutated to violate exactly one invariant | always step 0 |
+| J-R123 | property | no `passed` or score without `AuthorityComplete` |
+| J-R124 | property | fact count ≤ 17 and serialized size ≤ 16 KiB |
+| J-R125 | §6.2 completeness | `checking_interrupted` is never produced for a session |
+| J-R126 | §6.1 rule 5.4 as amended (§10) | `ValidationDone{_, NotRead}` after a `Confirmed` cleanup of a naturally exited judge with an `Infrastructure{judge_extraction}` fact in the same wakeup → valid, `infrastructure`; with an earlier `Infrastructure` fact (from S's cleanup) and that fact's `suppressed` incremented, no second fact → valid, `infrastructure`, fact count within 17; with no `Infrastructure` fact at or before it → step 0, `internal_policy_error`; a record with both `Started` and `CheckerSkipped` for the checker → step 0 |
+
+#### 9.6.4 Session producers (real, Linux and macOS)
+
+| Id | Fixture | Expected |
+|---|---|---|
+| J-P01 | real testlib interactors: adaptive guess-the-number (accepts), one that rejects, one that scores | OK, WA, score; `session.facts` closed and within the bound |
+| J-P02 | interactor deletes `tout`; writes 64 MiB + 1 byte to it; replaces it by a symlink; sets its mode to `000` | rejected before extraction: `checker_failed`, `artefact_invalid`, `tout_missing` / `tout_too_large` / `tout_not_regular` / `tout_unreadable`, attributed to the interactor; nothing extracted, no infrastructure |
+| J-P03 | interactor cleanup `unverified` (injected); a `simple` follow-up checker exiting 0 with cleanup `unverified` | `unchecked{checking_unverified}`, `tout` and report not read; for the checker, no `AuthorityComplete` |
+| J-P04 | follow-up checker, mode `checker` | receives `tout` (copy) in the output position, its own profile arguments |
+| J-P05 | solution TLE while the interactor waits; the interactor then exits on EOF with WA | TLE |
+| J-P06 | solution dies by `SIGPIPE` after the interactor accepted, `early_reader_close` true and false | OK with `sigpipe_normalised: true`; RE otherwise |
+| J-P07 | peer allowance expiry each way; `idle_s = 1` with both roots sleeping | TLE "did not exit after the interactor finished" / `checker_failed{crashed}`; `idle` with the `idle` member |
+| J-P08 | direct mode | dialogue counters `null`, `transcript.kind = "unavailable"`, `idle_s` refused by configuration |
+| J-P09 | seeds `env`, `argv`, `none`, and `solution_seed = "env"` | each value in that role's environment or last argument only, recorded in `session.seeds`; `none` recorded as not seed-controlled |
+| J-P10 | transcript of a passed test, of a failed test, with gaps | `removed`, `complete`, `gapped` with exact counts; reservation 35 684 864 B per session converted at release |
+| J-P11 | seeded rerun of a failing session, deterministic and nondeterministic | `rerun.reproduced` true / false |
+| J-P12 | `cpf interactor-test`: a passing `good` list; a `bad` solution that passes | success; the command fails |
+| J-P13 | interactive, `cwd_bytes` configured small: an interactor writing a valid `accepted` report and a large `tout` (mode `interactor`), and the same with a follow-up checker (mode `checker`) | `tout` and report extracted to `judge/` before the interactor's `cwd/` is measured and cleared (`CwdOverflow` diagnostic); OK in mode `interactor`; in mode `checker` the checker receives the extracted `tout` and decides; injected extraction failures, each → verdict `infrastructure`, the closed record passes step 0, no `AuthorityComplete`, never `artefact_invalid` or `internal_policy_error`: (a) mode `interactor`, reservation refusal for the interactor's `tout` → `ValidationDone{interactor, NotRead}` reason `extraction_failed` + `Infrastructure{judge_extraction}`, no checker fact; (b) mode `checker`, write error for the interactor's report → the same, and the checker `CheckerSkipped{NotEligible}` (coverage `skipped{not_eligible}`); (c) mode `checker`, intent set before (b)'s checker decision → `CheckerSkipped{Cancelled}`, verdict still `infrastructure` (step 1); (d) mode `checker`, interactor accepted, the follow-up checker started and its report extraction fails → the checker keeps `Started`, `RootExited`, `CleanupResult`, gets `ValidationDone{checker, NotRead}`, no `CheckerSkipped`; (e) S's cleanup `Incomplete` already recorded `Infrastructure`, then the interactor's extraction fails → no second fact, `suppressed` = 1 |
 
 ## 10. Amendments to other documents
 
@@ -1931,6 +2553,67 @@ Amendments applied to the other documents with this contract.
 - **Checkers design** (CLI exit codes "belong to the report transport"): no
   text change; §5 provides them.
 
+*(judging, draft)* Amendment text for the other documents, applied when
+this amendment is approved (the configuration and execution contracts carry
+theirs in place):
+
+- **S §6.1** (layout), add: `inputs/roles/<role>/...` "captured role files
+  (configuration contract §9.1.3)"; for a judge run, `<run-id>/cwd/` is its
+  private directory with the staged `input`, `output`, `answer`, `tout` and
+  the judge's `report` (execution contract §2.1); `<run-id>/transcript/`
+  "session transcript of a relay-mode interactor run".
+- **S §6.4**, add to the per-job accounting list: "judge staging copies and
+  session transcripts (execution contract §5.4); the report reservation is
+  2 × the report bound of the plan (report contract §3.7)".
+- **S §6.5**, add the fact field `judge`: the judge fingerprint (64
+  lowercase hex characters, configuration contract §9.1.3), absent for a
+  problem without a role; an absent field is valid and means none. The
+  verdict summary takes every §2.7 token.
+- **S §7**, add after source capture: "Then each declared role's captured
+  files are copied into `inputs/roles/<role>/` with the same rules
+  (configuration contract §9.1.3); the judge fingerprint is streamed from
+  the copied bytes."
+- **S §8.1**, replace "Whether a test without an answer can pass is decided
+  by the comparator and job tasks." by "How a test whose answer is omitted
+  is judged is decided by `[check] answer` (configuration contract §9.1.4):
+  omitted means deliberately none, a zero-byte file is legitimately empty,
+  and an `answer` naming a missing file is an unhealthy entry."
+- **S §9**, add: "`problem.toml` `[check]` is not decoded by the record
+  classification; configuration validates it (configuration contract
+  §9.1)."
+- **Workspace design §3.2**, add the judge fingerprint (configuration
+  contract §9.1.3) to the run fact and its comparison in `status` (§6.1
+  `judge`).
+- **Compare spec §8**, replace "needs its checker (initial feature
+  release)" by "needs its checker (configuration contract §9.1)".
+- **S §6.4** (child output), add: "For a judge run, `cwd/` is measured only
+  after the judge's report and `tout` were read and its staged copies
+  removed; staged files never count towards `cwd_bytes` (execution contract
+  §2.1)."
+- **Checkers design §6.1 rule 5** (needs ratification): add to rule 5.4
+  "if reading or extracting the judge's report or `tout` fails on cpf's
+  side (a reservation refusal or an I/O error on an artefact that passed
+  the presence, type and size checks; execution contract §2.1), the
+  outcome is `NotRead` and an `Infrastructure` fact is recorded in the same
+  wakeup (item 8), or, when the record already has its one
+  `Infrastructure` fact, that fact's `suppressed` count is incremented and
+  no second fact is recorded"; step 0 accepts `NotRead` after a
+  `Confirmed` cleanup of a naturally exited judge iff the record has an
+  `Infrastructure` fact at or before that `ValidationDone`'s wakeup. Item 1
+  and item 6 are unchanged: only a planned follow-up checker that never
+  started gets `CheckerSkipped` (`Cancelled` before `NotEligible`).
+  The fact payload's detail kind gains `judge_extraction`.
+- **Checkers design §2.1** (needs ratification, the design being frozen):
+  "records the hashes of its source and of the header it compiled
+  against" is replaced by "records the hashes of its source and of a
+  **candidate** header: the single captured `testlib.h` beside every
+  source, which a quoted include would resolve to first; the candidate is
+  not proof of the header compiled, and without one the reason is
+  recorded" (execution contract §2.1), since cpf does not observe the
+  compiler's file accesses and captures no build trace.
+- **S §6.1** (layout), also add `<run-id>/judge/report`, `judge/tout`
+  "extracted judge artefacts (execution contract §2.1), outside `cwd/`".
+
 ## 11. Decisions
 
 Decided (user, 2026-11-21):
@@ -1964,5 +2647,35 @@ Decided (user, 2026-11-21):
   absolute 5 s final-drain deadline from the final-batch enqueue instant,
   past which the unwritten tail is lost, visible only as a stream not
   ending with the summary (§8).
+
+*(judging, draft)* Settled with the judging amendment (each can be
+revisited before schema 1 closes):
+
+- **J1** Judging extends schema 1 in place (§3.6), no schema 2.
+- **J2** At most 1 000 judged tests per job, and no plan with a report
+  reservation above 256 MiB (C §8.2): with 4 KiB messages, 1 KiB
+  diagnostics and 16 KiB sessions a judged test costs up to 83 KiB with
+  its executions; the test cap keeps ordinary judged plans far below the
+  reservation cap, which bounds every plan, hook-heavy ones included.
+- **J3** Kind `compare` keeps `unchecked{no_answer}` for an answerless
+  test; the `answer` policy applies to judges only (C §9.1.4).
+- **J4** The three answer states are encoded without a new `tests.toml`
+  key: omitted, zero-byte, and a missing file as an unhealthy entry
+  (C §9.1.4).
+- **J5** A checker still runs after a solution failure, as a diagnostic
+  that never decides (§2.11 B16), as comparison does.
+- **J6** The validator runs first; a test whose input is not valid admits
+  no other run (§2.1 `input_not_validated`).
+- **J7** A batch `testlib` checker with cleanup `Unverified` is not read
+  (`unchecked`), the rule checkers design §6.4 states for sessions.
+- **J8** Builds run in order and a failed build skips the later ones (§2.3).
+- **J9** An interactive test has `check: null`; its decision is the
+  session (§2.12); `internal_policy_error` is an internal failure (70).
+- **J10** Seeds are drawn per session from the OS random source, decimal
+  `u64` (C §9.1.6); the display profile is a per-problem `[check]` key.
+- **J11** A judge's report and `tout` are extracted to `judge/` outside
+  `cwd/` before the cwd measurement; staged copies are removed right after
+  that extraction, and the transcript and extracted `tout` of a passed test
+  once its verdict is derived; extracted reports are always kept (E §2.1).
 
 No open decisions remain.

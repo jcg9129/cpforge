@@ -19,6 +19,15 @@ is settled but not yet implemented. References labelled *workspace design* point
 `[status] values` (§1.1, §7.5) for `cpf mark` (storage contract §5.9).
 Marked *(organisation, draft)*.
 
+**Judging amendment: draft.** The `problem.toml` table `[check]` (§9.1):
+judging kind, role specs and their capture, answer policy, scoring,
+display profile, interactive settings and the `interactor-test`
+declaration; run counts and the judged-test cap (§8.2); problem kinds
+(§9). Amended content is marked *(judging, draft)*. References labelled
+*checkers design* point to `../design-checkers.md`; *report contract*,
+*execution contract* and *storage contract* to the documents in this
+directory.
+
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
 time and captured output; it is not a security boundary (design §1). The only
@@ -103,6 +112,12 @@ with overlay keys) but allowed as command names (§2).
 
 Keys from later designs (`submit`, `archive`, `check` outside `problem.toml`)
 are unknown keys in this version.
+
+*(judging, draft)* `problem.toml` `[check]` is not a configuration layer:
+it is a table of the problem record whose schema this contract owns
+(§9.1). It is read only from the selected problem's `problem.toml`, is
+validated in the phases of §3 with ordinary diagnostics (file
+`problem.toml`, key path `check.…`), and never appears in layers 1–3.
 
 ### 1.2 Discovery
 
@@ -864,6 +879,28 @@ repeat = 5
 - Planned runs = builds + tests × repeats + hooks, computed with checked
   arithmetic in phase 3; more than **10 000** is a plan error (execution contract §6.2
   report bound).
+- *(judging, draft)* **Judged plans** (`cpf test` on a problem with a
+  `[check]` role, §9.1). Every role run and role build is a planned run
+  and counts towards the 10 000:
+  - builds: the solution build (if the target has one) and one **role
+    build** per built role whose language has a build stage (§9.1.2), in
+    the order solution, checker, validator, interactor;
+  - per selected test, in test-major order: the validator run (if a
+    validator is declared), then the solution run, then the checker run
+    (kind `checker`); for kind `interactive`: the validator run (if
+    any), the solution run and the interactor run (one session), then the
+    follow-up checker run (checking `checker` or `interactor+checker`).
+    A test therefore plans 1–3 runs (batch) or 2–4 runs (interactive);
+  - hooks as above.
+
+  A **judged test** is a selected test of a problem whose `[check]`
+  declares a checker, a validator or kind `interactive`. A job with more
+  than **1 000** judged tests is a plan error ("at most 1 000 tests per
+  job on a problem with a checker, validator or interactor; select fewer
+  with `--case`"), and so is a plan whose report reservation (report
+  contract §3.7: 2 × the report bound of the plan) exceeds 256 MiB. Both
+  are phase-3 errors (exit 7), checked after the run count, before
+  admission.
 
 ### 8.3 Hooks
 
@@ -942,18 +979,29 @@ enabled = true                         # master switch, default true
 | Operation | batch | answer | interactive | multi-file | unknown |
 |---|---|---|---|---|---|
 | list, show, switch to, `config show` | ✓ | ✓ | ✓ | ✓ | ✓ |
-| build, run, test; `cmd` with `needs_build` / `for_each_test` | ✓ | – | initial feature release | – | – |
+| build, raw `cpf run`; `cmd` with `needs_build` | ✓ | – | ✓ *(judging, draft)*: the solution target only; raw `cpf run` connects the solution to the console, without an interactor | – | – |
+| `cpf test` | ✓ | – | ✓ *(judging, draft)*: needs `[check] kind = "interactive"` (§9.1) | – | – |
+| `cmd` with `for_each_test` | ✓ | – | – (a test input is not a dialogue) | – | – |
 | `check` against a recorded answer (design §5.4) | – | ✓ | – | – | – |
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 Refused operations say "unsupported in this version".
-Until judging support is implemented, `build`, `run`, `test` and `cmd` with
-`needs_build` / `for_each_test` reject `problem.toml` keys `check.kind`
-(unless `"compare"`), `check.checker`, `check.validator`, `check.interactor`,
-`check.interactive` (including all children), `check.answer` and `check.scoring`
-(on presence, even with default values) as configuration planning errors
-before admission, saying "unsupported in this version".
+*(judging, draft)* The **effective kind** is `interactive` when
+`[problem] kind = "interactive"` or `[check] kind = "interactive"`, else
+the `[problem] kind` (default `batch`). `[check]` is the execution-affecting
+declaration and the `[problem] kind` tool field is metadata (storage
+contract §3), so `[check] kind = "interactive"` on a problem whose kind is
+absent or `batch` is interactive; `[problem] kind = "interactive"` with a
+`[check] kind` other than `interactive` is a phase-2 error for `cpf test`
+("interactive problem needs `[check] kind = \"interactive\"` and an
+interactor"). A `[check]` on a problem of kind `answer`, `multi-file` or an
+unknown kind changes nothing: their refused operations stay refused.
+A version that does not implement a part of §9.1 rejects its keys on
+presence (even with default values) for `build`, `run`, `test` and `cmd`
+with `needs_build` / `for_each_test`, as a configuration planning error
+before admission saying "unsupported in this version", and never judges
+such a problem with the comparator instead.
 A grader-linked task whose local grader is one ordinary program (§6.2 file
 roles) is `batch`:
 the contestant implements an interface, but execution is batch. `multi-file`
@@ -961,6 +1009,270 @@ stays refused and is not reinterpreted. Unknown kind strings
 are preserved in `problem.toml`, never rewritten. `check` compares the
 user-recorded candidate answer with the recorded reference; no build or run
 is involved.
+
+### 9.1 Judging: `[check]` *(judging, draft)*
+
+`[check]` and its subtables live in `problem.toml`, beside `[config]`
+(§1.1). The storage record classification of `problem.toml` (storage
+contract §9) does not decode them: an invalid `[check]` is a configuration
+diagnostic (§3.2), never a `malformed` problem record, so the problem stays
+listable and selectable. Every command that loads the selected problem's
+configuration validates it (phases 1–2; `cpf config check` included);
+`cpf config show` prints it as the member `check`, with defaults, in the
+§10 mapping. Fetch never writes `[check]`, and no role spec, path or
+argument is ever taken from fetched data (design §7).
+
+Batch problem with a checker and a validator:
+
+```toml
+[check]
+kind = "checker"                 # "compare" (default) | "checker" | "interactive"
+checker = { sources = ["checker.cpp"], support_files = ["testlib.h"], language = "cpp", profile = "testlib" }
+validator = { sources = ["validator.py"], language = "python", profile = "simple" }
+answer = "file"                  # "file" (default) | "none"
+scoring = { points = true, scale = 100, aggregation = "sum" }   # default "pass_fail"
+display = "cpf"                  # "cpf" (default) | "judge-cf"
+```
+
+Interactive problem (every key of `[check.interactive]` with its default
+where it has one):
+
+```toml
+[check]
+kind = "interactive"
+
+[check.interactive]              # required iff kind = "interactive"
+interactor = { sources = ["interactor.cpp"], support_files = ["testlib.h"], language = "cpp", profile = "testlib", seed = "env" }
+checking = "interactor"          # required: "interactor" | "checker" | "interactor+checker" (then `checker` is required)
+mode = "relay"                   # "relay" (default) | "direct"
+idle_s = 0                       # 0 (default): watchdog off
+early_reader_close = false
+interactor_allowance_s = 1.0
+peer_allowance_s = 1.0
+solution_seed = "none"           # "none" (default) | "env"
+
+[check.interactor_test]          # optional; used by `cpf interactor-test`
+good = [{ sources = ["solutions/ok.cpp"], language = "cpp" }]
+bad = [{ sources = ["solutions/wa.cpp"], language = "cpp" }]
+```
+
+#### 9.1.1 Keys
+
+Every key not listed is a phase-1 error naming it; `check.interactor`
+(outside `[check.interactive]`) is such an unknown key.
+
+| Key | Type | Default | Rules |
+|---|---|---|---|
+| `kind` | string | `"compare"` | `compare`: the built-in comparator of `compare` (§1.1, compare spec); `checker`: the `checker` judges every test; `interactive`: one session per test (checkers design §§5–6) |
+| `checker` | role spec | – | required iff `kind = "checker"`, or `kind = "interactive"` with `checking` `checker` or `interactor+checker`; present otherwise → phase-2 error |
+| `validator` | role spec | – | optional with every kind |
+| `answer` | string | `"file"` | `"file"` or `"none"` (§9.1.4); `"none"` with kind `compare` → phase-2 error |
+| `scoring` | `"pass_fail"` or table | `"pass_fail"` | table `{ points, scale, aggregation }`: `points = true` required (`false` is an error: write `"pass_fail"`), `scale` an integer 1–10⁹, `aggregation` `"sum"` (default) or `"min"`; a table with kind `compare` → phase-2 error |
+| `display` | string | `"cpf"` | `"cpf"` or `"judge-cf"` (report contract §2.8); display only, never a stored result |
+| `interactive` | table | – | required iff `kind = "interactive"`; present otherwise → phase-2 error |
+| `interactive.interactor` | role spec | required | profile `testlib` only |
+| `interactive.checking` | string | required, no default | `interactor`, `checker`, `interactor+checker` (checkers design §6.3) |
+| `interactive.mode` | string | `"relay"` | `relay` or `direct` (checkers design §5.2) |
+| `interactive.idle_s` | duration or `0` | `0` | the number `0` turns the watchdog off; any other value follows §7.1, so one that rounds to 0 ms is an error; non-zero with `mode = "direct"` → phase-2 error |
+| `interactive.early_reader_close` | boolean | `false` | checkers design §6.5 |
+| `interactive.interactor_allowance_s` | duration | 1 s | §7.1 |
+| `interactive.peer_allowance_s` | duration | 1 s | §7.1 |
+| `interactive.solution_seed` | string | `"none"` | `none` or `env` (§9.1.6) |
+| `interactor_test` | table | – | only with `kind = "interactive"` (§9.1.7) |
+| `interactor_test.good`, `.bad` | arrays of solution specs | `[]` | §9.1.7 |
+
+#### 9.1.2 Role specs and their stages
+
+A **role spec** is an inline table, built from source or prebuilt:
+
+| Field | Type | Rules |
+|---|---|---|
+| `sources` | array of problem-relative paths | built roles: required, non-empty; the §6.2 phase-1 path rules of `sources` (duplicates by the same rule) |
+| `support_files` | array of problem-relative paths | built roles; default `[]`; §6.2 rules; a path in both lists → phase-2 error |
+| `language` | language name | built roles: required; a language of the effective configuration (phase 2) |
+| `entry` | string | built roles, optional; the language `entry` rules (§6.4); default the language's `entry` |
+| `program` | problem-relative path | prebuilt roles: required; the §6.2 path rules; exclusive with `sources`, `support_files`, `language` and `entry` |
+| `profile` | string | required: checker `testlib` or `simple`; validator `testlib` or `simple`; interactor `testlib` |
+| `deadline_s` | duration | optional, §7.1; not allowed on the interactor (its deadline is derived, checkers design §5.6) |
+| `stdout_cap`, `stderr_cap` | size | optional, §7.1; `stdout_cap` not allowed on the interactor (its stdout is the dialogue, capped by checkers design §5.5) |
+| `seed` | string | interactor only: `none` (default), `env` or `argv` (§9.1.6) |
+| `assets` | array of problem-relative paths | optional, default `[]`; files the judge opens at run time by a relative path (checkers design §2.4); the §6.2 path rules; captured with the role and staged into the private directory at the same relative path (execution contract §2.1); a first component equal to `input`, `output`, `answer`, `tout`, `report` or `transcript` (compared as for duplicates) → phase-2 error; a path also in `sources`, `support_files` or `program` → phase-2 error (a file is captured once) |
+
+Unknown fields are phase-1 errors. The role's **effective stages** are
+resolved like the target's, with these differences:
+
+- **Built role**: the build stage is the language's build stage composed
+  from §6.1 rows 1–3 only (no profile row 4, no problem row 5, no CLI row
+  6); `{sources}` / `{source}` expand to the role's captured sources
+  (§9.1.3), `{artifact}` / `{artifact_dir}` to the role build's fresh
+  output root (storage contract §6.1), `{entry}` to the role's effective
+  entry. A language without a build stage gives a build-free role (no
+  role build). The run stage is the language's run stage from rows 1–3,
+  then the role spec's `deadline_s`, `stdout_cap` and `stderr_cap` as the
+  highest row; `--deadline` never applies to roles.
+- **Prebuilt role**: the run stage is `argv = [<captured program>]` with
+  the run-stage defaults (execution contract §5.5) and the role spec's
+  `deadline_s` and caps; the environment is the §4.3 baseline.
+- **Profile arguments** (execution contract §2.1) are appended to the
+  role's run `argv` (or to shell `args`, §5.3) after expansion; they are
+  never expanded and never rebased.
+- A composed role stage whose `cwd` is not `{ selector = "run" }` is a
+  phase-2 error: the run's fresh `cwd/` is the role's **private
+  directory** (execution contract §2.1). So is a role stage that uses
+  `{problem_dir}`, `{workspace}`, `{test_input}`, `{test_answer}` or
+  `{iteration}`; `{problem_id}` is allowed.
+- The interactor's deadline is the solution run's effective deadline plus
+  `interactor_allowance_s`; the session deadline is the later of the two
+  plus 1 s (checkers design §5.6).
+- Local limits (§7.2) of the composed role stages are validated in phase 3
+  like the target's: a limit the platform cannot enforce is an error.
+
+#### 9.1.3 Role capture
+
+Roles are frozen with the job, like the target's captured files (storage
+contract §7):
+
+- A built role's captured files are its `sources`, then its
+  `support_files`, then its `assets`; a prebuilt role's are its `program`
+  then its `assets`. Each gets the §6.2 phase-3 checks (existing regular
+  file, no link component, outside reserved trees, same-file aliases
+  within the role).
+- At freezing, after the target's captured files, each role's files are
+  copied into `inputs/roles/<role>/` (`<role>` is `checker`, `validator`
+  or `interactor`) with their problem-relative paths, by the storage
+  contract §7 copy rules (regular files only, exclusive creation, counted
+  in the job budget); a prebuilt program's copy is made executable (Unix
+  mode `0700`). A collision or copy failure is a capture failure: the job
+  is refused (class `workspace`, exit 8) and never ready.
+- Every stage of the job uses the copies, never the originals. A role
+  build is a source-consuming stage: the accident guard (storage contract
+  §7) applies to it and the role's capture check (`checked` or
+  `unchecked{shell_stage}`) is recorded per role (report contract §4.4).
+- The capture manifest (report contract §4.2) also lists every role's
+  captured files with full values.
+- **Judge fingerprint**: SHA-256 over a byte string in the conventions of
+  the workspace design §3.2 `source` fingerprint (little-endian `u64`,
+  length-prefixed byte strings, problem-relative paths): the byte string
+  `"cpf-fp-judge-v1"`; the report member `target.check` (report contract
+  §4.3) in the report contract's §3.1 encoding with its `display` member
+  removed (display never changes a result); then for each declared role in
+  the order checker, validator, interactor: a tag byte `0` = absent or `1`
+  = present, and when present the role token, the profile token, a tag
+  byte `0` = built or `1` = prebuilt, and:
+  - the captured files (count, each path and content, ascending path
+    order), so a changed byte changes it;
+  - the role spec's lists in configured order, each as count then paths:
+    `sources`, `support_files`, `assets` (built), or `program` and `assets`
+    (prebuilt), so moving a file between lists changes it;
+  - built: the language name, the effective entry (tag byte `0` = none or
+    `1` then the entry), the composed role build stage (tag byte `0` =
+    build-free or `1` then its covered settings) and the composed role run
+    stage, each with the covered build settings of the `source`
+    fingerprint (command, `cwd`, `env_remove`, `env`, merged and validated,
+    not expanded);
+  - the role spec's `deadline_s`, `stdout_cap`, `stderr_cap` (tag byte
+    `0` = unset or `1` then the value as `u64` microseconds or bytes) and
+    `seed` token, which change a judge's outcome.
+
+  Program resolution and toolchains are not covered, as for `source`. It is
+  computed from the copied bytes during freezing and is `null` for a
+  problem without a role. `cpf status`
+  computes the same value over the current `[check]` and files (no tool
+  is probed).
+
+#### 9.1.4 Answers
+
+The **answer states** of a test (checkers design §3) are three, and
+`tests.toml` already distinguishes them without a new key (storage
+contract §8.1):
+
+| State | `tests.toml` | Treatment |
+|---|---|---|
+| deliberately none | `answer` omitted | depends on `[check] answer` (below) |
+| legitimately empty | `answer` names a zero-byte file | a present answer, empty |
+| absent by accident | `answer` names a file that does not exist | an unhealthy entry: the job is refused before any run (storage contract §8.1, exit 8); never an answer state |
+
+`[check] answer` is the problem-level policy for the first state:
+
+- `"file"` (default): with kind `checker` or `interactive`, a selected
+  test whose answer is deliberately none is a phase-3 error naming the
+  tests (exit 7), before anything runs. With kind `compare` the existing
+  rule stays: such a test is `unchecked{no_answer}` (compare spec §1.1,
+  report contract §2.4), because the comparator cannot run without an
+  answer while a checker could misjudge a fabricated one.
+- `"none"`: an explicit author assertion that the problem's judges accept
+  an empty answer. A test whose answer is deliberately none gets an empty
+  file in every judge's answer position; a test with a present answer
+  gets that answer. Rejected with kind `compare` (phase 2).
+
+#### 9.1.5 Scoring
+
+`scoring = "pass_fail"` judges pass/fail only; a judge that reports
+points is then `ProtocolUnsupported` (checkers design §4). A points table
+enables scores: per-test scores, fixed-point aggregation, `incomplete`
+and `no_tests` follow checkers design §4 and report contract §2.13. With
+kind `interactive`, the authority that scores is `checking`'s (checkers
+design §6.3): the interactor under `interactor`, the follow-up checker
+otherwise.
+
+#### 9.1.6 Interactive settings and seeds
+
+- `mode`, `idle_s`, `early_reader_close`, `interactor_allowance_s` and
+  `peer_allowance_s` configure the session (checkers design §§5.2–5.7,
+  6.5). The dialogue caps (64 MiB per direction), relay queues
+  (256 KiB / 4 096 records), transcript retention (1 MiB / 65 536 records
+  per direction), the report cap (64 KiB) and the `tout` cap (64 MiB) are
+  *fixed* (checkers design §5.5).
+- **Seeds**: separate per role, drawn per session from the operating
+  system's random source unless a seeded rerun supplies the recorded
+  ones, and recorded in the report (report contract §4.6). Grammar: a
+  decimal `u64`, ASCII digits only, no sign, no leading zero except `"0"`,
+  value ≤ `u64::MAX`. Delivery per declaration:
+  - `seed = "env"` (interactor) and `solution_seed = "env"`: the variable
+    `CPF_SEED_INTERACTOR`, respectively `CPF_SEED_SOLUTION`, is injected
+    into that role's environment only, last (§4.3 step 4);
+  - `seed = "argv"` (interactor): a declaration that the interactor is a
+    **wrapper** that removes a final argument before testlib registration;
+    cpf appends the seed as the last argument, after the profile
+    arguments;
+  - `none`: no seed; the report says the session is not seed-controlled
+    for that role.
+- File-based I/O for the solution of an interactive problem (`[config]
+  io`, §6.2) is a phase-2 error whatever the version's `io` support
+  (checkers design §9). File-based I/O of a batch solution, including
+  which output a checker or comparator receives, is defined with `io`
+  itself (§6.2); nothing here restricts it, so the checkers design §9
+  capability matrix holds as written.
+
+#### 9.1.7 `interactor-test` declaration
+
+`[check.interactor_test]` declares known solutions for `cpf
+interactor-test` (checkers design §7): `good` and `bad` are arrays of
+**solution specs** `{ sources, support_files?, language, entry? }` with the
+built-role field rules of §9.1.2. The command judges each declared
+solution like `cpf test` judges the target, with the problem's selected
+tests and judging. It succeeds iff every `good` solution's job verdict is
+`passed` (or `scored` with a full aggregate) and every `bad` solution's job
+has at least one test whose verdict is a solution verdict (`wrong_answer`,
+`presentation_error`, `wall_deadline`, `session_limit`, `idle`,
+`output_budget`, `signal`, `nonzero_exit`) or a non-full score; a `bad`
+solution that passes fails the command. Passing it does not prove the
+adaptive invariant. Both lists empty → phase-2 error for `cpf
+interactor-test`. The command line and its document are specified with
+the other commands (`../commands.md`).
+
+#### 9.1.8 Validation phases
+
+| Phase | `[check]` checks |
+|---|---|
+| 1 raw | key set, types, string values, path rules of `sources`, `support_files`, `program`, durations and sizes (§7.1), `scale` range, field exclusivity inside a role spec |
+| 2 effective | kind ↔ `checker` / `interactive` / `interactor_test` presence; `checking` ↔ `checker`; `answer = "none"` and points tables against kind `compare`; profile allowed for the role; `idle_s` with `direct`; role `language` defined, with a complete run stage; composed role stage `cwd` and placeholders (§9.1.2); `assets` names and overlaps; `io` with an interactive problem; the effective-kind rule of §9 |
+| 3 selected plan (`cpf test`) | role captured files present (§9.1.3); role program resolution (§4.4); role local limits (§7.2); the answer policy against the selected tests (§9.1.4); the run count, the judged-test cap and the report reservation cap (§8.2) |
+| 4 post-build | each role build's declared outputs (§6.3), after the role build's exit 0 |
+
+On Windows a judged `cpf test` with a valid configuration is refused with
+exit 10 before admission, after phases 1–2 and the early refusals and
+before phase 3 (report contract §5.2).
 
 ## 10. `cpf config`
 
@@ -1191,3 +1503,63 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   9 999 / 10 000 / 10 001 planned runs.
 - `config show` / `check`: no side effects, stable JSON, provenance, deferred
   values, unsupported kinds.
+- *(judging, draft)* **`[check]`** (each row: exact diagnostics with
+  key path and provenance, exit status, and no job directory or sequence
+  allocation for a refusal):
+  - Kinds and roles: kind `checker` without `checker`, kind `compare` with
+    `checker`, `checking = "interactor"` with `checker`, `checking =
+    "checker"` / `"interactor+checker"` without `checker`, kind
+    `interactive` without `[check.interactive]`, `[check.interactive]`
+    with another kind, `check.interactor` outside `[check.interactive]`,
+    `interactor_test` with another kind → each its phase-1 or phase-2
+    error, exit 7.
+  - Role specs: `sources` with `program`; `program` with `language`;
+    `language` missing or undefined; a path with `..`, `\` (Windows), an
+    empty component or a duplicate; a path in both `sources` and
+    `support_files`; profile `simple` for the interactor; profile
+    `testlib-validator` (unknown value); `deadline_s` or `stdout_cap` on
+    the interactor; `seed` on a checker; a language run stage with `cwd =
+    { selector = "problem" }`; a role stage using `{workspace}` → errors;
+    `{problem_id}` in a role stage → valid.
+  - Answers: kind `checker`, answer `file`, one selected test without an
+    answer → phase-3 error naming the test, exit 7, nothing runs; the same
+    test unselected (`--case`) → valid; `answer = "none"` → the judge's
+    answer file is empty for that test and the present answer for another;
+    `answer = "none"` with kind `compare` → phase-2 error; kind `compare`
+    with an answerless test → `unchecked{no_answer}` (unchanged); an entry
+    naming a missing answer file → exit 8.
+  - Scoring: `scale` 0, 1, 10⁹, 10⁹ + 1, `1.5`, `"100"`; `points = false`;
+    unknown `aggregation`; a points table with kind `compare` → errors
+    except 1 and 10⁹.
+  - Interactive: `idle_s = 0` with `direct` → valid; `idle_s = 1` with
+    `direct` → phase-2 error; `idle_s = -1` and `"0.0004s"` → phase-1
+    errors; defaults of every key shown by `config show`; `[config] io`
+    on an interactive problem → phase-2 error.
+  - Effective kind: `[problem] kind = "interactive"` without `[check]` →
+    `cpf test` phase-2 error, `cpf build` and raw `cpf run` valid; `[check]
+    kind = "interactive"` on a problem without `[problem] kind` → an
+    interactive `cpf test`; `cmd` with `for_each_test` on an interactive
+    problem → refused, exit 7.
+  - Run counts: one test with validator, checker and a C++ checker and
+    validator → 3 builds + 3 runs; an interactive test with checking
+    `interactor+checker` and a validator → 4 runs per test; 1 000 judged
+    tests → valid, 1 001 → phase-3 error; a compare problem with 9 999
+    tests and one build → valid (unchanged cap); a judged plan whose
+    report reservation exceeds 256 MiB (many hooks) → phase-3 error.
+  - Capture: a role source that is a link, a FIFO or missing → phase-3
+    error; two role paths naming one file → phase-3 error; a prebuilt
+    program copy is executable and run from `inputs/roles/`; an edit of a
+    role source after freezing does not change the running job.
+  - Assets: `assets = ["data/words.txt"]` → staged as
+    `<private dir>/data/words.txt` and opened by a relative path from the
+    judge; an asset named `report` or `input/x` → phase-2 error; an asset
+    also in `support_files` → phase-2 error.
+  - Judge fingerprint vectors: the same `[check]` and files give the same
+    digest on every platform; a changed checker byte, profile or `scale`
+    changes it, `display` does not; moving a file from `sources` to
+    `support_files` with the same concatenated bytes, changing the role's
+    `entry`, its language's run-stage argv, its `deadline_s` or `seed`
+    each change it; reordering `support_files` changes it; a problem
+    without roles has `null`.
+  - Windows: a valid judged `cpf test` → exit 10 before admission; a
+    `[check]` phase-1 error → exit 7 first.

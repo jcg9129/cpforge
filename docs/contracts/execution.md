@@ -7,6 +7,12 @@ mode, hooks, `repeat`, runs per job) is defined in `config.md`; result
 derivation, the report format, exit statuses and machine output are
 defined in `report.md` (the report contract).
 
+**Judging amendment: draft.** Judge roles and their profiles (§2.1), stages
+`Checker`, `Validator`, `Interactor` (§2), the reservations of judging runs
+(§5.4), the test precedence (§6.4) and the resolution of the connected-run
+items (§9a). Amended content is marked *(judging, draft)*. References
+labelled *checkers design* point to `../design-checkers.md`.
+
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
 narrower than
@@ -43,8 +49,8 @@ someone else are documented limitations; this is not a sandbox.
 
 ```rust
 pub struct ResolvedExecutionSpec {
-    pub stage: Stage,                    // Build | Run | Command | Hook (Checker, Generator, Brute,
-                                         // Interactor: later features)
+    pub stage: Stage,                    // Build | Run | Command | Hook | Checker | Validator
+                                         // | Interactor (judging, §2.1); Generator, Brute: stress
     pub program: PathBuf,                // resolved executable; shell mode already turned into program+args (configuration contract)
     pub args: Vec<OsString>,
     pub cwd: PathBuf,                    // absolute (storage contract decides which directory)
@@ -54,7 +60,7 @@ pub struct ResolvedExecutionSpec {
     pub stdout: StreamPolicy,
     pub stderr: StreamPolicy,
     pub wall_deadline: Duration,         // always present, > 0
-    pub deadline_group: Option<GroupRef>,// reserved, §9a; CLI foundation: always None
+    pub deadline_group: Option<GroupRef>,// sessions only (§9a); otherwise always None
     pub limits: Vec<LocalLimit>,         // validated and normalised before spawn (§7.2)
     pub measure: Vec<MetricKind>,
 }
@@ -83,9 +89,260 @@ Enum tags use the schema's lowercase tokens; durations use microseconds,
 and an absent deadline group uses the token `none`. If `spec.json` has
 already been written with another native encoding, this is a `spec.json`
 schema increment. The serialised spec has a size
-limit (configuration contract: 256 KiB) checked before the run is admitted. In the CLI foundation,
-`Connected` variants and a `deadline_group` are rejected at validation
+limit (configuration contract: 256 KiB) checked before the run is admitted.
+`Connected` variants and a `deadline_group` exist only inside a session
+pair (§2.1, §9a); a plain run that requests them is rejected at validation
 (`NotStarted{Unsupported}`).
+
+### 2.1 Judge roles and profiles *(judging, draft)*
+
+Judge roles (checkers design §1) are the **checker**, the **validator**
+and the **interactor**. Each run of a role is an ordinary
+`ResolvedExecutionSpec` with stage `Checker`, `Validator` or `Interactor`,
+produced by configuration contract §9.1.2 from the role spec and the
+role's captured files; role builds are ordinary `Build` runs with their
+own output roots. The interactor run and the solution run of one test form
+one **session** (checkers design §5, the supervisor's `SessionSpec`): its
+two runs are admitted atomically, and their `Connected` endpoints and the
+session deadline exist only there. Nothing about a role comes from fetched
+data.
+
+**Private directory.** Every judge run's `cwd` is its own fresh `cwd/`
+(storage contract §7), its **private directory**. During the run's
+preparation (after its admission, before process creation, §3.4), the job
+stages into it the files of the table below, each by
+reflink or byte copy (regular files only, exclusive creation) with its
+exact size reserved first (§5.4), and passes their **absolute** paths. The
+names are *fixed*: `input`, `output`, `answer`, `tout`, `report`; the
+declared assets of the role are staged beside them (below). A staging
+failure makes that run `NotStarted{Setup}` (infrastructure). This is
+wiring, not isolation: a judge can read other paths.
+
+| Role, profile | Arguments appended (configuration contract §9.1.2) | stdin | Staged before the run |
+|---|---|---|---|
+| checker, `testlib` | `<input> <output> <answer> <report> -appes` | null | `input`, `output`, `answer`; `report` is a path that does not exist |
+| checker, `simple` | `<input> <output> <answer>` | null | `input`, `output`, `answer` |
+| interactor, `testlib` | `<input> <tout> <answer> <report> -appes` | connected to the solution's stdout | `input`, `answer`, `tout` (created empty); `report` does not exist |
+| validator, `testlib` | none | `input` | `input` |
+| validator, `simple` | `<input>` | `input` | `input` |
+
+- `input` is a copy of the test's frozen input; `answer` a copy of its
+  frozen answer, or an empty file for a test whose answer is deliberately
+  none under `answer = "none"` (configuration contract §9.1.4). `output`
+  is, for a batch checker, a copy of the solution run's stdout capture file
+  (`<run>/out/stdout`, as frozen), and, for the follow-up checker of a
+  session, a copy of the interactor's `tout` read as below. A batch problem
+  with file-based I/O (configuration contract §6.2 `io`) stages the
+  solution's collected output file instead; that selection, and every other
+  interaction of file-based I/O with judging, is defined with file-based
+  I/O itself. Interactive problems refuse file-based I/O for the solution
+  (checkers design §9).
+- **Declared assets** (checkers design §2.4): the role spec's `assets`
+  (configuration contract §9.1.2) are staged into the private directory at
+  their problem-relative paths (directories created as needed), with the
+  same copy, reservation and removal rules as the fixed files, before the
+  fixed files; the configuration refuses an asset whose first path
+  component equals a fixed name or `transcript`, so no collision is
+  possible.
+- A checker's or validator's stdout and stderr, and the interactor's
+  stderr, are captured to files under the stage's caps (§5.5 run defaults
+  unless the role spec sets them). A checker's or validator's stdout is
+  never consumed, so only a `Kill` breach of it matters (an own limit);
+  the interactor's stdout is the dialogue (checkers design §5.5).
+- With a seed declared (configuration contract §9.1.6) the seed is in the
+  environment or is the last argument, as declared.
+
+**Reading judge artefacts.** After the judge's capture is frozen and its
+cleanup has a result:
+
+- `report` is opened without following links, its type is checked on the
+  opened handle, and it is read with a bounded read of at most 64 KiB + 1
+  byte (checkers design §5.5). A missing file, a link, a non-regular file,
+  a permission error or more than 64 KiB are `ReportInvalid` (the judge's
+  own file in its own directory); any other read error is a check error
+  (infrastructure, report contract §2.11).
+- `tout` is read only when the interactor's cleanup is `Confirmed`, by the
+  same opening rules, bounded at 64 MiB + 1 byte: missing, a link,
+  non-regular, not readable (permission) or larger than 64 MiB is
+  `ArtefactInvalid` (`tout_missing`, `tout_not_regular`, `tout_unreadable`,
+  `tout_too_large`) attributed to the interactor (checkers design §6.4). It is read in every checking mode
+  (checkers design §6.1 rule 5.4), independently of any checker.
+- **Extraction.** The report and `tout` are **extracted** into retained
+  job storage outside `cwd/`, as `<run>/judge/report` and
+  `<interactor run>/judge/tout` (tool-created files; each reserves its exact
+  size first, E §5.4; published by exclusive creation). Extraction is part
+  of reading the judge, before the judge's `ValidationDone` (sessions) or
+  check (batch) and before any checker decision, so it never depends on a
+  checker's admission. Two outcomes are distinct:
+  - **Rejected before extraction**: a missing file, a link, a non-regular
+    file, a permission error, or more than the bound (64 KiB for the
+    report, 64 MiB for `tout`) is the judge's failure, decided from the
+    open and the bounded read: `ReportInvalid` or `ArtefactInvalid` as
+    above. Nothing is extracted and the retained path is `null`. Every
+    other outcome is decided from the extracted bytes only.
+  - **Extraction failure**: a reservation refusal, or an I/O error while
+    reading an artefact that passed those checks or while writing its copy
+    (including any read error not listed above), is on cpf's side:
+    infrastructure, never `ReportInvalid` or `ArtefactInvalid`. In a batch
+    test it is a `check_error` in `tests[].check` (report contract §2.11
+    B23) and the checker's `judges[].result` is
+    `not_read{extraction_failed}`. In a session the judge's
+    `ValidationDone` is `NotRead` (reason `extraction_failed`) and the
+    condition is an infrastructure condition of checkers design §6.1 item
+    8: if the record has no `Infrastructure` fact yet, one (detail kind
+    `judge_extraction`) is recorded in the same wakeup; if it already has
+    one, that fact's `suppressed` count is incremented instead and no
+    second fact is recorded (report contract §10, checkers design §6.1
+    rule 5 amendment). The closed record is valid and the reducer decides
+    `infrastructure` at step 1; no `AuthorityComplete` is recorded. The
+    checker facts follow emission item 1 unchanged: after the interactor's
+    extraction failure, a planned follow-up checker that has not started
+    gets `CheckerSkipped` by item 6 (`Cancelled` if a `CancelRequested`
+    exists, else `NotEligible`); a follow-up checker that already started
+    and whose own extraction fails keeps its `Started`, `RootExited`,
+    `CleanupResult` and gets its own `ValidationDone{NotRead}`; mode
+    `interactor` has no checker fact.
+- **Follow-up checker staging.** Only an eligible follow-up checker
+  (checkers design §6.1 item 6), once admitted, gets `output` staged from
+  `<interactor run>/judge/tout` during its preparation; a skipped checker
+  stages nothing, and the extracted `tout` stays as evidence.
+- A checker or interactor whose cleanup is `Unverified`, of either
+  profile, is not read and gives no `Ok` result (checkers design §6.1 rule
+  5.3 and §6.4: no surviving writer may change a file while it is read, and
+  in a session the rule applies to every started judge); a crash, a stop
+  or an own limit (stage 1) still decides first. In a batch test this is
+  `Unchecked{CheckingUnverified}` (report contract §2.11 B22); in a session
+  it is `ValidationDone{_, Unverified}`. Validators read nothing but their
+  frozen exit status and capture, so for them `Unverified` is a note only.
+  Cleanup `Incomplete` is infrastructure as for every run.
+- **Order against the cwd measurement.** For a judge run the steps after
+  the cleanup result are, in this order: (1) the report and `tout` are read
+  and extracted as above; (2) the staged copies and assets are removed
+  (judge scratch, below, for this run's own staged files); (3) only then is
+  `cwd/` measured and, beyond `cwd_bytes`, cleared with `CwdOverflow`
+  (storage contract §6.4). Staged files are tool-created and never count
+  towards `cwd_bytes`; what remains measured is what the judge wrote,
+  including its own `report` and `tout` in `cwd/`, which clearing may
+  delete. The retained evidence is the extracted copies in `judge/`, which
+  are outside `cwd/` and never cleared by it; a cleared `cwd/` therefore
+  never turns a valid report or `tout` into `ReportInvalid` or
+  `ArtefactInvalid`. A failed
+  removal in step 2 is a `judge_scratch` warning, and the remaining staged
+  bytes are excluded from the measurement by their recorded sizes.
+
+**`testlib` profile** (checkers design §2.1). The tested header (commit,
+SHA-256, licence and header notices, the outcome list of that header) is
+recorded in `docs/testlib-profile.md` and exercised in CI; it is the CI
+profile, distinct from any header a user compiles against, and it is never
+part of a release archive. **Header provenance is candidate-only.** cpf
+does not observe which file the compiler opened and captures no build
+trace, so it never claims which header was compiled. It records a
+**candidate**: the captured `testlib.h` that a quoted `#include
+"testlib.h"` in a captured source would resolve to first (exactly one
+captured file of the role named `testlib.h`, in the same directory as
+every captured source; C and C++ search the including file's directory
+first for quoted includes), with its SHA-256 and whether that equals the
+tested header's. A candidate is not proof: a conditional or indirect
+include, a forced include (`-include`), an include path, a wrapper compiler
+or a source that includes no header can make the build use another header
+or none. When no candidate exists the reason is recorded: `none` (no
+captured `testlib.h`), `ambiguous` (two or more), `not_beside_sources`,
+or `angle_include` (a lexical scan of the captured sources finds a line
+`#include <testlib.h>`, possibly with whitespace around `#` and `include`,
+which searches include paths, not the source's directory). The report
+states the restriction (report contract §4.4); it is never a detected
+error. The first failing stage decides; nothing is
+inferred from an invalid or partial document:
+
+1. **Execution facts** of the judge run, before anything is read: an own
+   limit (wall deadline, a `Kill` output breach, for the interactor its
+   dialogue cap), a signal, or peer-allowance expiry → `Crashed`; a judge
+   that cannot start (`NotStarted` other than `CancelledBeforeStart`) is
+   infrastructure (§6.4). Then the cleanup rule above.
+2. **Presence and decoding**: the report read above; an XML declaration at
+   the start (`<?xml version="1.0" encoding="E"?>`) declares E, compared
+   ASCII case-insensitively with `windows-1251` and `UTF-8`; without a
+   declaration the report is UTF-8. Any other E, or bytes not valid in E
+   (UTF-8, or the windows-1251 byte `0x98`, which is unassigned) →
+   `ReportInvalid`.
+3. **Well-formedness**: XML 1.0 with one root element; a document type
+   declaration, a processing instruction other than the declaration, or an
+   entity reference other than the five predefined entities and character
+   references → `ReportInvalid`.
+4. **Schema**: root element `result`; attribute `outcome` required, with a
+   value from the tested header's outcome list; `points` present iff
+   `outcome = "points"`, `pctype` present iff `outcome =
+   "partially-correct"`, no other attribute; content is character data
+   only (the message), no child element; `points` matches checkers design
+   §4 (`[0-9]+(\.[0-9]+)?`, at most 18 significant digits, leading zeroes
+   of the integer part not counted, at most 9 fractional digits, no sign
+   or exponent, 0 ≤ raw ≤ scale), never clamped → else `ReportInvalid`.
+5. **Support**, checked separately: the exit code is one of 0, 1, 2, 3, 7
+   (else `ProtocolUnsupported`); the outcome is one of `accepted`,
+   `wrong-answer`, `presentation-error`, `fail`, `points`, and `points` only
+   with a points `scoring` (else `ProtocolUnsupported`; `partially-correct`
+   included).
+6. **Agreement**: (0, `accepted`) → `Passed`; (1, `wrong-answer`) →
+   `Failed{WrongAnswer}`; (2, `presentation-error`) →
+   `Failed{PresentationError}`; (3, `fail`) → `CheckerFailed{DeclaredFail}`
+   (`Failed(DeclaredFail)` for a session judge); (7, `points`) →
+   `Scored{raw, scale}`; any other supported pair → `ReportInvalid`
+   (disagreement).
+
+For the interactor, an `Ok` result outside its authority row (checkers
+design §6.3: any score unless `checking = "interactor"` with points
+scoring) is `ProtocolUnsupported`, attributed to its exit; the row check
+never applies to `fail`. The **message** is the report's character data,
+decoded and converted to UTF-8; the report keeps its first 4 096 bytes, cut
+at a character boundary (report contract §4.6). The judge's stderr is a
+**diagnostic** only (its first 1 024 bytes kept), never a fallback for the
+message. A prebuilt binary built with custom exit remaps or the
+unexpected-EOF option cannot be detected from its output: the profile is a
+declared default and the report states `provenance: declared`.
+
+**`simple` checker** (checkers design §2.2): exit 0 → `Passed`, exit 1 →
+`Failed{WrongAnswer}`, any other exit code, a signal or an own limit →
+`Crashed`; the message is the stderr (first 1 024 bytes kept). An exit
+status cannot reveal intent (an unhandled exception that exits with 1
+looks like a wrong answer); authors who need the distinction use `testlib`
+or a wrapper. Not available for interactors.
+
+**Validators** (checkers design §2.3) run once per test, before that test's
+solution run, and never yield a solution verdict:
+
+- `testlib`: exit 0 → valid; any other termination (exit code, signal, own
+  limit) → "validation failed (invalid input and validator error are
+  indistinguishable)": `TestDataError`, stderr kept.
+- `simple`: exit 0 → valid; exit 1 → invalid input, `TestDataError`; any
+  other exit code, a signal or an own limit → validator error, `Crashed`.
+
+A test whose validator did not report its input valid admits none of its
+other runs (report contract §2.1 `skipped{input_not_validated}`).
+
+**Sessions.** The job builds the session from the solution's run stage
+(stdin and stdout connected), the interactor's role stage, the solution's
+effective deadline, the allowances, the mode and the idle setting of
+configuration contract §9.1.6, with the *fixed* caps of checkers design
+§5.5; in relay mode the transcript goes to `<interactor run>/transcript/`.
+The supervisor records the execution facts (checkers design §6.1 items
+1–4, 8); the job adds the judge facts (`ValidationDone`, `CheckerSkipped`,
+`AuthorityComplete`, items 5–7) and the follow-up checker's facts to the
+same record, takes the checker start decision once (item 6), and the
+closed record is reduced by report contract §2.12. A pair, or a follow-up
+checker, whose creation returns `Transferred` (§3.4) yields a
+**cancellation snapshot**, not a closed record: it is reported as
+cancelled without reduction (report contract §2.12 I3).
+
+**Judge scratch.** Each judge run's staged copies (`input`, `output`,
+`answer` and its declared assets; they duplicate retained files) are
+removed right after its report and `tout` were read, before its `cwd/` is
+measured (above); once a test's verdict is derived and it is `passed`, its
+session transcript and its extracted `tout` are removed too. The
+extracted report, the extracted `tout` of a test not `passed`, and every
+file a judge wrote in `cwd/` (unless cleared as above) are kept with the
+run. Bytes are released after
+the removal is confirmed; a failed removal is a `judge_scratch` warning
+(report contract §4.10) and never changes a verdict.
 
 ## 3. Ownership
 
@@ -511,6 +768,25 @@ contract §6, not a reservation ceiling):
   `NotStarted{RetentionBudget}`, nothing stays reserved, the job admits no
   further runs. Before its first run the job also reserves the report bound
   of report contract §3.7 for `report.json` and its temporary file.
+- *(judging, draft)* **Report reservation**: exactly 2 × the report bound
+  of the plan (report contract §3.7), in one reservation before the first
+  run, held until report publication settles; never shared with another
+  reservation and never taken lazily, so final-report headroom cannot be
+  consumed by runs.
+- *(judging, draft)* **Judge staging and extraction**: each staged copy
+  of §2.1 (the follow-up checker's `output` from the extracted `tout`
+  included) and each extracted report or `tout` (§2.1, ≤ 64 KiB and
+  ≤ 64 MiB) reserves its exact size before it is created; the bytes become
+  retained at creation and are released when the judge-scratch removal is
+  confirmed (extracted reports are never removed).
+- *(judging, draft)* **Transcripts**: at pair admission a relay-mode
+  session reserves, per direction, 1 MiB of raw bytes plus 65 601 index
+  records (65 536 records, 64 gap markers, the final record) of at most
+  256 bytes each (every index record, error text included, is bounded to
+  256 bytes): 17 842 432 B per direction, 35 684 864 B per session. At the
+  session's resources-released milestone it is converted like a stream
+  reservation. Direct mode writes no transcript and reserves nothing for
+  it.
 - At **resources released** the reservation is converted: bytes actually on
   disk become retained, the rest is returned. A stalled writer keeps its full
   stream reservation until it returns (a directory lease alone does not
@@ -621,8 +897,9 @@ empty captures.
   finalization** (t_rec), followed by its first `cleanup.log`; the report at
   the start of report phase S (report contract §2.9). Size bounds: spec
   ≤ 256 KiB, record ≤ 64 KiB, `cleanup.log` ≤ 64 KiB (then a truncation
-  marker), report ≤ 64 KiB + 12 KiB × planned executions (report contract
-  §3.7; configuration contract caps runs per job).
+  marker), report ≤ the report bound of the plan (report contract §3.7:
+  a fixed part plus per-execution and per-test parts; configuration
+  contract §8.2 caps runs and judged tests per job).
 - **Queue credits**: the queue holds at most **Q = 2 MiB** of credits
   (*fixed*). An artefact is charged 8 KiB (the cost of one write) plus its
   encoded length, known at enqueue for specs and `cleanup.log`, or, for a
@@ -779,9 +1056,12 @@ grace** on one monotonic clock on every OS.
 
 Precedence (supersedes the list in design §6.3):
 
-`infrastructure` > `cancelled` > `wall deadline` > `output budget` >
-`signal` > `nonzero exit` > `checker failure` (initial feature release) > `wrong answer` >
-`unchecked` > `pass`.
+`infrastructure` > `cancelled` > `wall deadline` > *(judging, draft)*
+`session limit` > `idle` > `output budget` > `signal` > `nonzero exit` >
+`checker failure` > `wrong answer` > *(judging, draft)* `presentation
+error` > `unchecked` > `pass`, where a judged or interactive test is
+derived by report contract §§2.11–2.12 and a job by §2.7 (a scored job
+after every other row).
 
 - `infrastructure`: `NotStarted` other than `CancelledBeforeStart`, any
   `SupervisorError`, cleanup `Incomplete`, status `Unknown`, or any stdout
@@ -975,14 +1255,15 @@ pub enum Event {
 ## 9a. Connected runs (supervisor constraints)
 
 Interactive judging follows the CLI foundation; connected-run mechanics
-belong to the supervisor, with their contract in `../design-checkers.md` §3.
+belong to the supervisor, with their contract in `../design-checkers.md` §5;
+judge roles and sessions as jobs use them are §2.1.
 This section fixes the constraints that the process supervisor must respect.
 
 **Binding for the supervisor:**
 
 - `StdinSource::Connected(PeerRef)`, `Sink::Connected(PeerRef)` and
-  `deadline_group` exist and are rejected (`NotStarted{Unsupported}`) until
-  connected-run support is implemented.
+  `deadline_group` exist and are rejected (`NotStarted{Unsupported}`)
+  outside a session pair (`SessionSpec`).
 - The ownership model admits a future owner of connection endpoints other
   than either run (§3.1 rule 1 applies unchanged).
 - Admission (§3.3) can reserve two runs atomically: slots, credits and
@@ -990,19 +1271,35 @@ This section fixes the constraints that the process supervisor must respect.
 - Nothing in §§3–6 assumes a run's stdin is a file or that its stdout ends in
   a sink owned by that run alone.
 
-**Provisional (the connected-run contract decides):**
+*(judging, draft)* **Resolved by checkers design §5** (as implemented by
+the session supervisor, runtime decision record §2.5); these replace the
+provisional items of earlier versions:
 
-- Relay mode (`cpf` forwards each direction and records a bounded transcript)
-  is the only mode while budgets or transcripts are required; direct
-  child-to-child pipes are deferred until their budget semantics are chosen,
-  since `cpf` cannot count bytes it does not see.
-- Per-direction forwarding capacity, with transcript writing unable to stall
-  delivery; a blocked destination stalls only its own direction.
-- Group deadline origin and violation attribution, start-up rollback of a
-  half-created pair, half-close and endpoint ownership, peer-shutdown policy.
-- Raw outcomes and observation timestamps of both runs are recorded without
-  claiming an exact exit order or `SIGPIPE` causality; verdicts belong to the
-  interactive spec.
+- **Modes**: relay is the default and the only mode with dialogue byte
+  counts, caps, transcript and idleness watchdog; direct mode (OS pipes
+  between the two roots) is allowed and explicitly gives up dialogue
+  accounting, which the report states as unavailable (checkers design
+  §5.2). No relay overhead is ever subtracted.
+- **Per-direction capacity**: each direction is an independent state
+  machine with one chunk (≤ 64 KiB) in flight plus a queue of 256 KiB and
+  4 096 records; a blocked destination back-pressures only its own
+  direction; transcript records go to a separate bounded queue that
+  forwarding never waits for (checkers design §§5.3–5.5).
+- **Deadlines**: each root's own deadline starts when its creation returns
+  (§6.3); the solution's is its run deadline, the interactor's that plus
+  `interactor_allowance_s`; the session deadline starts at the later of
+  the two starts and is the interactor's deadline plus 1 s. Violation
+  attribution, the peer completion allowance, the final transport drain
+  and descendant termination follow checkers design §5.6.
+- **Start-up**: the pair is admitted atomically (slots, credits, workers
+  for both, or nothing); a creation failure tears the other root down and
+  records `NotStarted` and `Infrastructure` facts (checkers design §5.8).
+  Half-close, `SinkGone` and endpoint ownership follow checkers design
+  §5.3.
+- **Raw outcomes**: both run records and the session record keep raw
+  terminations and the coordinator's observation order (`obs_seq`),
+  without claiming causality or an exact exit order; verdicts are derived
+  only by the reducer of report contract §2.12.
 
 ## 10. Acceptance criteria for supervisor tests
 
@@ -1100,7 +1397,7 @@ contract §9.2); budget breach plus an independent write error
 (port not associated) still `Confirmed` by polling; Windows inside a
 compatible outer job and inside one forbidding nesting; address-space limit
 with a lower inherited hard limit; `Connected` variants and `deadline_group`
-rejected; real Ctrl-C and second Ctrl-C (after CLI integration).
+rejected outside a session; real Ctrl-C and second Ctrl-C (after CLI integration).
 
 ## 11. Guarantee caveats and rationale
 
