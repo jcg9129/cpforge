@@ -15,6 +15,10 @@ implemented.
 is settled but not yet implemented. References labelled *workspace design* point to
 `../design-workspace.md`.
 
+**Organisation amendment: draft.** The workflow status vocabulary
+`[status] values` (§1.1, §7.5) for `cpf mark` (storage contract §5.9).
+Marked *(organisation, draft)*.
+
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
 time and captured output; it is not a security boundary (design §1). The only
@@ -53,6 +57,7 @@ and the problem record, not to configuration.
 | `compare` | comparator value | 1, 2 | compare spec §5.1; replace-as-unit |
 | `retention.{keep_jobs, job_bytes, workspace_bytes, cwd_bytes, build_bytes}` | §7.1 types | 1, 2 | §7.3 |
 | `workspace.ignore` | array of patterns | 1, 2 | §7.4 |
+| `status.values` *(organisation, draft)* | array of status names | 1, 2 | §7.5; replace-as-unit |
 | `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
@@ -781,6 +786,25 @@ Ignore only changes visibility in `cpf status`; it never makes a file
 deletable (workspace design §2). `cpf ignore <pattern>` validates a pattern and prints
 the line to add; it never edits a configuration file.
 
+### 7.5 Workflow status vocabulary *(organisation, draft)*
+
+`[status] values = ["wa", "upsolve-later"]`, allowed in layers 1 and 2;
+an array, so a later layer replaces it whole (§2): a workspace array
+replaces the user's, and the user's applies only when the workspace sets
+none. `[status]` holds no other key. Each element is a status name
+(storage contract §5.9.2: 1–32 ASCII characters from `[a-z0-9-]`, first a
+letter, last not `-`); at most 32 elements; no duplicates; no built-in
+name (`new`, `in-progress`, `solved`, `skipped`). Each violation is a
+phase-1 diagnostic at `status.values[<i>]`; an absent key means no custom
+values.
+
+The vocabulary is the built-in names in that order followed by the
+effective `values` in order. Only `cpf mark` uses it (storage contract
+§5.9.4): it reads layers 0–2 and refuses (7) only when this key cannot be
+determined. Readers (`ls`, `status`, `search`) never load it: a stored
+status outside the vocabulary is still a valid value. `cpf config show`
+shows the effective array with provenance like any array.
+
 ## 8. Commands, repeat, hooks
 
 ### 8.1 Commands
@@ -985,6 +1009,12 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   job commands → 10 before admission (report contract §5).
 - Validation: a stage completed across layers; a wrong type in an overridden
   layer still reported; an inactive Windows limit on Linux accepted.
+- *(organisation, draft)* `status.values`: user `["wa"]` alone → effective
+  `["wa"]`; user `["wa"]`, workspace `["x"]` → `["x"]`; workspace `[]` →
+  `[]`; `["solved"]`, `["wa", "wa"]`, `["Wa"]`, `["a-"]`, `[1]`, 33 elements,
+  `status = { values = [], other = 1 }`, and `status.values` in a
+  `problem.toml` `[config]` → phase-1 diagnostics with provenance (7 from
+  `cpf config check`).
 - **Cases with exact results:**
   - C++ built-in build: `{artifact}` expands to `<output root>/main`
     (`main.exe` on Windows); a build exiting 0 without writing it →

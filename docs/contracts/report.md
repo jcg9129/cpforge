@@ -15,6 +15,12 @@ from records the other contracts define, encodes them, and maps them to
 exit statuses. Where it needs a change in another contract, §10 gives the
 amendment text.
 
+**Organisation amendment: draft.** The `ls`, `search` and `notes`
+documents, the status document's handling of organisation fields (§6.1),
+and the exit rows of `tag`, `untag`, `mark`, `notes`, `ls`, `search`
+(§5.1, §5.5); storage contract §5.9. Marked *(organisation, draft)*; merged
+into schema 1 by the final reconciliation.
+
 **Scope of schema 1.** Built-in batch comparison only (compare spec):
 `batch` problems, comparators `exact`, `tokens`, `lines`, `float`.
 Checkers, interactors, scores, presentation errors and connected runs are
@@ -974,12 +980,12 @@ within the §3.7 reservation; never rewritten; classified by S §9
 |---|---|---|
 | 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded` |
 | 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit` |
-| 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin |
+| 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9) |
 | 3 | `build_failed` | the build failed |
 | 4 | `not_verified` | nothing failed but not everything was checked: `unchecked`, `no_tests` |
 | 5 | `checker_failed` | judging could not decide (schema 1: invalid answer) |
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
-| 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7) |
+| 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5) |
 | 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O |
 | 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`) |
 | 10 | `infrastructure` | cpf could not run or observe a program reliably |
@@ -1091,10 +1097,15 @@ condition:
 | `cpf config check` | 0, 7 (no `--json` in schema 1) |
 | `cpf config paths` | 0 |
 | `cpf doctor` | 0, 7; an unsupported capability is never an error |
-| *(draft)* `cpf status` | 0, 8, 11 (`--json`) |
+| *(draft)* `cpf status` | 0, 8, 11 (`--json`); *(organisation, draft)* filters add only 2 for a filter value outside its grammar |
 | *(draft)* `cpf clean` | 0, 8; `--apply`: 9 when a selected candidate could not be renamed or deleted (held leases are skipped) |
 | *(draft)* `cpf fsck` | 0, 8 (findings are reported with 0) |
 | *(draft)* `cpf adopt`, `ignore`, `gitignore` | 0, 8 |
+| *(organisation, draft)* `cpf tag`, `cpf untag` | 0, 8 |
+| *(organisation, draft)* `cpf mark` | 0, 7, 8 |
+| *(organisation, draft)* `cpf notes` | 0, 8, 11 (`--json`); `--path`: 0, 8, 11 |
+| *(organisation, draft)* `cpf ls` | 0 (also with invalid entries and findings), 8, 11 (`--json`) |
+| *(organisation, draft)* `cpf search` | 0 (hits or none, complete or incomplete), 8, 11 (`--json`), cancellation |
 | `cpf --help`, `--version` | 0 |
 
 "Cancellation" is the §5.3 status. Raw `cpf run` never passes the child's
@@ -1107,8 +1118,10 @@ code through; the child's status is in the report and the stderr summary
 
 - Accepted by `cpf build`, `cpf test`, `cpf cmd`, and by non-job commands
   whose contract defines a document (schema 1: `cpf config show`, *(draft)*
-  `cpf status` below; later `cpf test ls`). A per-command flag; elsewhere
-  clap rejects it (2).
+  `cpf status` below, *(organisation, draft)* `cpf ls`, `cpf search`,
+  `cpf notes` below; later `cpf test ls`). A per-command flag; elsewhere
+  clap rejects it (2): *(organisation, draft)* `cpf tag`, `untag` and
+  `mark` have no document.
 - Raw `cpf run` rejects `--json` and `--events` (E §8.1): 2.
 - `--json` with `--events`: 2 (decision D4).
 
@@ -1142,6 +1155,80 @@ platform. `Target`:
 | `capture_check` | `Check?` (§4.2) | the fact's capture check iff `valid` |
 
 Fixture: `src/report/wire/fixtures/status.json`.
+
+*(organisation, draft)* **Organisation fields in `status`.** `tags` and
+`user_status` carry the S §5.9.2 field only when it is `valid` (`tags`
+elements as spelled, in stored order); an `absent` field gives `[]` /
+`null`; an `invalid` one gives `[]` / `null` **and** a `diagnostics` entry
+naming the field and its reason. `user_status` is the stored value, never
+the effective status. The human form labels it `workflow: <value>` (S
+§5.9). Filters (S §5.9.6) change only which problems are listed.
+
+*(organisation, draft)* **Common types.** `OrgFinding`: `{field: token,
+reason: text}`, `field` one of `tags`, `status`, `created_at`,
+`updated_at`, `solved_at`, `archived_at`. `Source`: `{path: ns, kind:
+token, field: token?, message: text}` with `path` workspace-relative
+(native components joined by `/`) and `kind` one of `link`,
+`not_a_directory`, `invalid_name`, `name_collision`, `metadata_missing`,
+`metadata_unreadable`, `metadata_malformed`, `metadata_too_new`,
+`identity_mismatch`, `contest_unreadable`, `contest_malformed`,
+`contest_too_new`, `invalid_field` (then `field` is set), and in `search`
+also `notes_not_regular`, `notes_unreadable`, `notes_not_utf8`. `origin`:
+token `active` (workspace) or `snapshot` (archive contract; its members
+arrive with it). Timestamps are `time?`: the field when `valid`, a
+date-only value normalised to `T00:00:00.000Z`, otherwise `null`. These
+documents are not persisted, their lists are workspace-sized and uncapped
+except where a cap is stated; a selection or workspace failure writes the
+§4.12 `error` document with `command` `ls`, `search` or `notes`.
+
+*(organisation, draft)* **`ls` document**: `{"schema":1,"document":"ls",
+"platform":…,"kind":token,"problems":[LsProblem],"contests":[LsContest],
+"invalid":[Source]}`. `kind` is `problems` (`contests` empty) or
+`contests` (`problems` empty), in S §5.9.7 order.
+
+| `LsProblem` member | Type | Meaning |
+|---|---|---|
+| `problem` | `pident` | identity (`pident` as widened for remote identities by the fetch amendment) |
+| `origin` | token | `active` |
+| `title` | `string?` | `[problem] title` when present |
+| `tags` | `[string]` | as in `status` |
+| `user_status` | `string?` | as in `status` |
+| `effective_status` | `string?` | S §5.9.2: `new` when absent, `null` when invalid |
+| `created_at`, `updated_at`, `solved_at`, `archived_at` | `time?` | each field |
+| `contests` | `[ident]` | contests listing it, by name |
+| `findings` | `[OrgFinding]` | invalid fields, in the member order above |
+
+| `LsContest` member | Type | Meaning |
+|---|---|---|
+| `contest` | `ident` | directory name |
+| `identity` | `string?` | `[contest] id` when present |
+| `tags` | `[string]` | top-level `tags` when valid |
+| `members` | `u32` | `[[problem]]` record count |
+| `counts` | `[{status: string, count: u32}]` | derived contest status: non-zero counts per effective status, built-in names in vocabulary order, then others in byte order |
+| `unresolved`, `invalid` | `u32` | members not resolvable; members with an invalid status |
+| `findings` | `[OrgFinding]` | an invalid `tags` |
+
+*(organisation, draft)* **`search` document**: `{"schema":1,"document":
+"search","platform":…,"terms":[string; ≤16],"notes":bool,"hits":[Hit],
+"findings":[Source],"incomplete":bool,"incomplete_reasons":[token; ≤5],
+"entries":u32,"bytes_read":u64}`. `notes` is false with `--no-notes`;
+`incomplete` is true iff `incomplete_reasons` is non-empty (S §5.9.8
+reasons, in that order); `entries` and `bytes_read` are the counters E
+and B at the end. `Hit`: `{problem: pident, origin: token, fields: [token;
+≤6], notes_lines: [u32; 16], notes_lines_dropped: u32, notes_truncated:
+bool}`; `fields` lists the matched fields in the order `identity`,
+`title`, `url`, `tags`, `status`, `notes`; `notes_lines` keeps the first 16
+matching lines. Hits are bounded by E.
+
+*(organisation, draft)* **`notes` document**: `{"schema":1,"document":
+"notes","platform":…,"problem":pident,"path":ns,"state":token}`; `path` is
+the absolute native path of `notes.md` (Windows without the verbatim
+prefix, S §5.7); `state` is `created` or `existing` (mutating form), or
+`absent`, `existing`, `not_regular` (`--path`).
+
+Fixtures: `src/report/wire/fixtures/ls.json`, `ls_contests.json`,
+`search.json`, `search_incomplete.json`, `notes.json` (encoder vectors and
+the Python oracle round trip, as for `status`).
 
 ### 6.2 Output
 

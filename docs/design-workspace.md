@@ -61,7 +61,9 @@ For paths under a problem directory, two independent attributes:
 | **visibility** | `normal` \| `ignored` | `[workspace] ignore` patterns (§2.4) |
 
 A path in two lists takes the first matching row; `fsck` reports such
-overlaps. Downloaded provenance `downloaded{role, txn}` (fetch, storage
+overlaps. The fixed layout names `problem.toml`, `tests.toml` and
+*(organisation amendment)* `notes.md` are part of the problem itself, never
+`unknown` or untracked (storage contract §5.9.1). Downloaded provenance `downloaded{role, txn}` (fetch, storage
 contract §5.8.10) sits between `registered` and `created{command}`: a file
 under `tests/` that no record names is `downloaded` only when its name and
 current SHA-256 appear in the open fetch journal or a valid fetch history
@@ -239,9 +241,10 @@ schemas are ignored, as with the other tool-only record codecs.
 
 - **`cpf status [problem|contest|--all]`**: per problem and target:
   registered files missing, untracked files, run-fact comparison (§3.2) with
-  last verdict and time; explicit user status (tags, design §7a) kept apart
-  from derived verdict facts; `--json` (design §8). Never compares against
-  history.
+  last verdict and time; explicit user status (tags and the workflow
+  status set by `cpf mark`, design §7a; storage contract §5.9) kept apart
+  from derived verdict facts; `--json` (design §8); the shared filters of
+  storage contract §5.9.6. Never compares against history.
 - **`cpf clean [--apply]`**: plan by default. It is **S §6.3
   pruning with a zero retention budget**, plus deleting `.cpforge/cache/`
   (initial feature release) — the same leases, lock and two-step rename-then-delete protocol,

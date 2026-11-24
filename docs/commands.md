@@ -122,11 +122,13 @@ This applies to `cpf build`, `cpf test`, `cpf run`, `cpf cmd` and the
 ```
 cpf [--problem <ref>] status [--json]
 cpf status <problem> | <contest> | contest:<contest> | --all [--json]
+cpf status [<problem> | <contest> | contest:<contest> | --all] <filters> [--json]
 ```
 
 `cpf status` shows, for each selected problem:
 
-- its tags and `status` from `problem.toml`, kept apart from everything below;
+- its tags and workflow status (the value set by `cpf mark`, shown as
+  `workflow: solved`) from `problem.toml`, kept apart from everything below;
 - registered files that are missing (sources and support files of the
   solution, files named by `tests.toml`);
 - untracked files: files no record names (not registered, not listed in
@@ -151,13 +153,125 @@ problem; if no problem has that name, the contest of that name, whose members
 are shown in `contest.toml` order. `contest:<name>` always means the contest.
 `--all` shows every problem in `problems/`, by name.
 
+Filters (see "Filters" below) keep only the matching problems of that
+selection; filters without a selection mean `--all`. Without filters the
+command behaves as before.
+
 Status only reads: it takes no lock, creates no file and never deletes
 anything. `--json` prints one `status` document (report contract §6.1).
 
 | Status | Meaning |
 |---|---|
 | 0 | status shown (findings such as missing files do not change it) |
+| 2 | a filter value is not valid |
 | 8 | outside a workspace, an unknown problem or contest, unreadable records |
+| 11 | `--json` output could not be written |
+
+# Tags and workflow status
+
+```
+cpf tag <target> <tag>...
+cpf untag <target> <tag>...
+cpf mark <target> <status>
+```
+
+`<target>` is a problem (`two-sum`, `local:two-sum`, `cses:1068`), `.` for
+the problem the current directory or `cpf switch` selects, or, for `tag`
+and `untag` only, `contest:<name>`. A name never falls back to a contest
+here; use `contest:<name>`.
+
+Tags are free-form words of 1–32 ASCII letters, digits, `-` and `_`,
+starting with a letter or digit. They are compared ignoring ASCII case:
+`DP` and `dp` are the same tag, and the first spelling is kept. `cpf tag`
+adds tags that are not there yet; `cpf untag` removes them. Problem tags
+live in `[problem] tags` of `problem.toml`, contest tags at the top level of
+`contest.toml`; they are separate, so filtering problems by a tag never
+matches a contest's tag. An `upsolve` tag can sit next to any status.
+
+The **workflow status** is yours: `new`, `in-progress`, `solved`,
+`skipped`, plus the names in `[status] values` of your user or workspace
+configuration. A problem never marked counts as `new`. Passing tests never
+changes it. `cpf mark p solved` also records `solved_at`; marking another
+status later keeps `solved_at`. Every change records `updated_at`; new
+problems get `created_at`. Times are stored in UTC, as
+`2026-11-24T10:00:00.000Z`.
+Contests have no workflow status of their own; `cpf ls --contests` counts
+their members per status.
+
+The commands edit only these keys; comments, formatting and every other key
+stay as they are, and an editor's save during the edit is detected (the
+edit is retried once, then refused). A key you wrote by hand that cpf
+cannot read (`tags = "dp"`, an invalid date) is reported by `cpf status`,
+`cpf ls` and `cpf fsck`, never rewritten: the command that would change it
+refuses until you fix it. Such a key never stops builds or tests.
+
+| Status | Meaning |
+|---|---|
+| 0 | done, or nothing to change |
+| 2 | an invalid tag or status name, no tag, `--problem`, `mark` on a contest |
+| 7 | `mark`: a status that is neither built-in nor in `[status] values` |
+| 8 | outside a workspace, unknown target, unreadable record, a hand-written key cpf cannot read, lock busy, concurrent edits |
+
+# Notes
+
+```
+cpf [--problem <ref>] notes [<problem>] [--path] [--json]
+```
+
+`cpf notes` creates an empty `notes.md` in the problem directory if there
+is none and prints its absolute path, so `$EDITOR "$(cpf notes)"` opens it.
+An existing `notes.md` is never changed. `--path` only prints the path and
+creates nothing. Notes are plain text that cpf only reads (for
+`cpf search`); they are never listed as untracked. Exit 0, or 8 when the
+problem cannot be resolved or `notes.md` is not a regular file.
+
+# Listing and searching
+
+```
+cpf ls [<filters>] [--json]
+cpf ls --contests [--tag <t>]... [--site <s>]... [--json]
+cpf search <term>... [<filters>] [--no-notes] [--json]
+```
+
+`cpf ls` lists every problem with its workflow status, tags, title, dates
+and contests, by name, then every entry of `problems/` that is not a usable
+problem, with the reason. `cpf ls --contests` lists contests with their
+tags and the number of members per workflow status.
+
+`cpf search` finds problems in which every term occurs, ignoring case and
+accents written as combining marks, in the identity, title, URL, tags,
+workflow status or the first 64 KiB of `notes.md` (`--no-notes` skips the
+notes). It reads files directly, without an index. One search reads at most
+100 000 directory entries and files and 64 MiB; if a bound is reached,
+notes are cut at 64 KiB, a file cannot be read or the search is
+interrupted, the result says it is **incomplete** and why. Unreadable or
+broken problems are always reported, never hidden behind "no matches".
+
+**Filters** (same for `ls`, `status` and `search`):
+
+| Flag | Keeps problems |
+|---|---|
+| `--status <s>` | with that workflow status (repeat for any of several) |
+| `--tag <t>` | with that tag (repeat: all of them) |
+| `--site <s>` | from that site (`local`, `atcoder`, `cses`; repeat for any) |
+| `--contest <c>` | listed in that contest (repeat for any) |
+| `--created`, `--updated`, `--solved <range>` | with that date in the range |
+
+A range is a day `2026-11-24`, `2026-11-01..2026-11-24` (inclusive),
+`2026-11-01..` or `..2026-11-24`, in your local time zone (`TZ`, else the
+system setting); times are stored in UTC and converted, so a problem
+solved at 00:30 local time counts for that local day, also across DST
+changes. Different flags must all match.
+
+These commands only read: no lock, no file created. They start no program,
+so they work the same on Linux, macOS and Windows, as do `tag`, `untag`,
+`mark` and `notes`.
+
+| Status | Meaning |
+|---|---|
+| 0 | listed or searched (also when incomplete or with findings) |
+| 2 | invalid flags, filter values or search terms |
+| 8 | outside a workspace, `problems/` unreadable, an unknown `--contest` |
 | 11 | `--json` output could not be written |
 
 # Cleaning

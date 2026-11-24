@@ -20,6 +20,11 @@ catalog download fields (§8.1), their schemas (§9) and allowed states (§10).
 Amended content is marked *(fetch, draft)*. It replaces generation-based
 publication: tests are published through the catalog commit of §5.8.
 
+**Organisation amendment: draft.** Tags, workflow status, dates and notes,
+`cpf ls` and `cpf search` (§5.9), their ownership rows (§3), field rules
+(§9) and allowed states and tests (§10). Amended content is marked
+*(organisation, draft)*.
+
 Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
@@ -221,7 +226,9 @@ native error, never treated as success.
 | `cpforge.toml` | user | created once by `cpf init`; never rewritten |
 | `problems/<p>/problem.toml`, `tests.toml`, `contests/<c>/contest.toml` | shared | edit transaction (§4.4), only the command's fields |
 | `problems/<p>/tests/*`, solution sources | user once created | created no-clobber; **never modified or deleted** |
-| `problems/<p>/notes.md` | user | never written (CLI foundation) |
+| `problems/<p>/notes.md` | user | *(organisation, draft)* created empty, no-clobber, under the lock, only by `cpf notes` (§5.9.5); never modified, truncated, renamed or deleted |
+| `problem.toml` `[problem]` `tags`, `status`, `created_at`, `updated_at`, `solved_at`; `contest.toml` top-level `tags` *(organisation, draft)* | user fields | edit transaction by `cpf tag`/`untag` (`tags`, `updated_at`), `cpf mark` (`status`, `updated_at`, `solved_at`); `created_at` only in the staged record of a creating command (§5.2, §5.8.4); never another command (§5.9.1) |
+| `problem.toml` `[problem]` `archived_at` *(organisation, draft)* | user field | the archive contract only; read by §5.9 readers |
 | `.cpforge/state.toml` | tool | atomic replace under the lock |
 | `.cpforge/runs/<job>/` | tool, disposable | by its job (§6) |
 | `.cpforge/staging/` | tool | only while holding the workspace lock |
@@ -465,6 +472,9 @@ gitignore` and writes nothing else.
 1. Lock. Check identity and portable name; same identity existing →
    `Exists` (with `--contest`: verify its `problem.toml` identity, go to 4).
 2. Stage `.cpforge/staging/<txid>/` (problem files, solution from template).
+   *(organisation, draft)* The staged `problem.toml` carries `[problem]
+   created_at` (§5.9.2 timestamp, the time of this step); it is published
+   with the directory, so no state has a problem without it.
 3. `publish_dir_noclobber` to `problems/<name>`; not committed → staging
    removed, error.
 4. Contest membership: edit transaction on `contest.toml` (created no-clobber
@@ -1011,7 +1021,7 @@ health), or `missing` (absent, not a regular file, or unreadable).
 **Creation** (no `problems/<p>` at steps 0 and 2): step 3 writes the journal
 with `create = true`; step 4 stages `.cpforge/staging/<txn>/` with the same
 problem files as §5.2 step 2 (identity, template solution under the same
-rules, `[files] created`), the tool fields of `problem.toml`, `tests.toml`
+rules, `[files] created`, *(organisation, draft)* `created_at`), the tool fields of `problem.toml`, `tests.toml`
 (`schema = 1`, `[fetch]`, one entry per pair) and the sample files under
 the base names, then `publish_dir_noclobber` to `problems/<p>`. That
 publication commits steps 4–6 at once; a non-committed publication is
@@ -1301,6 +1311,396 @@ catalog; nothing they select depends on a journal.
   record keys are user keys, §5.2); an upstream limit change edits only
   `problem.toml`.
 - A `ProblemSet` selection writes no membership and no contest directory.
+
+### 5.9 Organisation: tags, workflow status, notes, listing, search *(organisation amendment, draft)*
+
+Tags, the user's workflow status, dates and notes of design §7a, and the
+read-only `cpf ls` and `cpf search` over them. These commands start no
+process, take no job lease and run no hooks, so they run in full on Linux,
+macOS and Windows; every test of this section runs on all three.
+
+**Two statuses, two names.** The **workflow status** is the value the user
+sets with `cpf mark` (`[problem] status`: `new`, `solved`, …). The
+**workspace status** is what `cpf status` shows (registered files missing,
+untracked files, run-fact comparison; workspace design §3.3). `cpf mark`
+never reads facts and `cpf status` never derives a workflow status: passing
+tests never sets `solved`. `cpf status` shows the workflow status as one
+labelled line `workflow: <value>` next to the tags, and its JSON member
+stays `user_status` (report §6.1). Contests have no stored workflow status;
+`cpf ls --contests` shows a **derived** one (§5.9.7).
+
+#### 5.9.1 Fields and where they live
+
+| Field | Record | Type | Written by | Never written by |
+|---|---|---|---|---|
+| `tags` | `problem.toml` `[problem]` | array of tags (§5.9.2) | `cpf tag`, `cpf untag` | any other command |
+| `status` | `problem.toml` `[problem]` | a status name (§5.9.2) | `cpf mark` | any other command; jobs and facts never |
+| `created_at` | `problem.toml` `[problem]` | timestamp | `cpf add` (staged record, §5.2 step 2); fetch creation (§5.8.4, staged record) | every later command; never backfilled |
+| `updated_at` | `problem.toml` `[problem]` | timestamp | every committed `tag`, `untag`, `mark` edit of that record | fetch metadata edits (§5.8.4 step 6), `adopt`, test commands, `notes` |
+| `solved_at` | `problem.toml` `[problem]` | timestamp | `cpf mark <t> solved` when the stored status is not `solved` | everything else; no command removes it |
+| `archived_at` | `problem.toml` `[problem]` | timestamp | the archive (archive contract) | every §5.9 command (read only) |
+| `tags` | `contest.toml`, top level | array of tags | `cpf tag`, `cpf untag` on a contest | any other command |
+| — | `problems/<p>/notes.md` | free text | created empty, once, by `cpf notes` (§5.9.5) | everything: never modified, truncated or deleted |
+
+- **In the records, not a sidecar.** The fields are user fields of
+  `problem.toml` and `contest.toml` (§3), written only through the §4.4 edit
+  transaction. Reasons: design §7a stores them there so they travel into an
+  archive with the problem; the user edits them by hand next to the rest of
+  the record; `cpf status` already reads them there; the edit transaction
+  already gives the crash and editor semantics wanted, so no new record,
+  schema or recovery rule is needed. A sidecar would add a second file per
+  problem whose consistency with `problem.toml` cpf would have to define.
+- Contest tags sit at the top level of `contest.toml` (beside `schema`),
+  not in `[contest]`: that table holds fetch's tool fields and its presence
+  binds a remote contest (§5.8.13), while a local contest has none. Contests
+  have no dates and no workflow status.
+- **Field states.** Each field above is `absent`, `valid` or `invalid{reason}`
+  by the rules of §5.9.2. The state of an organisation field is **not** part
+  of record classification (§9): a `problem.toml` whose `tags` is invalid is
+  still `valid`, selectable and buildable, so a typo never blocks a job.
+  Every reader reports an invalid field (§5.9.9); a filter on an invalid
+  field never matches; a command that would write an invalid field refuses
+  (§5.9.4).
+- `archived_at` on an active problem is shown and filterable but has no
+  meaning for this section; the archive contract defines it.
+- `notes.md` is a fixed name of the problem layout, like `problem.toml` and
+  `tests.toml`: its provenance is never `unknown` and `cpf status` never
+  lists it as untracked (workspace design §2.2, amended).
+
+#### 5.9.2 Grammars
+
+- **Tag**: 1–32 ASCII characters from `[A-Za-z0-9_-]`, the first a letter
+  or digit. The **tag key** is its ASCII lowercase form (equal to the §2.1
+  collision key for these characters). Tags are stored as first spelled;
+  two tags with the same key are the same tag. Tags are free-form: there is
+  no configured tag set.
+- **Valid `tags` field**: an array of at most 64 strings, each a tag, no two
+  with the same key. Anything else (not an array, a non-string or
+  ungrammatical element, a duplicate key, more than 64) is
+  `invalid{reason}`, the reason naming the first offending element.
+- **Status name**: 1–32 ASCII characters from `[a-z0-9-]`, the first a
+  letter, the last not `-`. A stored `status` that is a string in this
+  grammar is `valid`, whether or not the current vocabulary lists it (a
+  removed custom value stays readable and filterable); any other value is
+  `invalid`.
+- **Vocabulary** (used only by `cpf mark`): the built-in names `new`,
+  `in-progress`, `solved`, `skipped`, in this order, followed by
+  `status.values` (configuration contract §7.5) in configured order.
+- **Effective status**: the stored `status` when `valid`; `new` when
+  `absent`; none when `invalid`. Filters and contest counts use the effective
+  status, so a problem never marked counts as `new`.
+- **Timestamp** (all date fields): a TOML **string**. cpf writes exactly the
+  report `time` form `YYYY-MM-DDTHH:MM:SS.mmmZ` (report §3.2): UTC from the
+  system clock, milliseconds truncated, so values sort as strings and
+  appear unchanged in JSON. A reader also accepts the hand-written forms
+  `YYYY-MM-DDTHH:MM:SSZ` and `YYYY-MM-DD` (read as `T00:00:00.000Z`). Every
+  component is range-checked (month 01–12, day valid for the month and leap
+  year, hour 00–23, minute and second 00–59; no leap second), the year is
+  1970–9999. A TOML date-time value, a local time, another offset or any
+  other string is `invalid`. A system clock outside 1970–9999 refuses the
+  writing command (8) before anything is written. Times are informative: a
+  clock step can make `updated_at` earlier than `created_at`; nothing
+  depends on their order.
+
+#### 5.9.3 Targets
+
+`cpf tag`, `untag` and `mark` take an explicit first operand `<target>`,
+because a local problem name and a tag are both bare words:
+
+| `<target>` | Means |
+|---|---|
+| `.` | the problem this invocation selects (§5.7 sources 2–3: cwd problem, then saved selection) |
+| a problem reference | §5.7 references, extended by the remote (§2.1) and `<contest>/<label>` forms; resolved as a problem only, never as a contest |
+| `contest:<name>` | the contest `contests/<name>/` (`<name>` an Identifier); `tag`, `untag` only |
+
+A bare name that names no problem is the error "no problem `<name>`" (8),
+with a note when a contest of that name exists: mutations never fall back
+from a problem to a contest (`cpf status` does, as a reader). The global
+`--problem` flag with any of the three commands is a usage error (2), as
+with `switch`. `cpf notes` takes an optional problem `[<ref>]`; without it
+the problem is selected as for every command (§5.7, `--problem` included);
+both a `<ref>` and `--problem` → 2.
+
+#### 5.9.4 `cpf tag`, `cpf untag`, `cpf mark`
+
+```
+cpf tag <target> <tag>...
+cpf untag <target> <tag>...
+cpf mark <target> <status>
+```
+
+**Before the workspace.** Arguments are checked first, before discovery,
+config or the lock: at least one tag; every tag in the §5.9.2 grammar; for
+`mark`, exactly one status in the status-name grammar and a target that is
+not `contest:<name>`. A violation is a usage error (2) and nothing is
+opened. (Such an error lies in the argument alone and is found before any
+record or configuration is read, which is what 2 means, report §5.1; 7 is
+kept for what depends on configuration.) `mark` then loads configuration
+layers 0–2 (no problem layer). It refuses with 7 only when the effective
+`status.values` cannot be determined: a diagnostic at `status.values`, or
+a layer that is invalid as a whole (configuration contract §3.2). Other
+diagnostics (a broken language, say) are printed as warnings and do not
+block marking. A status not in the vocabulary → 7, naming the vocabulary.
+`tag` and `untag` read no configuration.
+
+**Transaction**, one per invocation:
+
+1. Lock (leftover recovery first, §4.5). Resolve `<target>` under the lock
+   (§5.7, or the contest directory: an Identifier, not a link, a directory,
+   `contest.toml` present).
+2. One §4.4 edit transaction on `problems/<p>/problem.toml` or
+   `contests/<c>/contest.toml`, with the replay wrapper (at most two
+   attempts, each from a fresh read). The schema check is the record's
+   classification (§9; for a contest the §5.2 membership rules too):
+   anything but `valid` → refused (8), nothing written. The operation, on
+   the fresh document of each attempt:
+   - `tag`: if `tags` is `invalid` → refuse (8, naming the field and
+     reason). Otherwise append each argument tag, in argument order, whose
+     key is not already present (and not earlier in the same argument list);
+     a missing `tags` is created as an inline array in `[problem]` (problem)
+     or at the top level (contest). The array's existing elements, their
+     spelling, order and formatting are kept.
+   - `untag`: if `tags` is `invalid` → refuse (8). Otherwise remove every
+     element whose key equals an argument's key; the key stays, possibly as
+     `tags = []`. A tag that is not present is reported on stderr and is
+     not an error.
+   - `mark <s>`: if `status`, or `solved_at` when it would be written, is
+     `invalid` → refuse (8). If the stored `status` already equals `<s>`
+     (exact string) → no change. Otherwise set `status = "<s>"`; when `<s>`
+     is `solved`, set `solved_at` to now; any other `<s>` leaves `solved_at`
+     as it is (it records the last time the problem was marked solved).
+   - Every operation that changes the document of a **problem** also sets
+     `updated_at` to now (refused, 8, if the stored `updated_at` is
+     `invalid`). A contest edit writes no date.
+   "Now" is read once per invocation, before step 1.
+3. No change → nothing is written (§4.4 step 3), exit 0, a stderr note
+   says the record already had that state. A result over the record cap
+   (§9) → refused (8), nothing written. A second `Conflict` → 8, the
+   record as the editor left it.
+
+Only these keys change; every other byte of the record round-trips (§4.4
+step 2). Output: nothing on stdout; one stderr line naming the target and
+the resulting tags or status. No `--json`, no `--events` (2). Statuses:
+0, 2, 7 (`mark` only), 8. Windows sharing violations follow §4.2's ≤ 2 s
+retry with revalidation, then 8.
+
+#### 5.9.5 `cpf notes`
+
+```
+cpf notes [<ref>] [--path] [--json]
+```
+
+- **Mutating form** (default). Resolve the problem (§5.9.3), then lock
+  (leftover recovery first) and inspect `problems/<p>/notes.md` without
+  following links:
+  - absent → `publish_file_noclobber` (§4.3) of an **empty** file; state
+    `created`;
+  - a regular file (any content, any size) → untouched, not opened for
+    writing; state `existing`;
+  - `Exists` from the no-clobber publish (an editor or another `cpf notes`
+    created it after the inspection) → inspect again: a regular file is
+    `existing`; anything else as below;
+  - a link, directory or other non-regular entry → refused (8), nothing
+    written, stdout empty.
+  Then print the absolute path of `notes.md` and a newline on stdout (the
+  `cpf current --path` form, §5.7), and on stderr `created` or `exists`.
+  cpf never writes, truncates, renames or deletes an existing `notes.md`,
+  and never opens an editor (`$EDITOR "$(cpf notes)"` is the intended use).
+- **`--path`**: read-only. No lock, no recovery, nothing created: resolve
+  the problem lock-free (§5.7 readers), print the same path, and say on
+  stderr whether the file exists (`absent`, `existing`, or `not a regular
+  file`). Exit 0 in each of these cases.
+- `--json`: the `notes` document (report §6.1) instead of the bare path;
+  on failure the `error` document (`command: "notes"`).
+- A contest target (`contest:<name>`) → 2. Statuses: 0, 2, 8, 11
+  (`--json` delivery).
+
+#### 5.9.6 Filters
+
+One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
+`cpf search`:
+
+| Flag | Value | Matches a problem when |
+|---|---|---|
+| `--status <s>` (repeatable) | status name | its effective status equals one of the values (OR) |
+| `--tag <t>` (repeatable) | tag | its valid `tags` contains every value by key (AND); contest tags never count |
+| `--site <s>` (repeatable) | `local` or the site grammar (§2.1) | its identity's site equals one of the values (OR) |
+| `--contest <c>` (repeatable) | Identifier | a `[[problem]]` record of `contests/<c>/contest.toml` has its identity (OR over values) |
+| `--created <range>`, `--updated <range>`, `--solved <range>` | range | that field is `valid` and its UTC date lies in the range |
+
+- **Range**: `D` (that day), `D..` (from D), `..D` (up to and including D),
+  `D1..D2` (inclusive); `D` is `YYYY-MM-DD` with the §5.9.2 component
+  checks. `D1` after `D2`, `..`, or an empty side on both → 2.
+- **Local days.** Ranges are in **local** days of the time zone in effect
+  when the command starts; stored timestamps stay UTC (§5.9.2). A stored
+  UTC instant has the **local date** obtained by converting it with that
+  zone's offset at that instant (the zone's full rules, historical changes
+  included). A value matches `D1..D2` iff its local date lies in
+  `[D1, D2]`; open sides are unbounded. Because each instant has exactly one
+  local date, DST needs no special case: a day whose midnight is skipped
+  (a spring-forward gap at 00:00) begins at the first existing local time,
+  a day with a repeated hour simply contains more instants, and a repeated
+  midnight (fall-back at 00:00) belongs to the new day from the first
+  instant whose local date is the new date. A hand-written date-only value
+  (`YYYY-MM-DD`) is already a local date and is compared as written, never
+  converted; the JSON documents still show it as `T00:00:00.000Z` (report
+  §6.1).
+- **Time zone source**, read once per invocation: Unix (Linux, macOS) —
+  `TZ` when set and non-empty (a POSIX TZ string, or a zone name or
+  `:`-path resolved in the system time zone database), otherwise
+  `/etc/localtime`; Windows — the system's dynamic time zone
+  (`GetDynamicTimeZoneInformation`, with its year-specific rules). If the
+  zone cannot be determined (an invalid `TZ`, an unreadable or invalid
+  `/etc/localtime`, an API failure), date filters use UTC and the command
+  prints one stderr warning naming the cause; nothing else changes. A test
+  seam (`storage-test-hooks`) replaces the zone with a given POSIX TZ string
+  on every OS, so date tests never depend on the host.
+- Different flags combine with AND. A problem whose field is `invalid` or
+  `absent` (dates) never matches a filter on that field and is still
+  reported (§5.9.9).
+- Filter values are checked by grammar only, before discovery, config or
+  the lock; a violation → 2. No vocabulary check: a status outside the
+  current vocabulary is a legitimate stored value.
+- `--contest <c>` naming a contest that does not exist, or whose
+  `contest.toml` is not `valid` → 8, naming it.
+- **Candidates.** `cpf ls` and `cpf search`: every entry of `problems/`.
+  `cpf status`: the selected set (a problem, a contest's members in
+  `contest.toml` order, or `--all`); **filters without a selector imply
+  `--all`**. Filters then keep the matching candidates, in candidate order.
+  `cpf status` without a filter behaves exactly as before this amendment.
+- **Same answer.** On one workspace, `cpf ls F` and `cpf status --all F`
+  name the same problems in the same order (directory name, byte order) for
+  every filter set F, when every entry of `problems/` is a valid problem.
+  With an invalid entry, `ls` lists it under `invalid` and exits 0, while
+  `status --all` keeps its existing behaviour (8, naming the entry; report
+  §6.1 `error` document); both report it, neither hides it.
+
+#### 5.9.7 `cpf ls`
+
+```
+cpf ls [filters] [--json]
+cpf ls --contests [--tag <t>]... [--site <s>]... [--json]
+cpf ls --archived …        (archive contract; refused with 2 "not available yet" until archives exist)
+```
+
+Lock-free and read-only (§5.9.9). Default form: one entry per valid problem
+that passes the filters, by directory name in byte order, with identity,
+effective status, tags, title (when the fetch field is present), the four
+dates and the contests it belongs to; then every entry of `problems/` that
+is not a valid problem (§2.1 lookup rules: link, not a directory, record
+`missing`/`unreadable`/`malformed`/`too_new`, `IdentityMismatch`, an
+invalid or colliding name), each with its reason; then field findings.
+
+`--contests`: one entry per entry of `contests/`, by name. For a valid
+contest: its tags, its member count, and the **derived contest status**:
+the number of members per effective status, listing the built-in names in
+vocabulary order and then other stored values in byte order, omitting zero
+counts; members whose problem cannot be resolved (missing directory, not a
+valid problem, identity mismatch) are counted as `unresolved`, and members
+with an invalid status as `invalid`. Nothing about a contest status is
+stored, so it is always current. `--tag` matches contest tags (never member
+tags) and `--site` the `[contest] id` site (`local` when there is no
+`[contest]` table). The problem-only filters (`--status`, `--contest`,
+dates) with `--contests` → 2. An invalid contest is listed with its
+reason.
+
+Statuses: 0 (also with invalid entries or findings), 2, 8 (outside a
+workspace; `problems/` or `contests/` cannot be enumerated; `--contest`
+names no valid contest), 11 (`--json`). Every entry here is an active
+problem; results carry `origin: active` (report §6.1); `snapshot` results
+come with `--archived`.
+
+#### 5.9.8 `cpf search`
+
+```
+cpf search <term>... [filters] [--no-notes] [--json]
+```
+
+- **Terms**: 1–16 positional terms, each non-empty, valid UTF-8 (a
+  non-UTF-8 argument → 2) and at most 256 bytes. A problem is a **hit** when
+  every term occurs as a substring of at least one searched field (terms
+  may match different fields). Matching compares the §2.1 collision keys of
+  term and field text (`NFD(CaseFold(NFD(x)))`), so it ignores case and
+  canonical-equivalence differences; as a stated consequence, a term `e`
+  also matches `é`.
+- **Searched fields** of each candidate that passes the filters: `identity`,
+  `title`, `url` (fetch fields, when present), `tags` (each element),
+  `status` (stored, when valid), and `notes` (the first 64 KiB of
+  `notes.md`) unless `--no-notes`. Invalid fields are not searched and are
+  reported.
+- **Notes reading**: opened without following links (`O_NOFOLLOW`, Windows
+  `FILE_FLAG_OPEN_REPARSE_POINT`) and non-blocking (`O_NONBLOCK`), then
+  checked through the handle: anything but a regular file (link, FIFO,
+  device, socket, directory) is never read, reported `notes_not_regular`.
+  At most 65 536 bytes are read, plus one byte to detect more: then the hit
+  or non-hit carries `notes_truncated`. A UTF-8 sequence cut by the limit is
+  dropped; other invalid UTF-8 is decoded with U+FFFD replacements and
+  reported `notes_not_utf8`, and the file is still searched. Line numbers
+  count LF-terminated lines from 1 (a CR before LF is ignored).
+- **Bounds**, per invocation, counted across every source of the search
+  (the workspace now; archive roots once archives exist):
+  - *entries* E ≤ 100 000: each directory entry returned by the
+    enumeration of `problems/` and each file open attempted (`problem.toml`,
+    `notes.md`, and `contests/<c>/contest.toml` for each `--contest`, read
+    once before the candidates) counts one, hits or not;
+  - *bytes* B ≤ 64 MiB (67 108 864): every byte read from those files.
+  `problems/` is enumerated completely first (counting entries), then the
+  candidates are examined in directory-name byte order. Before reading a
+  file, the length reported by its open handle (for `notes.md`, at most
+  65 537) is checked against the remaining byte allowance, and a file that
+  grows while it is read is read at most to that allowance, so B never
+  exceeds its bound. Before an action that would make E exceed its bound,
+  or a read that would make B exceed it, the search stops: the problem being examined is neither a hit
+  nor reported as examined, and the result is **incomplete** with
+  `entry_limit` or `byte_limit`. If E reaches its bound during the
+  enumeration, the search stops there and examines no candidate.
+- **Incomplete** means some content that the query covers was not examined.
+  Reasons, each listed once in this order: `entry_limit`, `byte_limit`,
+  `notes_truncated`, `unreadable_source` (a candidate that is not a valid
+  problem, an unreadable or non-regular `notes.md`, an invalid field),
+  `cancelled`. A complete search has no reason. `--no-notes` never yields
+  `notes_truncated`.
+- **Cancellation** (Ctrl-C, SIGTERM; report §5.3) is checked before every
+  counted action. The search stops, prints what it found with
+  `cancelled`, and exits with the cancellation status. It holds no lock and
+  wrote nothing, so there is nothing to clean up.
+- **Output**: hits in examination order: identity, `origin`, the matched
+  field names, for notes up to 16 matching line numbers, and
+  `notes_truncated`; then every finding; then, if incomplete, one line
+  `search incomplete: <reasons>` on stderr. A search with zero hits says
+  `no matches` and still lists findings and incompleteness: an unreadable
+  source is never hidden behind "no matches".
+- Lock-free and read-only (§5.9.9). No index or cache is written.
+- Statuses: 0 (hits or none, complete or incomplete), 2, 8 (outside a
+  workspace; `problems/` cannot be enumerated; `--contest` names no valid
+  contest), 11 (`--json`), cancellation. Incompleteness is a reported
+  result, not a failure, as findings are for `cpf status` and `cpf fsck`.
+- **Archive roots** are not searched until archives exist: the archive
+  contract defines the snapshot fields searched, containment (restore's rules) and
+  `origin: snapshot` results, within the bounds above.
+
+#### 5.9.9 Readers
+
+`cpf ls`, `cpf search`, `cpf notes --path` and `cpf status` (with or
+without filters) are **lock-free readers**: no lock, no leftover recovery,
+no file created, renamed or deleted, no hook, no process; the workspace is
+byte-identical afterwards (no `.cpforge/lock` created where there was none).
+They read records with the §9 classification and resolve problems with the
+§5.7 reader lookup. A concurrent edit can make an answer stale, never a
+mixture of two states of one file. Every source that cannot be used is
+reported with its path and reason, in the human output and the document:
+an entry of `problems/` that is not a valid problem, an invalid
+organisation field (field name and reason), an unreadable `contest.toml`,
+a non-regular or unreadable `notes.md` (search). A reader never stops at
+the first such source (`cpf status` excepted, unchanged, §5.9.6).
+
+#### 5.9.10 Maintenance
+
+No tree is created. `cpf fsck` additionally reports invalid organisation
+fields (problem and contest) and a non-regular `notes.md`; `--apply` never
+changes them (user fields). `cpf clean` never touches `notes.md` or the
+fields. `cpf gitignore` lists nothing new: notes and tags are user content.
+The archive class `notes` (design §7a) is the archive contract's.
 
 ## 6. Job directories, leases, pruning
 
@@ -1736,6 +2136,15 @@ finalizes them (execution contract §6.2).
   (§8.1), the `problem.toml` tool fields and `contest.toml` `[contest]`
   (§5.8.13) are additions to schema 1 of those user-editable formats: a
   version without fetch preserves them as unknown keys.
+- *(organisation, draft)* The `problem.toml` organisation fields and the
+  `contest.toml` top-level `tags` (§5.9.1) are additions to schema 1 of
+  those formats; a version without them preserves them as unknown keys.
+  Their state (`absent`, `valid`, `invalid{reason}`, §5.9.2) is decided by
+  their own field rules **after** classification and never changes the
+  record's classification: an invalid organisation field leaves the record
+  `valid`, selectable and executable. `notes.md` is free text, not a
+  governed format: no schema, no cap except the 64 KiB that search reads
+  (§5.9.8).
 - *(fetch, draft)* **Fetch records**: classified with the tool-only record
   classification below. Newer-schema handling: a `too_new` journal blocks
   `cpf fetch` of its problem and is never removed; a `too_new` history
@@ -1810,6 +2219,8 @@ finalizes them (execution contract §6.2).
 | *(draft)* `job-seq` `unreadable` (permission removed) | admission refused naming the error; a finishing job publishes `NotPublished{SequenceUnavailable}`; `fsck --apply` reports, does not repair | after access is restored: admission continues the same epoch |
 | *(draft)* fact classification | valid TOML with supported schema but no `n`, or `n = "01"`: `malformed`, replaced on publication; newer-schema fact lacking current fields: `too_new`, preserved by publication and by `fsck` for a deleted problem | — |
 | *(draft)* adopt / gitignore | old content | new content |
+| *(organisation, draft)* `tag`, `untag`, `mark` edit (§5.9.4) | record byte-identical to before; temp may remain (recovered by the next locked operation) | record with exactly the new organisation values and every other byte unchanged |
+| *(organisation, draft)* `notes` publish (§5.9.5) | no `notes.md`; temp may remain (recovered) | empty regular `notes.md` |
 | *(fetch, draft)* every fetch boundary | see the fetch crash matrix below | |
 
 *(fetch, draft)* **Fetch crash matrix** (the C5 gate; C6, C7 and C8 for
@@ -1975,6 +2386,7 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | test add, register, enable/disable (§5.3) | C6 |
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |
+| *(organisation, draft)* `tag`/`untag`/`mark`, `notes`, filters, `ls`, `status` with filters, `search`, `created_at` | the organisation command tasks (fetch creation's `created_at`: the fetch creation task); archive-root search with the archive |
 | *(fetch, draft)* every cell of the fetch crash matrix, the §5.8.8 failure transitions, reconciliation, download-area reclamation, readers, records | C5 (transaction, recovery, matrix rows 1–24 for R, M, A, X), C6 (creation, row C cells), C7 (pair rules, provenance), C8 (selections, bulk bound, row 25), C9 (status surfaces) |
 
 Reruns: `init`, `add --contest` complete the operation; `test add` may
@@ -2260,6 +2672,192 @@ contest fetch completes its membership.
   rename and no directory flush.
 - Every fetch test runs on Linux, macOS and Windows (fetch starts no
   process).
+- *(organisation, draft)* **Organisation harness.** Every test drives the
+  actual `cpf` binary. A `storage-test-hooks` clock override fixes "now"
+  (`2026-11-24T10:00:00.000Z` unless a row says otherwise); a bounds
+  override lowers the search bounds E and B; pause barriers
+  `org.before_validation` (edit rendered, before the first §4.4 step-4
+  validation), `notes.before_publish` (temp written, before the no-clobber
+  call) and `search.before_action#k` (before the k-th counted action);
+  crash points `org.edit_validated` (temp validated, before the rename),
+  `org.edit_committed` (after the rename, before the directory sync),
+  `notes.before_publish`, `notes.published`. "Byte-identical" compares
+  every file of the workspace (path, bytes, and for records the file
+  identity) before and after; "no write" additionally asserts the record's
+  file identity and modification time are unchanged. Every row runs on
+  Linux, macOS and Windows unless it names an OS.
+- **Grammars** (pure tables): tags `dp`, `DP`, `2-sat`, `a`, a 32-character
+  tag accepted; `""`, 33 characters, `-x`, `_x`, `a b`, `a.b`, `a/b`, `é`
+  rejected. Status names `new`, `in-progress`, `a`, 32 characters accepted;
+  `In-progress`, `-a`, `a-`, `1a`, `a_b`, 33 characters rejected. Valid
+  `tags` fields: `[]`, 64 tags; invalid: `"dp"`, `[1]`, `["dp", "DP"]`
+  (reason names element 2), 65 tags. Timestamps accepted:
+  `2026-11-24T10:00:00.000Z`, `2026-11-24T10:00:00Z`, `2026-11-24`,
+  `2024-02-29`, `1970-01-01`, `9999-12-31T23:59:59.999Z`; rejected:
+  `2026-02-29`, `2026-13-01`, `2026-11-31`, `T24:00:00Z`, `T10:60:00Z`,
+  `T10:00:60Z`, `+01:00` offset, lowercase `z`, `.12Z`, no `Z`, a TOML
+  date-time value, `1969-12-31`, year `10000`. Effective status: absent →
+  `new`, `"5"` invalid → none. Filter ranges under the zone seam `UTC0`:
+  `2026-11-24` contains `T00:00:00.000Z` and `T23:59:59.999Z` and not
+  `2026-11-25T00:00:00.000Z`; `..2026-11-24`, `2026-11-24..`,
+  `2026-11-20..2026-11-24` inclusive at both ends; `2026-11-25..2026-11-24`,
+  `..`, `2026-02-29`, `2026-11-24T10:00Z` rejected.
+- **Local-day tables** (zone injected through the test seam on every OS,
+  and additionally through `TZ` on Linux and macOS with the same expected
+  results): `CET-1CEST,M3.5.0,M10.5.0/3` → `2026-11-24T23:30:00.000Z` is
+  local 2026-11-25, `2026-07-01T22:30:00.000Z` is 2026-07-02,
+  `2026-07-01T21:59:59.999Z` is 2026-07-01; `EST5EDT,M3.2.0,M11.1.0` →
+  `2026-11-25T04:59:59.999Z` is 2026-11-24 and `T05:00:00.000Z` 2026-11-25;
+  on 2026-03-08 (23-hour day) and 2026-11-01 (25-hour day) every instant
+  from local 00:00 to the next local 00:00 matches that day and no other;
+  a midnight-transition rule `<-03>3<-02>,M9.1.6/24,M4.1.6/24` → the day
+  after the spring-forward begins at local 01:00 and the instant one
+  millisecond before it is the previous day; at the fall-back the repeated
+  23:00–24:00 hour belongs to the earlier day and the following midnight
+  instant to the new day. A date-only stored `2026-11-24` matches
+  `--solved 2026-11-24` under every zone above. An invalid `TZ` value
+  (`TZ=Nowhere/Invalid`, Unix) → one stderr warning and UTC-day results.
+- **Argument errors before the workspace:** run outside any workspace, each
+  of `cpf tag p 'a b'`, `cpf tag p`, `cpf mark p Solved`, `cpf mark
+  contest:c solved`, `cpf --problem a tag . dp`, `cpf ls --tag 'a b'`,
+  `cpf ls --contests --status new`, `cpf status --solved 2026-02-29`,
+  `cpf search` (no term), 17 terms, a 257-byte term, a non-UTF-8 term
+  (Unix), `cpf notes contest:c`, `cpf tag p dp --json` exits 2 (not 8),
+  and no file is created anywhere.
+- **`tag`/`untag` edits:** on a `problem.toml` with CRLF line endings,
+  comments, an unknown key and a `[config]` table, `cpf tag p dp graphs`
+  → exit 0 and the record equals the expected fixture bytes: only `tags =
+  ["dp", "graphs"]` and `updated_at = "2026-11-24T10:00:00.000Z"` added to
+  `[problem]`, CRLF kept. Then: the same command → no write; `cpf tag p
+  DP` → no write; `cpf tag p Graphs x x` → only `x` appended, once;
+  `cpf untag p GRAPHS` → `graphs` removed, `updated_at` at the new clock;
+  `cpf untag p nope` → stderr note, exit 0, no write; untagging the last
+  tags → `tags = []`. An existing multi-line `tags` array with a comment
+  keeps the comment and layout after an append.
+- **`mark`:** `cpf mark p solved` → `status`, `solved_at`, `updated_at` all
+  equal the clock; again at a later clock → no write; `cpf mark p
+  in-progress` (clock T2) → `status` changed, `solved_at` unchanged,
+  `updated_at` = T2; `cpf mark p solved` at T3 → `solved_at` = T3. With
+  workspace `status.values = ["wa"]` → `cpf mark p wa` succeeds; without →
+  7, record byte-identical, message lists the five-name vocabulary; user
+  `["wa"]` with workspace `["x"]` → `wa` is 7 (the array replaces);
+  `status.values = [1]` → 7; a phase-1 error in a language table only →
+  `mark` succeeds with a warning. `mark p new` on a problem without
+  `status` writes `status = "new"`.
+- **Invalid fields block only their writers:** `tags = "dp"` → `cpf tag`
+  and `cpf untag` exit 8 naming `tags`, record byte-identical, and `cpf
+  mark p solved` succeeds (it does not write `tags`); `updated_at = 5` →
+  `tag`, `untag` and `mark` exit 8; `solved_at = "x"` → `mark p solved` 8,
+  `mark p skipped` succeeds. In every case `cpf current --problem p`,
+  `cpf switch p` and `cpf status p` still select the problem (the record is
+  `valid`); `cpf status` lists the invalid field in `diagnostics` with
+  `tags: []` / `user_status: null`.
+- **Targets:** `.` from inside `problems/p/` tags `p`; `.` with a saved
+  selection and the root as cwd tags the saved problem; `.` with no
+  selection → 8 `NoSelection`; a bare name naming only a contest → 8 with
+  the contest note, `contest.toml` byte-identical; `cpf tag contest:c
+  rated` adds top-level `tags = ["rated"]` to a local `contest.toml`, every
+  `[[problem]]` record byte-unchanged and no `[contest]` table created; a
+  `malformed` `contest.toml` → 8, byte-identical.
+- **Editor and concurrency:** at `org.before_validation` an editor saves
+  `problem.toml` by atomic rename adding a comment → the replay commits and
+  the record holds both the comment and the tag; an editor saving at the
+  barrier of both attempts → 8, the record equals the editor's second
+  version, no `.cpf-tmp-` file left; the same with an in-place save. Two
+  `cpf tag` processes on one problem with different tags, the first paused
+  at the barrier → the second waits for the lock, and afterwards both tags
+  are present in order of commit. Windows: a handle without write or delete
+  sharing held for 3 s → 8, record unchanged; released after 0.5 s → the
+  retry commits.
+- **Crash states:** kill at `org.edit_validated` → record byte-identical to
+  before and one `.cpf-tmp-` file beside it; the next `cpf tag` removes it
+  (leftover recovery) and commits. Kill at `org.edit_committed` → record
+  equals the expected new bytes. Both for `tag`, `untag`, `mark`.
+- **Size:** a `problem.toml` padded by a comment to 1 MiB − 10 bytes →
+  `cpf tag p dp graphs` 8 (`record_too_large`), byte-identical.
+- **Creation dates:** `cpf add two-sum` → `[problem] created_at` equals the
+  clock in the published record; at each existing `add` crash point the
+  published problem, when present, has it; `cpf add --contest c two-sum`
+  on the existing problem leaves its `problem.toml` byte-identical.
+  (Fetch creation: with the fetch creation tests.)
+- **`notes`:** absent → stdout exactly the absolute path and `\n`, stderr
+  `created`, a 0-byte regular file; again → `exists`, no write; an existing
+  file with content → unchanged; `notes.md` a directory, a symlink (target
+  untouched), a FIFO (Unix, returns without blocking) → 8, stdout empty; an
+  editor creating `notes.md` with bytes `x` at `notes.before_publish` →
+  exit 0, `exists`, content `x`, no temp left; two `cpf notes` started
+  together → both exit 0 with the same stdout, one file created; kill at
+  `notes.before_publish` → no `notes.md`, a temp the next locked command
+  removes; kill at `notes.published` → empty `notes.md`. `--path` in a
+  workspace without `.cpforge/lock` → no lock file created, nothing
+  created, exit 0 for absent, existing and directory `notes.md`, stderr
+  naming each state. `cpf status` never lists `notes.md` as untracked.
+  `--json`: document vectors for `created`, `existing`, `absent`.
+- **Filters (fixture workspace F):** twelve valid problems covering status
+  absent, `new`, `in-progress`, `solved`, `skipped`, `wa` (not in the
+  vocabulary) and `5` (invalid); tags `dp`, `DP`, `graphs`, none and the
+  invalid `"dp"`; sites `local` and `atcoder`; dates in all three
+  accepted forms, one invalid, some absent; two contests sharing a member,
+  each with contest tag `rated`. One table of at least 16 filter sets
+  (each flag alone, repeated `--status` (OR), repeated `--tag` (AND),
+  `--tag DP` = `--tag dp`, `--tag rated` matching no problem, `--contest`
+  OR, each date flag with each range form, combinations) with the expected
+  identity list per set. For every set, `cpf ls` and `cpf status --all`
+  (and `cpf status` without a selector) give exactly that list in that
+  order, human and `--json`; `--status new` includes the absent one;
+  `--status 5`-style invalid values are 2, and the invalid-status problem
+  appears in no `--status` result and in every listing's findings.
+  `cpf status contest:c1 --status solved` → the solved members in
+  `contest.toml` order. `--contest nope` → 8.
+- **Invalid entries:** F plus `problems/broken/` with a malformed
+  `problem.toml`, a link `problems/l`, and a regular file `problems/f` →
+  `cpf ls` exit 0 listing all three under `invalid` with their reasons and
+  the twelve problems as before; `cpf status --all --tag dp` → 8 naming
+  `broken`, as without the filter.
+- **Contest status:** a contest of five members (two `solved`, one without
+  `status`, one with an invalid status, one whose directory is missing) →
+  `cpf ls --contests` shows `solved 2, new 1, invalid 1, unresolved 1`;
+  after `cpf mark` of the `new` member to `solved` → `solved 3, …`, and
+  `contest.toml` is byte-identical.
+- **Readers:** after each of `cpf ls`, `cpf ls --contests`, `cpf status`
+  with filters, `cpf search` and `cpf notes --path` on F, the workspace is
+  byte-identical and no `.cpforge/lock` exists where there was none;
+  `cpf ls --archived` → 2 "not available yet" (until archives exist). Document vectors
+  for `ls` (problems and contests) and `search`.
+- **Search hits (fixture F with notes):** expected hit lists, with matched
+  fields and note line numbers, for at least: `DP` (case), a precomposed
+  `é` term against decomposed notes text and the reverse, `e` matching
+  `é`, two terms matched in different fields, a term only in notes with and
+  without `--no-notes`, a term plus `--status solved`, a term matching only
+  a contest tag (no hit), and a term matching nothing (zero hits, exit 0,
+  `no matches` and the findings).
+- **Notes bounds:** a `notes.md` of exactly 65 536 bytes → not truncated,
+  complete; 65 537 bytes → `notes_truncated` on that problem and the reason
+  in `incomplete`; a term only in byte 65 537 onward → no hit; a 3-byte
+  UTF-8 character straddling 65 536 → dropped, no `notes_not_utf8`; a `0xFF`
+  byte → still searched, `notes_not_utf8`, no incompleteness from it; FIFO,
+  symlink to a regular file, directory → `notes_not_regular` and
+  `unreadable_source`, the run finishes; unreadable notes (Unix mode 000,
+  Windows deny-read ACL) → `unreadable_source`; `--no-notes` on the same
+  workspace → no notes finding and complete.
+- **Search bounds** (bounds override; ten problems `p01`–`p10`, each with a
+  `problem.toml` of 1 000 bytes and a `notes.md` of 2 000 bytes, every one a
+  hit): E = 30 → complete, ten hits, E used 30; E = 24 → seven hits
+  (`p01`–`p07`), `entry_limit`; E = 5 → zero hits, `entry_limit`, five
+  entries enumerated; B = 30 000 → complete; B = 10 000 → three hits,
+  `byte_limit`, B used 10 000 (`p04`'s record read, its notes refused);
+  `--no-notes` with B = 10 000 → ten hits, complete. A `problem.toml` grown
+  by a writer during the read at the barrier never makes B exceed the
+  bound. One real-bound test on Linux: 100 001 empty directories in
+  `problems/` → `entry_limit` with E = 100 000 and no file opened.
+- **Cancellation:** SIGINT at `search.before_action#20` (Unix) → hits only
+  among the actions before it, `cancelled`, death by SIGINT; with `--json`
+  the delivered document has `cancelled`; Windows Ctrl-Break → 6. The
+  workspace is byte-identical.
+- **Search exit statuses:** outside a workspace → 8 with the `error`
+  document under `--json`; no `problems/` → 0, complete, zero hits;
+  `problems/` unreadable (Unix) → 8; closed stdout with `--json` → 11;
+  incomplete for each reason → 0.
 - Real runs on Linux, macOS and Windows on the supported filesystems;
   power-loss behaviour is not tested. Platform floor and toolchain as in
   [README](../../README.md) (platform floor).
