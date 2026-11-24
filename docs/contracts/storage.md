@@ -1900,7 +1900,13 @@ that its reconciliation passes, derived from the path it takes:
 Expected after the second reconciliation: the first reconciliation's
 expected state of that row, except that a kill at `metadata_prepared` or
 `metadata_validated` gives the row-13 state (`metadata_not_applied
-{interrupted}`, `problem.toml` as in `W`).
+{interrupted}`, `problem.toml` as in `W`). A kill at `history_published`
+makes the second reconciliation follow rule 1: catalog, `problem.toml`,
+`tests/` and the record are the row's expected state (rows 13 and 14:
+`problem.toml` as in `W`), and the status is rule 1's (`committed`,
+`recovered = true`) with no finding required; in-memory findings of the
+first reconciliation, such as `metadata_not_applied`, are not persisted and
+need not reappear.
 
 | # | Crash point | Scenario | Rerun (reconciler (a) only) |
 |---|---|---|---|
@@ -1922,8 +1928,11 @@ journal was reconciled.
   A); history record `rolled_back` with that reference's `fetched_at`,
   `url` and `[[pair]]`, and as `[[file]]` exactly F with its paths and
   hashes, role `unreferenced`; no record when F is empty.
-- **aborted** (row 23 of X): equal to `Ref(X)`, including `U`, which is
-  never recorded, never registered and byte-unchanged.
+- **aborted** (row 23 of X): catalog, `problem.toml`, `tests/` (including
+  `U`, which is never recorded, never registered and byte-unchanged) and the
+  `failed` record equal to `Ref(X)`'s; no second record. The status is
+  asserted separately: rule 2 gives `rolled_back` with `recovered = true`
+  (`Ref(X)`'s live status is `failed`).
 
 *Follow-up* fetch of reconciler (a) (collision injection disabled): after
 committed → `unchanged` (byte-identical apart from `status.toml`); in every
