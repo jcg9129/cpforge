@@ -1822,12 +1822,20 @@ in publication order); **M** metadata-only refetch (title change, `P = 0`);
 **A** refetch of a problem whose `tests.toml` is missing (three `added`
 pairs, `P = 6`, schema-only creation in step 5); **X** as R, with the 4th
 planned file (answer of the second pair) created by the test at
-`fetch.before_publish#4` (`name_taken`, `k = 4`); **K** contest of four
-members.
+`fetch.before_publish#4` as a user file `U` with other bytes (`name_taken`,
+`k = 4`; a cell killed before that barrier never injects `U`); **K** contest
+of four members.
 
-*Reference*: `Ref(S)` is the workspace after an uninterrupted run of `S` on
-`W(S)`. "Equal to `Ref`" means byte-equal after substituting the txn id (in
-the record's `txn`, `[fetch] txn` and each `download.txn`).
+*References*: `Ref(S)` is the workspace after an uninterrupted run of `S` on
+`W(S)`; for X it is the aborted workspace (`failed` record listing files
+1…3, `U` present and unrecorded, catalog and `problem.toml` as in `W(X)`).
+`Ref(R)` serves as X's successful reference where a cell needs one (X's
+crash cells before the barrier leave R's states). "Equal to `Ref`" means
+byte-equal after substituting the txn id (in the record's `txn`, `[fetch]
+txn` and each `download.txn`). `Next(cell)` is the workspace after an
+uninterrupted `cpf fetch` of the same parsed problem, collision injection
+disabled, started on a copy of the cell's recovered workspace (taken at the
+`fetch.after_reconcile` barrier).
 
 *Crash points.* Fetch-scoped points count only what their name says:
 `fetch.before_publish#i` (planned file `i`'s temporary file written, before
@@ -1875,47 +1883,62 @@ complete rerun.
 | 22 | `dir_noclobber.renamed`, `fetch.problem_published` | C | problem published, journal | rule 5 (no step 6), step 7 | committed |
 | 23 | `fetch.abort_recorded` | X | `failed` record (files 1…3) and journal | rule 2: journal removed, no second record | aborted (`failed`, files 1…3) |
 
-*Kills inside reconciliation* (reconciler (b) killed, then a second `cpf
-fsck --apply`; only these combinations are reachable):
+*Kills inside reconciliation* (reconciler (b) killed at a
+`fetch_reconcile.` point, then a second `cpf fsck --apply`). The gate is
+**every** pair of a row/scenario/`i` cell above and a reconciliation point
+that its reconciliation passes, derived from the path it takes:
 
-| # | Reconciliation point | Reached from | Expected after the second reconciliation |
-|---|---|---|---|
-| 24a | `fetch_reconcile.catalog_created` | row 9 of A | committed (the file reused) |
-| 24b | `fetch_reconcile.catalog_validated`, `fetch_reconcile.catalog_committed` | row 9 of R and A, row 5 of M | committed |
-| 24c | `fetch_reconcile.metadata_prepared`, `fetch_reconcile.metadata_validated` | row 12 of R and M | as row 13 |
-| 24d | `fetch_reconcile.metadata_committed` | row 12 of R and M | committed |
-| 24e | `fetch_reconcile.history_published` | row 9 of R and A, row 12 of R and M, row 22 of C | committed |
-| 24f | `fetch_reconcile.rolled_back_recorded` | row 8 of R, A and X | as row 8 |
+| Reconciliation path (rows above) | Points it passes, in order |
+|---|---|
+| roll forward with a metadata diff: rows 7 (i = 6), 9, 11 of R; row 5 of M; row 11 of M | `catalog_created` (row 9 of A only), `catalog_validated`, `catalog_committed`, `metadata_prepared`, `metadata_validated`, `metadata_committed`, `history_published` |
+| roll forward without a metadata diff: rows 9, 10, 11 of A | `catalog_created` (row 9 only), `catalog_validated`, `catalog_committed`, `history_published` |
+| rule 5, phase `"files"`: row 12 of R and M; row 12 of A | R, M: `metadata_prepared`, `metadata_validated`, `metadata_committed`, `history_published`; A: `history_published` |
+| rule 5, phase `"metadata"` or creation: rows 13, 14, 15 of R and M; row 22 of C | `history_published` |
+| roll back with F non-empty: rows 6 (i ≥ 2), 7 (i < 6), 8 | `rolled_back_recorded` |
+| rule 1, rule 2, rule 7, roll back with F empty, no journal: rows 1–4, 5 (C R A X), 6 (i = 1), 16–21, 23 | none (status and journal removal only) |
+
+Expected after the second reconciliation: the first reconciliation's
+expected state of that row, except that a kill at `metadata_prepared` or
+`metadata_validated` gives the row-13 state (`metadata_not_applied
+{interrupted}`, `problem.toml` as in `W`).
 
 | # | Crash point | Scenario | Rerun (reconciler (a) only) |
 |---|---|---|---|
 | 25 | `fetch.member_finished#2`, `fetch.contest_created`, `fetch.membership_edited` | K | every member committed; membership equal to `Ref(K)` |
 
 *Expected states*, compared in every cell together with: no journal, nothing
-in `downloads/` or `staging/`, no `.cpf-tmp-` name, every file of `W(S)`
-byte-unchanged (no test file is modified or deleted), and the status outcome
-with `recovered = true` wherever a journal was reconciled.
+in `downloads/` or `staging/`, no `.cpf-tmp-` name; every file that was under
+`tests/` in `W(S)` byte-unchanged and still present (no test file is
+modified or deleted); every other file of `W(S)` unchanged unless the
+expected state below names it (the catalog, `problem.toml` and
+`status.toml`); and the status outcome with `recovered = true` wherever a
+journal was reconciled.
 
-- **none**: every record and file as in `W(S)` apart from `status.toml`;
-  no history record.
+- **none**: catalog and `problem.toml` as in `W(S)`; no history record.
 - **committed**: catalog, `problem.toml`, `tests/` and the history record
-  equal to `Ref(S)` (row 13: `problem.toml` as stated).
+  equal to `Ref(S)` (row 13: `problem.toml` as in `W(S)`).
 - **rolled back with files F**: catalog and `problem.toml` as in `W(S)`;
-  `tests/` = `W(S)` plus exactly F (with `Ref(S)`'s bytes); history record
-  `rolled_back` with `Ref(S)`'s `fetched_at`, `url` and `[[pair]]`, and as
-  `[[file]]` exactly F with `Ref(S)`'s paths and hashes, role
-  `unreferenced`; no record when F is empty.
-- **aborted**: as rolled back, with the abort's outcome kept.
+  `tests/` = `W(S)` plus exactly F (with `Ref(R)`'s, `Ref(A)`'s bytes for R/X,
+  A); history record `rolled_back` with that reference's `fetched_at`,
+  `url` and `[[pair]]`, and as `[[file]]` exactly F with its paths and
+  hashes, role `unreferenced`; no record when F is empty.
+- **aborted** (row 23 of X): equal to `Ref(X)`, including `U`, which is
+  never recorded, never registered and byte-unchanged.
 
-*Follow-up* fetch of reconciler (a): after committed → `unchanged`
-(byte-identical apart from `status.toml`); after row 13/14 → a committed
-metadata-only txn whose `problem.toml` equals `Ref(S)`'s; after none, rolled
-back or aborted → a committed txn whose catalog entries, pair outcomes, file
-hashes and roles equal `Ref(S)`'s, with each path the one §5.8.6 chooses
-given the files left (it skips every name of F and of X's user file). A
-second `cpf fsck --apply` after any cell changes nothing. Every cell runs on
-Linux, macOS and Windows except row 7 (Linux only). The tables list every
-gated cell; a cell not listed is unreachable.
+*Follow-up* fetch of reconciler (a) (collision injection disabled): after
+committed → `unchanged` (byte-identical apart from `status.toml`); in every
+other case the result equals `Next(cell)` (txn substituted), and in addition,
+independently of `Next`: after row 13/14 it is a committed metadata-only txn
+with `problem.toml` equal to `Ref(S)`'s (S = R, M); after none, rolled back
+or aborted it is a committed txn whose pair outcomes, file hashes and roles
+equal `Ref(R)`'s (R, X), `Ref(A)`'s or `Ref(C)`'s, whose new paths are the
+ones §5.8.6 chooses given the files left (skipping every name of F and `U`),
+and whose `added` entries have `id` equal to their chosen stem (so an id may
+differ from the reference's, e.g. `sample-3.r2` when `sample-3.in` was left
+by the rollback); every other entry field equals the reference's. A second
+`cpf fsck --apply` after any cell changes nothing. Every cell runs on Linux,
+macOS and Windows except row 7 (Linux only). The tables list the gated cells;
+the reconciliation-kill cells are exactly those derived above.
 
 **Guarantee scope.** The matrix tests level 2 (§1): after a process kill the
 OS keeps every completed write, rename and unlink. Power loss (level 3) stays
