@@ -65,7 +65,9 @@ overlaps. Downloaded provenance `downloaded{role, txn}` (fetch, storage
 contract §5.8.10) sits between `registered` and `created{command}`: a file
 under `tests/` that no record names is `downloaded` only when its name and
 current SHA-256 appear in the open fetch journal or a valid fetch history
-record of the problem; otherwise it is `unknown`. A downloaded file is
+record of the problem (several matches: the role precedence and txn rule
+of storage contract §5.8.10, independent of record order and clocks);
+otherwise it is `unknown`. A downloaded file is
 never discarded either. **Untracked** = provenance `unknown` and visibility `normal`.
 Untracked files are never discarded; only an approved, inventory-bound
 transaction (archive; `move` in the initial feature release) may relocate them, and its plan
