@@ -36,6 +36,13 @@ the stress contract (`stress.md`) uses it.
 **Archive amendment: draft.** The `[archive]` keys (§1.1, §7.6) of the
 archive contract (`archive.md` §3.1). Marked *(archive, draft)*.
 
+**Submission amendment: draft.** The submit table
+`languages.<l>.submit` with its version probe, `submit.clipboard` and
+`submit.test_dir` (§1.1), the overlay site (§2), the submit-stage
+placeholders (§5.2) and the `submit-prep` row of §9; the submission
+contract (`submit.md`) holds their semantics. Marked *(submission,
+draft)*.
+
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
 time and captured output; it is not a security boundary (design §1). The only
@@ -83,6 +90,8 @@ and the problem record, not to configuration.
 | `archive.on_existing` *(archive, draft)* | `"error"`, `"reuse-identical"`, `"new"` | 1, 2 | §7.6 |
 | `archive.profiles.<p>.{keep, discard, cleanup}` *(archive, draft)* | as the base keys | 1, 2 | §7.6; `<p>` a name (§1.1 names) |
 | `archive.quarantine.retention_days` *(archive, draft)* | integer 0–36 500 | 1, 2 | §7.6 |
+| `submit.clipboard` *(submission, draft)* | boolean | 1, 2 | default `false`; submission contract §9.3 |
+| `submit.test_dir` *(submission, draft)* | config-relative path | 1, 2 | base of the external test directory; default the OS temporary directory; submission contract §7.1 |
 | `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
@@ -99,8 +108,9 @@ strings without `.` or `/`), `sources` (array, §6.2 rules), `entry` (non-empty
 string), `artifacts` (§6.3; exactly one of `file = "<name>"` or `dir = true`
 with optional `required`), `template = { path }` (config-relative), `build`
 (stage table or `false`), `run` (stage table), `profiles.<p>` (table with
-optional `build`, a stage table or `false`, and `run`), platform overlays
-(§2).
+optional `build`, a stage table or `false`, and `run`), *(submission, draft)*
+`submit` (the submit table: stage fields plus `version = { argv, expect }`,
+`test`, `judge`; submission contract §§3.2–3.3), platform overlays (§2).
 
 **Stage table** (build, run, global, profile and problem stages): `argv`,
 `shell = { interpreter, script, args }`, `cwd`, `env`, `env_remove`,
@@ -126,10 +136,11 @@ digits, `-` and `_`, starting with a letter; `unix`, `linux`, `macos`,
 `windows` are refused as language and profile names (they would collide
 with overlay keys) but allowed as command names (§2).
 
-Keys from later designs (`submit`, `check` outside `problem.toml`)
-are unknown keys in this version. *(archive, draft)* `archive` is no longer
-one of them: its keys are listed above; any other `archive.*` key is an
-unknown key.
+Keys from later designs (`check` outside `problem.toml`)
+are unknown keys in this version; *(submission, draft)* so is `config.submit`
+(a submission tool is a language setting). *(archive, draft)* `archive` is
+no longer one of them: its keys are listed above; any other `archive.*` key
+is an unknown key.
 
 *(judging, draft)* `problem.toml` `[check]` is not a configuration layer:
 it is a table of the problem record whose schema this contract owns
@@ -174,7 +185,7 @@ record in the same way (§9.2), with key path `stress.…`.
   more specific source sets `NAME` again. `limits = {}` clears all
   limits. Deletion markers are valid only at these three places.
 - **Platform overlays** exist only at `languages.<l>`, `languages.<l>.build`,
-  `languages.<l>.run`, `languages.<l>.profiles.<p>`, `commands.<c>`, `[run]`
+  `languages.<l>.run`, *(submission, draft)* `languages.<l>.submit`, `languages.<l>.profiles.<p>`, `commands.<c>`, `[run]`
   and `[build]`. There the keys `unix`, `linux`, `macos`, `windows` are
   reserved sub-tables; elsewhere they are ordinary names (e.g. a command
   named `linux`). No nesting (`unix.linux` is an error). Within **one layer**
@@ -491,6 +502,17 @@ may still fail at spawn.
 | `{test_input}` | scalar | command with `for_each_test` |
 | `{test_answer}` | scalar | command with `for_each_test` and the test has an answer (else plan error for that test) |
 | `{iteration}` | scalar, 1-based | command with `repeat` |
+| `{submit_dir}` *(submission, draft)* | scalar | submit stage: the job's empty `submit/out/` |
+| `{submit_file}` *(submission, draft)* | scalar | submit stage, the target has exactly one solution source (a member of `sources` in the effective `solution_files`): `{submit_dir}` joined with its path |
+| `{solution_sources}` *(submission, draft)* | multi | submit stage: captured copies of the solution sources |
+| `{judge}` *(submission, draft)* | scalar | submit stage: `--judge`, else the submit table's `judge`, else the site name of a remote problem |
+
+*(submission, draft)* The submit stage also accepts `{sources}`, `{source}`,
+`{entry}` and `{problem_id}`; `{problem_dir}`, `{workspace}`, `{artifact}`,
+`{artifact_dir}`, `{test_input}`, `{test_answer}` and `{iteration}` there are
+phase-2 errors; `{submit_file}` without a solution source and `{judge}`
+without a value are phase-3 errors (submission contract §3.4). The probe's
+`version.argv` takes no placeholder at all (phase 1).
 
 In **build**, `{artifact}` and `{artifact_dir}` are the allocated output paths
 the build writes; **path availability ≠ output existence**: outputs are checked
@@ -1045,6 +1067,7 @@ enabled = true                         # master switch, default true
 | `check` against a recorded answer (design §5.4) | – | ✓ | – | – | – |
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| *(submission, draft)* `submit-prep` source copy / stage mode | ✓ / ✓ | – | ✓ / ✓ when interactive `cpf test` is supported (artifact test with the interactor) | – | – |
 
 Refused operations say "unsupported in this version".
 *(judging, draft)* The **effective kind** is `interactive` when
@@ -1694,3 +1717,7 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     without roles has `null`.
   - Windows: a valid judged `cpf test` → exit 10 before admission; a
     `[check]` phase-1 error → exit 7 first.
+- *(submission, draft)* Submit table: submission contract §14.1 (SB-C1–SB-C9):
+  placeholders per stage, the probe's brace and pattern errors, overlay-only
+  tables, `config.submit` unknown, `{submit_file}`/`{judge}` availability,
+  the test-directory base inside the workspace; `config show` reports the mode.

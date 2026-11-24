@@ -20,6 +20,50 @@ per-iteration persistence settlement (§6.2) and iteration events (§9).
 The lifecycle itself is `stress.md` §6 (the stress contract). Amended
 content is marked *(stress, draft)*.
 
+**Submission amendment: draft.** Stages `Submit` and `SubmitProbe` (§2)
+and their defaults (§5.5), for the `submit` job of the submission contract
+(`submit.md` §6); the **helper operation** `ClipboardHelper` (§2) with the
+sink `Null`, the cleanup result `Released` and its root-exit rule (§4.1
+step 6), submission contract §9.3. Marked *(submission, draft)*.
+
+*(submission, draft)* **Helper operations** (the one normative statement
+of the `ClipboardHelper` lifecycle; the submission contract §9.3 refers
+here). A helper run is an ordinary supervised run outside any job plan:
+
+1. *Host.* The caller (the source-copy command, or a `submit` job at
+   phase A) opens a **helper host**: it reserves atomically, without
+   blocking, 1 thread credit (§3.3) and creates one creation thread, before
+   any child exists. Failure: credit returned, outcome `NotStarted{Worker}`
+   or `NotStarted{CleanupCapacity}` (no process). A `submit` job's own
+   creation thread is not used (its queue may already be closed).
+2. *Admission.* The run reserves one cleanup slot with its transfer-queue
+   entry (§3.3); it needs no other worker: stdin is `File`, stdout and
+   stderr use `Sink::Null` (the child's stream opened on the null device by
+   the creation thread; no pipe, reader or drain), which is legal only for
+   this stage. Reservation failure → `NotStarted{CleanupCapacity}`.
+3. *Creation* on the host's creation thread exactly as §3.4 (open stdin and
+   null devices, commit, spawn with its own process group, register);
+   `NotStarted` reasons as for any run. Nothing is persisted: no spec,
+   record or `cleanup.log`; the result exists only in memory.
+4. *Observation.* §4.1 step 4 (pidfd or polling) and §4.2 (kqueue); an
+   observer failure takes the polling fallback; `Unknown` status is
+   reported as the helper's failure.
+5. *Exit without a stop trigger* (the root exited before any deadline,
+   cancellation or kill request was committed): the **handoff**. Instead
+   of §4.1 step 6's containment kill and cleanup scan, the supervisor
+   clears the signalling capability, reaps the root (§3.1.6 order, reap
+   deadline as usual) and records cleanup `Released`: members still in
+   the group (a selection server) are no longer cpf's, and the group is
+   never signalled again.
+6. *Stop trigger* (wall deadline 2 s, cancellation): §4.1 step 7 and then
+   step 6 **unchanged**: `killpg`, reap, cleanup verification (`Confirmed`,
+   `Incomplete` or `Unverified`). `Released` never follows a trigger.
+7. *Transfer and teardown.* A root not reaped by the reap deadline is
+   transferred with its slot to the cleanup service (§3.3) like any run.
+   The host then closes its creation queue, which hands the thread and its
+   credit to the cleanup poller (§3.3). Orderly exit and force exit treat
+   the helper like any run (§3.4, §8.2).
+
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
 narrower than
@@ -65,6 +109,7 @@ pub struct ResolvedExecutionSpec {
     pub stage: Stage,                    // Build | Run | Command | Hook | Checker | Validator
                                          // | Interactor (judging, §2.1) | Generator | Brute
                                          // (stress, draft: stress contract §3.1)
+                                         // | Submit | SubmitProbe | ClipboardHelper (submission, draft)
     pub program: PathBuf,                // resolved executable; shell mode already turned into program+args (configuration contract)
     pub args: Vec<OsString>,
     pub cwd: PathBuf,                    // absolute (storage contract decides which directory)
@@ -81,6 +126,7 @@ pub struct ResolvedExecutionSpec {
 
 pub struct StreamPolicy {
     pub sink: Sink,                      // File(PathBuf) | Forward(ConsoleStream) | Discard
+                                         // | Null (submission, draft: ClipboardHelper only)
                                          // | Connected(PeerRef) (reserved, §9a)
     pub budget: u64,                     // output budget on observed bytes, independent of sink
     pub on_exceed: Exceed,               // Kill | Discard
@@ -640,6 +686,7 @@ pub enum Cleanup {
     Confirmed,                                // no live member observed by the stated algorithm
     Incomplete { survivors: u32 },            // live members observed at the deadline
     Unverified { reason: UnverifiedReason },  // unavailable, failed, truncated, observer failed
+    Released,                                 // (submission, draft) ClipboardHelper exit without a stop trigger only (helper operations, step 5)
 }
 ```
 
@@ -844,7 +891,9 @@ contract §6, not a reservation ceiling):
 | Run stderr | 1 MiB, `Discard` |
 | Build / command / hook stdout and stderr | 1 MiB each, `Discard` |
 | Raw `cpf run` | 64 MiB per stream, `Kill` (stdout), `Discard` (stderr) |
-| Wall deadline when none configured | build 60 s, run 10 s, command 60 s, hook 30 s |
+| Wall deadline when none configured | build 60 s, run 10 s, command 60 s, hook 30 s; *(submission, draft)* submit 60 s |
+| *(submission, draft)* Submit stage stdout and stderr | 1 MiB each, `Discard` (as a build) |
+| *(submission, draft)* Version probe | stdout 64 KiB `Kill`, stderr 64 KiB `Discard`, wall deadline 10 s (*fixed*) |
 | Deadline grace (§6.3) | 50 ms (*fixed*) |
 | Reap deadline, from kill request (or from root exit observed when no kill preceded it, i.e. the post-exit containment kill) | 2 s (*fixed*) |
 | Cleanup verification deadline, from root exit observed | 1 s (*fixed*) |

@@ -40,6 +40,13 @@ problem (§5.8.10), archived listing and search (§5.9.6–§5.9.8), records
 `archive.md` (archive contract). Amended content is marked *(archive,
 draft)*.
 
+**Submission amendment: draft.** The submission tree `.cpforge/submit/`
+(versions and `current`), the job's `submit/` entries and the external
+test directory record: ownership (§3), recovery (§4.5), gitignore (§5.5),
+fsck (§5.6), job layout and pruning (§6.1, §6.3), the artifact-test guard
+(§7), formats (§9) and commit points (§10). The protocols are in the
+submission contract (`submit.md`). Marked *(submission, draft)*.
+
 Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
@@ -263,6 +270,9 @@ native error, never treated as success.
 | `problems/<p>/tests.toml` `[fetch]`, entry `download`; `problem.toml` `[problem]` `url`, `title`, `kind`, `limits`; `contest.toml` `[contest]` *(fetch, draft)* | tool fields | edit transaction by `cpf fetch` (§5.8), never another command |
 | `problems/<p>/stress/`, `problems/<p>/stress/failures/` *(stress, draft)* | user once created | created with `create_dir` under the lock by saved-failure promotion when absent (stress contract §7.5); never removed or renamed; other entries of `stress/` are user files cpf ignores |
 | `problems/<p>/stress/failures/<id>/` *(stress, draft)* | user once published | published complete by `publish_dir_noclobber` under the lock (stress contract §7.5); **never modified, renamed or deleted** by cpf; read only as untrusted input (stress contract §7.6) |
+| `.cpforge/submit/<p>/<vid>/` *(submission, draft)* | tool, immutable | published by a no-clobber directory rename under the lock (submission contract §5.3, §6.7); never modified; removed only by `cpf clean` when unreferenced (submission contract §11.1) or moved by archive retirement |
+| `.cpforge/submit/<p>/current` *(submission, draft)* | tool | atomic replace under the lock, right after the version it names was published by the same operation; never removed by cpf |
+| `.cpforge/runs/<job>/submit/` *(submission, draft)* | tool, disposable with its job | written by its `submit` job under its lease (`out/`, `version/`, `external.toml`); the external test directory it records is removed by the job or by pruning (§6.3) |
 
 Tool fields (`id`, `url`, `kind`, published limits, `schema`) and user fields
 (tags, status, language, comparator, comments, unknown keys) share a TOML
@@ -273,11 +283,14 @@ outside every retention budget.
 **Reserved trees** *(draft)*: `.cpforge/runs/`, `.cpforge/cache/`,
 `.cpforge/staging/`, `.cpforge/facts/`, *(fetch, draft)* `.cpforge/downloads/`,
 `.cpforge/fetch/`, *(archive, draft)* `.cpforge/archive/`,
-`.cpforge/quarantine/` and the files `.cpforge/state.toml`,
+`.cpforge/quarantine/`, *(submission, draft)* `.cpforge/submit/` and the
+files `.cpforge/state.toml`,
 `lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
 (initial feature release) are disposable; a `downloads/` entry is removed
-only by its protocol (§5.8.3), and `fetch/` is not disposable. No path under `problems/` or `contests/` is
+only by its protocol (§5.8.3), and `fetch/` is not disposable; *(submission,
+draft)* under `submit/` only unreferenced versions are removed, by `cpf
+clean` (submission contract §11.1). No path under `problems/` or `contests/` is
 disposable (*(stress, draft)* saved failures included: they are user work,
 never pruned and outside every retention budget); outside the reserved trees nothing is deleted automatically,
 with one exception: leftover recovery (§4.5) removes regular files named
@@ -472,6 +485,11 @@ An editor saving an older buffer after the tool overwrites the tool's change.
   renames only cpf's side trees, replaces `state.toml`, deletes facts or a
   dead restore's copies, and never moves a user file. Archive cleanup
   (trash, quarantine, delete) is never part of this recovery.
+
+  *(submission, draft)* Each `.cpforge/submit/<p>/` is a metadata recovery
+  location too, and recovery deletes its `.reclaim-<vid>` entries (with the
+  no-follow walker, after the lock is released, as pruning does). It never
+  removes a version or `current`.
 - **Recovery outcome**: a missing location is skipped; a location that
   cannot be enumerated, or a leftover that cannot be removed, is kept and
   reported as the warning `RecoveryIncomplete{paths, errors}` of the
@@ -677,7 +695,8 @@ and ignored, never acted on.
 ### 5.5 `cpf gitignore [--write]` *(draft)*
 
 Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
-`.cpforge/staging/`, *(fetch, draft)* `.cpforge/downloads/`, then the comment `# optional: .cpforge/facts/`
+`.cpforge/staging/`, *(fetch, draft)* `.cpforge/downloads/`, *(submission,
+draft)* `.cpforge/submit/`, then the comment `# optional: .cpforge/facts/`
 and *(fetch, draft)* the comment `# optional: .cpforge/fetch/` (settled:
 never an active line; fetch history is the provenance of downloaded test
 files, and ignoring it makes them user content in another checkout, which is
@@ -750,6 +769,11 @@ and `quarantine/`, and an `[problem] origin` that is not an identity
 (archive contract §9). `--apply` does only what every locked operation's
 recovery does for these trees (rule R); it never moves, trashes or deletes
 a retired or quarantined file.
+
+*(submission, draft)* `fsck` also reports the submission tree and job
+directories with an external test directory record (submission contract
+§11.2, §7.4); `--apply` changes nothing under `.cpforge/submit/` and never
+removes an external test directory.
 
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
@@ -1905,6 +1929,9 @@ The archive class `notes` (design §7a) is the archive contract's.
     failures/<id>/                 (stress, draft) staged saved failure until promotion (stress contract §7.5)
     inputs/replay/input            (stress, draft) replay: verified copy of a saved input (stress contract §8)
     inputs/bin/<role>/...          (stress, draft) --replay-binaries: verified copies of preserved programs
+    submit/out/                    (submission, draft) the submit stage's {submit_dir}
+    submit/version/                (submission, draft) a version staged for publication
+    submit/external.toml           (submission, draft) external test directory record
 .cpforge/runs/.reclaim-<job-id>/   being deleted
 ```
 
@@ -2009,7 +2036,8 @@ its own directory creation) and in `cpf clean` (steps 1–3 directly). *(draft)*
 retention budget (`keep_jobs = 0`, `workspace_bytes = 0`): every inactive
 job directory is a candidate except newer-schema ones (§9, reported);
 active ones are skipped by the lease probe. In the initial feature release it also deletes
-`.cpforge/cache/`. The plan mode takes the lock and so performs the
+`.cpforge/cache/`, and *(submission, draft)* the unreferenced submission
+versions (submission contract §11.1). The plan mode takes the lock and so performs the
 universal §4.5 leftover recovery, but selects and renames nothing.
 It never touches anything else.
 
@@ -2020,7 +2048,8 @@ It never touches anything else.
    `record.json` or `report.json` is never a candidate (reported); one whose
    `job.toml` is missing or malformed (interrupted admission) is a normal
    candidate; a record that cannot be read leaves the directory in place
-   (reported), since its schema is unknown. Candidates: beyond the newest `keep_jobs`
+   (reported), since its schema is unknown (*(submission, draft)* this
+   includes `submit/external.toml`, and a `too_new` one is newer-schema). Candidates: beyond the newest `keep_jobs`
    (*default* 20) inactive jobs; then, using **projected** usage (measured
    usage minus the measured size of candidates already selected), further
    oldest inactive jobs while projected usage exceeds `workspace_bytes`
@@ -2039,7 +2068,12 @@ It never touches anything else.
    handle another process keeps open inside the directory) leaves the
    directory in place (reported, retried next time).
 3. Release the workspace lock; delete each `.reclaim-*` with
-   the no-follow walker (§2). Leftovers stay as `.reclaim-*` and are retried by the
+   the no-follow walker (§2). *(submission, draft)* Before deleting a
+   `.reclaim-<job>` that holds `submit/external.toml`, remove the external
+   test directory it records per submission contract §7.4 (only a `valid`
+   record whose proven marker, a no-follow regular file, holds its token and
+   job id; an unmarked directory is kept; an `unreadable` record keeps the job out of
+   the candidates in step 1). Leftovers stay as `.reclaim-*` and are retried by the
    next prune. Two processes may delete the same `.reclaim-*` tree at once:
    an entry that disappears during deletion is success, never an error. A
    rename never overwrites an existing `.reclaim-<job-id>`: that candidate is
@@ -2215,6 +2249,11 @@ capture failure (class `workspace`, exit 8).
      candidate under rule 2). Paths reached through another spelling of the
      workspace (a link or alias to it) and the text of a shell **script**
      are not inspected.
+- *(submission, draft)* **Artifact test** (submission contract §6.6): the
+  guard above is applied to the artifact test's source-consuming stage
+  with a path operand inside the job's `inputs/` also rejected, and its
+  build and run stages must use the run's own `cwd`. Sources there name the
+  external test directory, which is outside the workspace.
 - **Capture check** (decided by the plan; recorded in the job report and the fact,
   §6.5): `checked` when the source-consuming stage is an `argv` stage that
   passed the guard; `unchecked{shell_stage}` when it is a shell stage
@@ -2391,6 +2430,12 @@ finalizes them (execution contract §6.2).
   `metadata_not_applied{too_large}` after the tests are committed (§5.8.8),
   never a retried failure. With at most 64 pairs (§5.8.1) and cpf-chosen
   names, the fetch records stay far below the cap.
+- *(submission, draft)* `.cpforge/submit/<p>/current`, each version's
+  `manifest.toml` and a job's `submit/external.toml` (tool-only, schema 1,
+  unknown keys `malformed`, record classification below; submission
+  contract §§7.2, 8.3, 8.4). A `too_new` `current` is never replaced, a
+  version with a `too_new` manifest is never pruned, a job directory with a
+  `too_new` external record is never pruned.
 - Records read or edited by these TOML primitives are capped at **1 MiB**
   (1,048,576 bytes), including user-editable records. Larger input is
   `malformed` with a size-limit reason, before parsing; reads are bounded
@@ -2465,6 +2510,9 @@ finalizes them (execution contract §6.2).
 | *(archive, draft)* contest manifest (archive contract §5.6) | incomplete contest snapshot, no member retired | complete contest snapshot |
 | *(archive, draft)* restore publication (archive contract §7.3) | nothing in `problems/`; staging and the transaction removed by recovery | problem published; history rolled forward |
 | *(archive, draft)* quarantine purge rename | entry intact | `.purge-<txn>` deleted by the next locked operation |
+| *(submission, draft)* version publish (submission contract §5.3 step 5) | no version; staging (source copy) or the job's `submit/version/` (stage) may remain | version complete and unreferenced until `current` is replaced; pruned by `clean` |
+| *(submission, draft)* `current` replace | old `current` (or none); temp may remain (recovered) | `current` names the new version |
+| *(submission, draft)* external test directory (submission contract §7.3) | see the submission crash table (submission contract §13) | |
 
 *(fetch, draft)* **Fetch crash matrix** (the C5 gate; C6, C7 and C8 for
 their scenarios).

@@ -289,7 +289,16 @@ removals, and `.cpforge/cache/`. `cpf clean --apply` removes them. Jobs that are
 still running are kept, as are job directories written by a newer cpf and ones
 whose records cannot be read (each is reported).
 
-Nothing outside `.cpforge/runs/` and `.cpforge/cache/` is removed: run facts,
+It also lists and removes the submission versions that are no longer
+current: in `.cpforge/submit/<problem>/`, every version that the
+problem's `current` reference does not name (all of them when there is no
+reference yet). When the reference cannot be read or names a missing
+version, nothing of that problem is removed (reported). Removing a job
+directory of `cpf submit-prep` also removes the temporary test directory
+it created outside the workspace, if a crash left one behind.
+
+Nothing outside `.cpforge/runs/`, `.cpforge/cache/` and those submission
+versions is removed: the current submission of each problem, run facts,
 the job counter, `state.toml`, the lock, and all problem and contest files are
 kept. Like every command that takes the workspace lock, both forms first clean
 up temporary files left by an interrupted cpf.

@@ -50,6 +50,15 @@ use the §3.1 writer profile and §3.5 reader rules with the archive
 contract's own size bounds (archive contract §4.4); they are not `--json`
 documents.
 
+**Submission amendment: draft.** The job kind `submit` of `cpf
+submit-prep` in stage mode, its verdicts `submit_version_mismatch` and
+`submit_failed` (§2.7), version publication in phase A (§2.9), the
+`submission` member and stage tokens (§4), warnings (§4.10), exit rows
+(§5), the source-copy `submit` document and the status member `submit`
+(§6.1); the submission contract (`submit.md`) holds the semantics and the
+`Submission` type (its §9.2, bound 17 KiB). Marked *(submission, draft)*;
+merged into schema 1 by the final reconciliation.
+
 **Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
 problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
 draft)* judged problems (configuration contract §9.1): checkers and
@@ -63,7 +72,9 @@ here; schema 2 is not needed for judging.
 - **Job kinds**: `build` (`cpf build`), `test` (`cpf test`), `run` (raw
   `cpf run`, E §8.1), `cmd` (`cpf cmd <name>`), `hook` (the `on_switch`
   hooks of a successful `cpf switch`, C §8.3, §2.10); *(stress, draft)*
-  `stress` (`cpf stress` in every mode, stress contract §2). A stress
+  `stress` (`cpf stress` in every mode, stress contract §2); *(submission,
+  draft)* `submit` (`cpf submit-prep` in stage mode, submission contract
+  §6; every planned execution of it is primary). A stress
   job's planned executions are its builds (C §8.2 stress plans); its
   iteration runs (E §1) are not planned executions, have no plan index or
   run id, never appear in `executions[]`, and are reported through the
@@ -167,11 +178,12 @@ outcome:
 | `stop_policy` | job kind `cmd`, `keep_going = false`, an earlier primary execution failed (C §8.2) |
 | `cancelled` | cancellation intent was set before its admission |
 | `job_not_eligible` | an `after_test` hook, and phase H does not run (§2.9) |
+| `submit_not_succeeded` | *(submission, draft)* job kind `submit`, for its submit stage (after a probe that failed or mismatched), artifact build, role builds and test executions (reduced by §2.3, §2.4, B2, B10 and I2 like `build_not_succeeded`, giving `skipped{submit_not_succeeded}` and `not_run{submit_not_succeeded}`): an earlier probe or submit stage of the job has a class other than `exited_zero`, the probe mismatched, or (for executions after the submit stage) the artifact failed the selection rule; a skipped submit stage is a primary execution like the others (§2.1 reconciliation) and never decides the verdict, the probe does (§2.7 rows 2–3a) (submission contract §§6.3–6.4) |
 | `input_not_validated` | *(judging, draft)* a solution, interactor or checker run of a test whose validator run has a final record that does not report the input valid (§2.11) |
 | `not_eligible` | *(judging, draft)* a checker run whose test's solution run is not eligible for checking (§2.11), or a follow-up checker after `CheckerSkipped{NotEligible}` (§2.12) |
 
 *(judging, draft)* Reasons apply in this order when several conditions hold:
-`cancelled`, `build_not_succeeded`, `admission_closed`,
+`cancelled`, *(submission, draft)* `submit_not_succeeded`, `build_not_succeeded`, `admission_closed`,
 `input_not_validated`, `not_eligible`. Inside a judged test the runs are
 admitted in plan order (validator, solution, interactor with the solution,
 checker), each only after the earlier one's record is final.
@@ -230,6 +242,7 @@ For an execution with a record, first matching row:
 | `exited_zero` | all pass | `succeeded` |
 | *(judging, draft)* `skipped{build_not_succeeded}` (a role build after an earlier build that did not succeed) | – | `skipped{build_not_succeeded}` |
 | *(judging, draft)* `skipped{admission_closed}` (a role build after a `retention_budget` refusal) | – | `skipped{admission_closed}` |
+| *(submission, draft)* `skipped{submit_not_succeeded}` (the artifact build or a role build of a `submit` job after a probe or submit stage that did not reach a selected artifact) | – | `skipped{submit_not_succeeded}` |
 
 Any other build coverage is an orphan (`internal_error{invariant}`). A
 build that is not `succeeded` starts nothing that depends on it (design
@@ -240,7 +253,10 @@ result (§4.4 `roles[].build`). In a judged job each build depends on the
 builds before it in plan order (solution, checker, validator, interactor)
 and every test execution depends on every build: a build that is not
 `succeeded` makes the later builds and all test executions
-`skipped{build_not_succeeded}`, except that an execution whose admission
+`skipped{build_not_succeeded}` (*(submission, draft)* in a `submit` job,
+when the probe or the submit stage did not reach a selected artifact,
+every build and test execution is `skipped{submit_not_succeeded}`
+instead), except that an execution whose admission
 comes after cancellation intent is `skipped{cancelled}` (build result
 `cancelled`), which takes priority by the §2.1 order. A skipped build result never decides a
 job verdict; the earlier build that did not succeed does (§2.7 rows 2–4
@@ -301,7 +317,7 @@ Over (coverage, class, check); first matching row. Every combination
 | Coverage | Class | Check | Test verdict |
 |---|---|---|---|
 | `skipped{cancelled}` | – | `not_admitted{cancelled}` | `cancelled` |
-| `skipped{build_not_succeeded \| admission_closed}` | – | `not_admitted{run_not_eligible}` | `not_run{reason}` |
+| `skipped{build_not_succeeded \| admission_closed \| submit_not_succeeded}` (*(submission, draft)* the last) | – | `not_admitted{run_not_eligible}` | `not_run{reason}` |
 | any | any or none | `internal_error{invariant}` | `internal_error` |
 | `admitted` | none | `internal_error{record_missing}` | `internal_error` |
 | `not_started{≠ cancelled_before_start}` | `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
@@ -353,6 +369,16 @@ only**, first matching value:
    verdict, any such class, or any
    primary coverage is cancelled (`skipped{cancelled}`,
    `not_started{cancelled_before_start}`).
+   *(submission, draft)* 3a. `submit_version_mismatch`: a `submit` job's
+   version probe mismatched (submission contract §3.3). 3b.
+   `submit_failed`: a `submit` job's probe or submit stage has class
+   `wall_deadline`, `output_budget`, `signal` or `nonzero_exit`, or its
+   artifact failed the selection rule (submission contract §6.4). Rows 2
+   and 3 already count the probe's and the submit stage's classes and
+   coverage (they are primary executions of the `submit` job, read as the
+   "classes of other kinds" there). Rows 4–16 then apply
+   to a `submit` job as to a `test` job (its artifact build, role builds
+   and test verdicts).
 4. `build_failed`: the build result, or *(judging, draft)* any role build
    result, is `failed`.
 5. `wall_deadline`; *(judging, draft)* 6. `session_limit`, 7. `idle`;
@@ -365,7 +391,9 @@ only**, first matching value:
 16. *(judging, draft)* `scored`: a `test` job on a problem with a points
     `scoring` (C §9.1.5) whose every test verdict is `passed` or `scored`;
     `result.score` (§2.13) says whether the aggregate is full.
-17. `passed` (`test`) or `succeeded` (`build`, `run`, `cmd`, `hook`).
+17. `passed` (`test`, *(submission, draft)* `submit` with the artifact
+    test) or `succeeded` (`build`, `run`, `cmd`, `hook`, *(submission,
+    draft)* `submit` without it).
 
 - **Intent in phase P that cancelled nothing.** If intent was set during P
   but every primary execution had already been admitted and every check
@@ -468,6 +496,14 @@ under the verdict lock, atomic with respect to cancellation intent.
   the cutoff and the commit, or after the commit, never prevents, undoes or
   hides the replace. Facts are never
   rolled back.
+- *(submission, draft)* **A Submission publication** (`submit` jobs, in
+  place of fact publication; submission contract §6.7). Eligible iff
+  `primary_verdict` is `passed`, `succeeded`, or `scored` with a full
+  aggregate; otherwise `not_attempted{not_eligible}`. The cancellation
+  cutoff is the fact cutoff above; the commit points are the version
+  publish and the `current` replace; intent after the cutoff never
+  prevents or undoes them. The clipboard follows publication in this
+  phase.
 - **H Hooks** (`after_test` of a `test` job, C §8.3): each hook start checks
   *(lock)* that `primary_verdict` ∉ {`cancelled`, `infrastructure`,
   `internal_error`} and no intent is set; otherwise it and all later hooks
@@ -592,7 +628,7 @@ judge run's own §2.2 class.
 | # | Condition | Check | Test verdict |
 |---|---|---|---|
 | B1 | v `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
-| B2 | v `skipped{build_not_succeeded \| admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
+| B2 | v `skipped{build_not_succeeded \| admission_closed \| submit_not_succeeded}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
 | B3 | v `not_started{≠ cancelled_before_start}`, or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
 | B4 | v `not_started{cancelled_before_start}`, or class `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
 | B5 | v profile `testlib`, class other than `exited_zero` | `judge_failed{test_data_error, validator, validation_failed}` | `checker_failed` |
@@ -600,7 +636,7 @@ judge run's own §2.2 class.
 | B7 | v profile `simple`, any other class except `exited_zero` | `judge_failed{crashed, validator, <class reason>}` | `checker_failed` |
 | B8 | kind `compare` (v `exited_zero`) | §2.4 and §2.5 over s, unchanged | §2.5 |
 | B9 | s `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
-| B10 | s `skipped{build_not_succeeded \| admission_closed}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
+| B10 | s `skipped{build_not_succeeded \| admission_closed \| submit_not_succeeded}` | `not_admitted{run_not_eligible}` | `not_run{reason}` |
 | B11 | s `not_started{≠ cancelled_before_start}`, or class `infrastructure` | `not_admitted{run_not_eligible}` | `infrastructure` |
 | B12 | s `not_started{cancelled_before_start}`, `transferred`, or class `cancelled` | `not_admitted{run_not_eligible}` | `cancelled` |
 | B13 | c `skipped{cancelled}` | `not_admitted{cancelled}` | `cancelled` |
@@ -656,7 +692,7 @@ first. Then:
 | # | Condition | Test verdict |
 |---|---|---|
 | I1 | s and i `skipped{cancelled}` | `cancelled` |
-| I2 | s and i `skipped{build_not_succeeded \| admission_closed}` | `not_run{reason}` (`input_not_validated` never reaches this row: B3–B7 decide first) |
+| I2 | s and i `skipped{build_not_succeeded \| admission_closed \| submit_not_succeeded}` | `not_run{reason}` (`input_not_validated` never reaches this row: B3–B7 decide first) |
 | I3 | **cancellation snapshot**: s and i `transferred` (cancellation during committed pair creation, E §3.4; the record holds `CancelRequested` and no start facts), or the follow-up checker `transferred` | `cancelled`, without reduction (below) |
 | I4 | otherwise (the pair was admitted) | the session verdict of `reduce(record, checking, scoring)`, policy `interactive_v7` (checkers design §6.2), over the closed session record (checkers design §6.1), mapped below |
 
@@ -1011,7 +1047,7 @@ run's own reservations; the capture manifest is already retained.
 | `platform` | `token` | `unix`, `windows` |
 | `outcome` | `token` | `finished` (a ready job ran) or `refused` (§4.12) |
 | `cpf_version` | `ver` | |
-| `command` | `token` | `build`, `test`, `run`, `cmd`, `hook`; *(stress, draft)* `stress` |
+| `command` | `token` | `build`, `test`, `run`, `cmd`, `hook`; *(stress, draft)* `stress`; *(submission, draft)* `submit_prep` |
 | `job` | object? | §4.2; `null` only for a refusal before registration |
 | `workspace` | `nsum(1024)?` | workspace root as cpf located it |
 | `problem` | object? | §4.2 |
@@ -1025,6 +1061,7 @@ run's own reservations; the capture manifest is already retained.
 | `aggregates` | `[Aggregate; ≤10000]` | §4.7; empty unless `cmd` |
 | `result` | object | §4.8 |
 | `fact` | object? | §4.9 |
+| `submission` | `Submission?` | *(submission, draft)* submission contract §9.2; `null` unless a `submit` job (also for its refusal) |
 | `hooks` | `[Hook; 32]` | §4.9, plan order, first 32 |
 | `warnings` | `[Warning; 24]` | §4.10, first 24 in occurrence order, subject to the late-cancellation reservation |
 | `events` | object | `{dropped: u64}` (§7.4; `"0"` without a consumer) |
@@ -1110,7 +1147,9 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
   `output_too_large` the directory is removed and `output_root` names what
   was removed.
 - `BuildResult`: *(judging, draft)* `{"kind":"skipped","reason":token}`
-  (`build_not_succeeded`, `admission_closed`; role builds only, §2.3),
+  (`build_not_succeeded`, `admission_closed`; role builds only, §2.3;
+  *(submission, draft)* `submit_not_succeeded`, the artifact build and role
+  builds of a `submit` job),
   `{"kind":"succeeded"}`, `{"kind":"cancelled"}`,
   `{"kind":"infrastructure","causes":[Cause; 8],"causes_dropped":u32}`,
   `{"kind":"failed","cause":BuildCause}`, `{"kind":"internal_error",
@@ -1152,7 +1191,7 @@ entry (`program`, `spec`), named by `build.execution`.
 | Member | Type | Content |
 |---|---|---|
 | `index` | `u32` | plan index |
-| `stage` | `token` | `build`, `run`, `command`, `hook`; *(judging, draft)* `checker`, `validator`, `interactor` |
+| `stage` | `token` | `build`, `run`, `command`, `hook`; *(judging, draft)* `checker`, `validator`, `interactor`; *(submission, draft)* `submit`, `submit_probe` (role `{"kind":"submit"}`, `{"kind":"submit_probe"}`; the artifact build keeps `{"kind":"build"}`) |
 | `role` | object | `{"kind":"build"}`, `{"kind":"test","test":ident}`, `{"kind":"command","test":ident?,"iteration":u32}`, `{"kind":"raw"}`, `{"kind":"hook","name":ident,"trigger":token}`; *(judging, draft)* `{"kind":"role_build","role":token}`, `{"kind":"checker","test":ident}`, `{"kind":"validator","test":ident}`, `{"kind":"interactor","test":ident}` (a role build has stage `build`; the solution run of an interactive test keeps `{"kind":"test"}`) |
 | `coverage` | object | `{"kind":"started"}`, `{"kind":"transferred"}`, `{"kind":"not_started","reason":NotStarted}`, `{"kind":"skipped","reason":token}` |
 | `run` | `rid?` | `null` iff `skipped` |
@@ -1443,7 +1482,7 @@ occurrence order, and count every omitted ordinary warning in
 
 | `kind` | Extra members | Source |
 |---|---|---|
-| `prune` | `job: jid?`, `detail: token` (`rename_failed`, `newer_schema`, `lease_unreadable`, `unmeasurable`, `measurement_incomplete`, `reclaim_leftover`, `reclaim_name_taken`) | S §6.3 at admission |
+| `prune` | `job: jid?`, `detail: token` (`rename_failed`, `newer_schema`, `lease_unreadable`, `unmeasurable`, `measurement_incomplete`, `reclaim_leftover`, `reclaim_name_taken`; *(submission, draft)* `test_dir_kept`, `test_dir_lost`) | S §6.3 at admission |
 | `recovery` | `paths: u32`, `first: nsum(128)?` | S §4.5 |
 | `persist` | `artefact: token` (`spec`, `record`, `cleanup_log`), `run: rid` (*(stress, draft)* or an `irid` for an iteration run, §3.2; the grammars are disjoint, so the warning bound still holds at 756 B), `error: PersistError` | E §6.2, final at W |
 | `durability` | `artefact: token`, `detail: token` (`uncertain`, `cleanup_pending`); *(stress, draft)* artefact `stress_failure` for a promoted saved failure | S §4.1 |
@@ -1456,6 +1495,9 @@ occurrence order, and count every omitted ordinary warning in
 | `progress_dropped` | `lines: u32` | §8, final at E |
 | `judge_scratch` | *(judging, draft)* `run: rid` (*(stress, draft)* or an `irid`), `detail: token` (`staged_copy_kept`, `transcript_kept`) | E §2.1 judge scratch |
 | `testlib_header` | *(judging, draft)* `role: token`, `detail: token` (`not_identified`, `not_pinned`, `declared`) | §4.4 `provenance` |
+| `tool_unpinned` | *(submission, draft)* none | submission contract §3.3: no version probe declared |
+| `clipboard` | *(submission, draft)* `outcome` (the `Submission.clipboard` object) | submission contract §9.3 |
+| `submit_test_dir` | *(submission, draft)* `detail: token` (`leftover`); the path is in `submission.external_dir` (within the 768-byte warning bound: 358 B) | submission contract §7.3 |
 
 ### 4.11 `persistence`
 
@@ -1574,13 +1616,13 @@ document (`command: "stress"`).
 | 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded`, *(judging, draft)* `scored` with a full aggregate |
 | 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full; *(stress, draft)* `candidate_failure` |
 | 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9) |
-| 3 | `build_failed` | the build failed |
+| 3 | `build_failed` | the build failed; *(submission, draft)* the submission tool failed (`submit_failed`) |
 | 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests`; *(stress, draft)* `no_iterations` |
 | 5 | `checker_failed` | judging could not decide: the comparator's invalid answer; *(judging, draft)* a checker, validator or interactor failure of any class (checkers design §1), including invalid test data; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` (a stress harness role failed; no solution verdict) |
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
-| 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5) |
-| 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O |
-| 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`); *(archive, draft)* a snapshot was committed but retirement did not happen or cleanup ended `incomplete`, a restore published the problem but not its history, a quarantine purge left a selected entry (archive contract §5.4, §6.6, §7.3) |
+| 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5); *(submission, draft)* the verdict `submit_version_mismatch`, an empty `solution_files` for `submit-prep` |
+| 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O; *(submission, draft)* a submission version not published |
+| 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`); *(archive, draft)* a snapshot was committed but retirement did not happen or cleanup ended `incomplete`, a restore published the problem but not its history, a quarantine purge left a selected entry (archive contract §5.4, §6.6, §7.3); *(submission, draft)* a submission version published without its `current` reference |
 | 10 | `infrastructure` | cpf could not run or observe a program reliably; *(stress, draft)* `stress_cleanup_failed` (an iteration's files or resources could not be released) |
 | 11 | `delivery` | requested machine output could not be written (§6.3, §7.6) |
 | 70 | `internal` | failure class `internal`: a bug detected and handled (§5.4) |
@@ -1601,11 +1643,11 @@ condition:
 | 3 | failure class `internal` (any time, including after F), or job verdict `internal_error` | 70 |
 | 4 | machine output requested and its delivery failed (decision D9) | 11 |
 | 5 | orderly cancellation: `result.cancellation` set at F, failure class `cancelled`, job verdict `cancelled`, or cancellation of a `hook` job (§2.10) | §5.3 |
-| 6 | failure class `config` | 7 |
-| 7 | failure class `workspace` | 8 |
-| 8 | failure class `partial` | 9 |
+| 6 | failure class `config`; *(submission, draft)* job verdict `submit_version_mismatch` | 7 |
+| 7 | failure class `workspace`; *(submission, draft)* submission `publication.kind = "not_published"` | 8 |
+| 8 | failure class `partial`; *(submission, draft)* submission `published` with `current = false` | 9 |
 | 9 | job verdict `infrastructure`; *(stress, draft)* `stress_cleanup_failed` | 10 |
-| 10 | job verdict `build_failed` | 3 |
+| 10 | job verdict `build_failed`; *(submission, draft)* `submit_failed` | 3 |
 | 11 | job verdict `checker_failed`; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` | 5 |
 | 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error`; *(stress, draft)* `candidate_failure` | 1 |
 | 13 | job verdict `unchecked`, `no_tests`; *(stress, draft)* `no_iterations` | 4 |
@@ -1699,6 +1741,8 @@ condition:
 | `cpf doctor` | 0, 7; an unsupported capability is never an error |
 | *(draft)* `cpf status` | 0, 8, 11 (`--json`); *(organisation, draft)* filters add only 2 for a filter value outside its grammar |
 | *(draft)* `cpf clean` | 0, 8; `--apply`: 9 when a selected candidate could not be renamed or deleted (held leases are skipped) |
+| *(submission, draft)* `cpf submit-prep`, source copy | 0, 7, 8, 9, 11 (`--json`) |
+| *(submission, draft)* `cpf submit-prep`, stage mode | 0, 1, 3, 4, 5, 7, 8, 9, 10, 11, cancellation |
 | *(draft)* `cpf fsck` | 0, 8 (findings are reported with 0) |
 | *(draft)* `cpf adopt`, `ignore`, `gitignore` | 0, 8 |
 | *(organisation, draft)* `cpf tag`, `cpf untag` | 0, 8 |
@@ -1769,6 +1813,16 @@ is `unchanged` and `judge` is `unchanged` or `none`; a checker,
 validator, interactor or `[check]` edit is reported as "judge changed".
 
 Fixture: `src/report/wire/fixtures/status.json`.
+
+*(submission, draft)* The status `Problem` gains, after `diagnostics`,
+`submit`: `{state: token, id: string?, mode: token?, tested: bool?}`,
+`state` `none`, `current`, `stale`, `unknown` (submission contract §10;
+`id`, `mode`, `tested` from the manifest, `null` for `none` and when the
+manifest is not `valid`). `cpf submit-prep` accepts `--json` (source copy:
+the `submit` document `{"schema":1,"document":"submit","platform":…,
+"problem":pident,"submission":Submission,"warnings":[Warning; 24]}`, not
+persisted; stage mode: the `job_report`) and `--events` in stage mode only.
+Fixtures `submit.json`, `submit_stage.json` (submission contract SB-R1).
 
 *(organisation, draft)* **Organisation fields in `status`.** `tags` and
 `user_status` keep their existing meaning unchanged: `tags` holds the
