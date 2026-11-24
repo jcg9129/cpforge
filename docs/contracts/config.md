@@ -942,8 +942,9 @@ error. Phase-1 rules, each a diagnostic at the key with provenance:
 - `cleanup` and `on_existing` take exactly the listed strings;
 - a profile table holds only `keep`, `discard`, `cleanup`.
 
-Arrays replace as a unit (§2), and a selected profile's present keys replace
-the base keys for that run (archive contract §3.1). Defaults: `roots = []`,
+Arrays replace as a unit (§2), and a profile selected with `cpf archive
+--keep-profile <p>` replaces the base keys with its present keys for that
+run (archive contract §3.1). Defaults: `roots = []`,
 `default_root` absent (the first root), `layout = "{site}/{problem_id}"`,
 `contest_layout = "{site}/contests/{contest_id}"`, `keep = []`,
 `discard = []`, `cleanup = "trash"`, `on_existing = "error"`,

@@ -250,7 +250,9 @@ the counts of wire requests, hops and retries it used.
   when non-empty and absolute, else `$HOME/.cache/cpforge`; macOS
   `$HOME/Library/Caches/cpforge`; Windows `%LOCALAPPDATA%\cpforge`. A value
   that is relative, empty, or missing where needed → `network{permit}`,
-  no request.
+  no request; this applies to the environment variables, since a relative
+  `http.cache_dir` is already a configuration error (C §3 phase 1, exit 7;
+  §11.1 type).
 - Per host `h` (the adapter host, lowercase ASCII): `<h>.lock` (lock only,
   never read, written, unlinked or replaced) and `<h>.next` (state). The
   directory is created on first use.
@@ -641,8 +643,9 @@ answer, published unchanged by fetch and read unchanged by comparators
   adapter. Any other unrecognized `200` document is `unrecognized`. Both
   publish nothing; the difference is the message.
 - Every class is a fetch failure of the problem (storage status `outcome =
-  "failed"`, `reason = "<class>[: <reason>]"`) and the exit status `site`
-  of the commands contract (proposed 12). Cancellation is not a class: report §5.3.
+  "failed"`, `reason = "<class>[: <reason>]"`) and the failure class
+  `site`, exit 12 (report §5.1, §5.2; a bulk selection in which other
+  members committed exits 9). Cancellation is not a class: report §5.3.
 
 ### 8.4 AtCoder
 
@@ -1245,8 +1248,8 @@ exactly 1 request. The problem-level and selection-level assertions of
 
 ### 11.2 Report and exit statuses
 
-- Exit: every class of §8.3 → the `site` status (proposed 12, report §5.1
-  reserved range); cancellation → report §5.3.
+- Exit: every class of §8.3 → failure class `site`, exit 12 (report
+  §5.1, §5.2, `../commands.md`); cancellation → report §5.3.
 - **`fetch` document** (schema 1, draft, completed with the report and commands amendments): `schema`,
   `kind = "fetch"`, `selection` (`kind`, `identity`, `url`, member count),
   `problems[]` (`identity`, storage status `outcome`, `failure` with

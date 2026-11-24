@@ -358,7 +358,7 @@ archives are laid out; the tool guarantees that nothing is lost by accident.
   outside the initial durability guarantee.
 
 **What to keep:** a base policy plus at most one named profile chosen
-explicitly (`cpf archive --profile minimal`). Overlapping automatic
+explicitly (`cpf archive --keep-profile minimal`). Overlapping automatic
 status/tag rules are deferred (they need ordered first-match semantics).
 
 ```toml

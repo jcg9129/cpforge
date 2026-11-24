@@ -67,6 +67,14 @@ the members `target.io` and `tests[].output_file`, the check kind
 bound (§3.7) and fixtures (§9.8). Marked *(file I/O, draft)*; merged into
 schema 1 by the final reconciliation. Staging and collection are E §5.6.
 
+**Commands amendment: draft.** The failure class `site` and exit
+code 12 (§1, §5.1, §5.2), the meaning of code 9 for kept conflicts, the
+precedence of commands that act on several problems or run several jobs
+(§5.2), the rows of `fetch` and `interactor-test` (§5.5) and their
+machine-output availability (§6.1); `../commands.md` documents every
+command and summarises the codes. Marked *(commands, draft)*; merged into
+schema 1 by the final reconciliation.
+
 **Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
 problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
 draft)* judged problems (configuration contract §9.1): checkers and
@@ -110,7 +118,8 @@ here; schema 2 is not needed for judging.
   (§2.9); `report.json` is its persisted copy (S §6.1); the **stdout
   document** is the report plus `persistence` (§4.11).
 - **Command failure class** of any command (job or not): `usage`,
-  `config`, `workspace`, `partial`, `cancelled`, `internal`, or none.
+  `config`, `workspace`, `partial`, `cancelled`, `internal`, *(commands,
+  draft)* `site` (`cpf fetch` only, §5.1), or none.
   A **refusal** is a job command that fails with class `config`,
   `workspace`, `cancelled` or `internal` before its job is **ready**
   (S §6.2); it has no report file and, in machine mode, writes a refusal
@@ -1719,20 +1728,22 @@ document (`command: "stress"`).
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded`, *(judging, draft)* `scored` with a full aggregate |
-| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full; *(stress, draft)* `candidate_failure` |
-| 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9) |
+| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full; *(stress, draft)* `candidate_failure`; *(commands, draft)* `interactor-test`: a `good` solution failed or a `bad` solution passed (§5.2) |
+| 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9); *(commands, draft)* `--problem` with `fetch`, `archive`, `restore` or `quarantine`; for `fetch`, `--only` naming a label outside the enumeration or selecting more than 50 members (S §5.8.1, refused after the one enumeration request and before any member request), `--only` or `--all-in-section` with a selection they do not apply to, `--history` with `--json`; for `archive`, `--plan` without `--apply`, `--resume` or `--close` with a target or a plan option; `restore --into` with a contest snapshot (archive contract §7.4); `--json` or `--events` with `interactor-test` |
 | 3 | `build_failed` | the build failed; *(submission, draft)* the submission tool failed (`submit_failed`) |
-| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests`; *(stress, draft)* `no_iterations` |
+| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests`; *(stress, draft)* `no_iterations`; *(commands, draft)* `interactor-test`: an expectation not decided (§5.2) |
 | 5 | `checker_failed` | judging could not decide: the comparator's invalid answer; *(judging, draft)* a checker, validator or interactor failure of any class (checkers design §1), including invalid test data; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` (a stress harness role failed; no solution verdict) |
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
 | 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5); *(submission, draft)* the verdict `submit_version_mismatch`, an empty `solution_files` for `submit-prep` |
-| 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O; *(submission, draft)* a submission version not published |
-| 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`); *(archive, draft)* a snapshot was committed but retirement did not happen or cleanup ended `incomplete`, a restore published the problem but not its history, a quarantine purge left a selected entry (archive contract §5.4, §6.6, §7.3); *(submission, draft)* a submission version published without its `current` reference |
+| 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O; *(submission, draft)* a submission version not published; *(commands, draft)* a fetch refused at S §5.8.4 steps 0 or 2 (including `record_too_large`, a journal that remains, `history_blocked`, `fetch_inconsistent`) or failed in storage (S §5.8.8 outcome `failed` without a sites §8.3 class), a refetch of a problem or contest without a remote identity and URL |
+| 9 | `partial` | failure class `partial`: a metadata command committed part of its work, or *(commands, draft)* kept the existing state where the update it was asked for conflicted with it; what it committed stays committed, and a rerun or a user action continues it (S §5.2 step 5, S §5.3 step 4, `clean --apply`); *(commands, draft)* for `fetch` (S §5.8): a **kept conflict** (outcome `conflict`: S §5.8.5 ambiguity, `base_changed`, `edited_during_commit`; or the finding `metadata_conflict{field}` on a committed problem; an edited sample kept while upstream changed is only the warning `edited_sample_kept`, not a kept conflict), a committed problem with `metadata_not_applied`, `metadata_pending`, `history_pending`, `history_blocked` or `journal_pending` (S §5.8.8), a contest or section selection in which some selected members ended `committed` or `unchanged` and others did not, the step-8 membership edit not committed after a member committed (S §5.8.13); *(archive, draft)* a snapshot was committed but retirement did not happen or cleanup ended `incomplete`, a restore published the problem but not its history, a quarantine purge left a selected entry (archive contract §5.4, §6.6, §7.3); *(submission, draft)* a submission version published without its `current` reference |
 | 10 | `infrastructure` | cpf could not run or observe a program reliably; *(stress, draft)* `stress_cleanup_failed` (an iteration's files or resources could not be released) |
 | 11 | `delivery` | requested machine output could not be written (§6.3, §7.6) |
+| 12 | `site` | *(commands, draft)* failure class `site`: `cpf fetch` failed with a sites contract §8.3 class (`auth_required`, `challenge`, `rate_limited`, `not_found`, `not_available`, `unsupported`, `unrecognized`, `parser_failure`, `network`, `offline_miss`) for its URL, its enumeration, or a problem, and no earlier row of §5.2 applies |
 | 70 | `internal` | failure class `internal`: a bug detected and handled (§5.4) |
 
-12–63 are reserved for later features; of 64–78 (`sysexits`) only 70 is
+*(commands, draft)* 13–63 are reserved for later features (12–63 before
+the commands amendment); of 64–78 (`sysexits`) only 70 is
 used; 126, 127 and ≥ 128 are never chosen as exit codes (the Unix re-raise
 of §5.3 is a death by signal).
 
@@ -1743,7 +1754,7 @@ condition:
 
 | # | Condition | Status |
 |---|---|---|
-| 1 | failure class `usage` (nothing started) | 2 |
+| 1 | failure class `usage` (nothing started; *(commands, draft)* for a `fetch` bulk refusal, nothing sent or written after the one enumeration request) | 2 |
 | 2 | **forced** cancellation (E §8.2 force exit; delivery abandoned) | §5.3 |
 | 3 | failure class `internal` (any time, including after F), or job verdict `internal_error` | 70 |
 | 4 | machine output requested and its delivery failed (decision D9) | 11 |
@@ -1751,26 +1762,29 @@ condition:
 | 6 | failure class `config`; *(submission, draft)* job verdict `submit_version_mismatch` | 7 |
 | 7 | failure class `workspace`; *(submission, draft)* submission `publication.kind = "not_published"` | 8 |
 | 8 | failure class `partial`; *(submission, draft)* submission `published` with `current = false` | 9 |
-| 9 | job verdict `infrastructure`; *(stress, draft)* `stress_cleanup_failed` | 10 |
-| 10 | job verdict `build_failed`; *(submission, draft)* `submit_failed` | 3 |
-| 11 | job verdict `checker_failed`; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` | 5 |
-| 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error`; *(stress, draft)* `candidate_failure` | 1 |
-| 13 | job verdict `unchecked`, `no_tests`; *(stress, draft)* `no_iterations` | 4 |
-| 14 | *(judging, draft)* job verdict `scored` and `result.score.full = false` | 1 |
-| 15 | otherwise (including `scored` with a full aggregate) | 0 |
+| 9 | *(commands, draft)* failure class `site` | 12 |
+| 10 | job verdict `infrastructure`; *(stress, draft)* `stress_cleanup_failed` | 10 |
+| 11 | job verdict `build_failed`; *(submission, draft)* `submit_failed` | 3 |
+| 12 | job verdict `checker_failed`; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` | 5 |
+| 13 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error`; *(stress, draft)* `candidate_failure` | 1 |
+| 14 | job verdict `unchecked`, `no_tests`; *(stress, draft)* `no_iterations` | 4 |
+| 15 | *(judging, draft)* job verdict `scored` and `result.score.full = false` | 1 |
+| 16 | otherwise (including `scored` with a full aggregate) | 0 |
 
 - Rows 6–8 apply to job refusals and to non-job command failures alike
   (`cpf current` with `NoSelection` → class `workspace` → 8; `cpf config
-  show` on invalid configuration → class `config` → 7).
+  show` on invalid configuration → class `config` → 7). *(commands,
+  draft)* Row 9 applies to non-job commands only.
 - Pairs: forced cancellation + anything → row 2; internal + delivery
   failure → 70; delivery failure + orderly cancellation → 11; delivery
   failure + any verdict other than `internal_error` → 11; refusal +
   delivery failure → 11; `infrastructure` + `wrong_answer` → 10 (via the
   verdict).
-- `pre_delivery_exit` is rows 3 and 5–15 evaluated at F.
+- `pre_delivery_exit` is rows 3 and 5–16 evaluated at F (row 9 never
+  holds for a job).
 - *(judging, draft)* A display profile (§2.8) never changes the status:
   `presentation_error` exits 1 under `judge-cf` too. An `incomplete`
-  score never reaches row 14 (§2.13). `internal_policy_error` is an
+  score never reaches row 15 (§2.13). `internal_policy_error` is an
   internal failure (row 3, 70).
 - For `cpf switch`, the `hook` job selects a row only through row 3
   (verdict `internal_error` or a caught panic, class `internal`) or row 5
@@ -1779,6 +1793,29 @@ condition:
   failures, fact outcomes, **ordinary** `after_test` hook outcomes and
   stderr write failures never select a row; an `internal_error` hook
   outcome selects row 3.
+- *(commands, draft)* **Several problems or jobs.** A command that acts
+  on several problems (`cpf fetch` of a contest or section, `cpf archive
+  contest:<c>`, a contest `cpf restore`) takes the first row that any of
+  its conditions satisfies, over the selection and every problem: a bulk
+  fetch with one member refused exits 8, with a kept conflict or with
+  some members failing while others committed 9, and 12 only when no
+  member committed or was unchanged. `cpf interactor-test` evaluates rows
+  1–12 over the conditions of all its jobs (it has no machine output, so
+  row 4 never holds) and stops admitting jobs after the first job whose
+  own status comes from rows 2–12; rows 13–16 are replaced by its
+  expectations, the predicates of C §9.1.7 evaluated per job: a `good`
+  job meets its expectation iff its job verdict is `passed` or `scored`
+  with a full aggregate; a `bad` job meets it iff at least one of its
+  tests has a solution verdict (as listed there) or a non-full score,
+  whatever its job verdict. Then: a `good` job whose own status would be 1
+  (a solution verdict, or a non-full aggregate), or a `bad` job whose
+  verdict is `passed` or `scored` with a full aggregate, gives 1 (an
+  expectation contradicted); otherwise any job that does not meet its
+  expectation gives 4 (not decided: a `good` job whose own status would
+  be 4, a `bad` job with neither such a test nor a pass); otherwise 0.
+- *(commands, draft)* Class `site` arises only in `cpf fetch`, which has
+  no job; it is placed after `partial` so that a partly committed bulk
+  fetch reports what it committed (9), and before every verdict row.
 - A truncated or missing stdout document can accompany 2, 70, row 2's
   status or a crash, not only 11: consumers MUST validate the document
   (complete line, parses, `schema`).
@@ -1855,11 +1892,14 @@ condition:
 | *(organisation, draft)* `cpf notes` | 0, 8, 11 (`--json`); `--path`: 0, 8, 11 |
 | *(organisation, draft)* `cpf ls` | 0 (also with invalid entries and findings), 8, 11 (`--json`) |
 | *(organisation, draft)* `cpf search` | 0 (hits or none, complete or incomplete), 8, 11 (`--json`), cancellation |
-| *(archive, draft)* `cpf archive` | plan: 0, 7, 8, 11 (`--json`); `--apply`: 0, 7, 8, 9, 11; `--resume`, `--close`: 0, 8, 9 (archive contract §5.4) |
-| *(archive, draft)* `cpf restore` | 0, 8, 9, 11 (`--json`) |
+| *(archive, draft)* `cpf archive` | plan: 0, 7, 8, 11 (`--json`); `--apply`: 0, 7, 8, 9, 11; `--resume`: 0, 8, 9, *(commands, draft)* 11 (`--json`); `--close`: 0, 8, 9 (archive contract §5.4) |
+| *(archive, draft)* `cpf restore` | 0, 8, 9, 11 (`--json`); *(commands, draft)* 7 when a snapshot id is looked up and the configuration that holds `archive.roots` is invalid (a snapshot path loads no configuration) |
 | *(archive, draft)* `cpf quarantine ls` | 0, 8 |
 | *(archive, draft)* `cpf quarantine purge` | 0, 8; `--apply`: 9 when a selected entry could not be renamed or deleted |
 | *(archive, draft)* `cpf ls --archived` | as `cpf ls`, plus cancellation |
+| *(commands, draft)* `cpf fetch` | 0, 7, 8, 9, 11 (`--json`), 12, cancellation |
+| *(commands, draft)* `cpf fetch --history` | 0, 8 |
+| *(commands, draft)* `cpf interactor-test` | 0, 1, 3, 4, 5, 7, 8, 10, cancellation |
 | `cpf --help`, `--version` | 0 |
 
 "Cancellation" is the §5.3 status. Raw `cpf run` never passes the child's
@@ -1876,10 +1916,18 @@ code through; the child's status is in the report and the stderr summary
   whose contract defines a document (schema 1: `cpf config show`, *(draft)*
   `cpf status` below, *(organisation, draft)* `cpf ls`, `cpf search`,
   `cpf notes` below, *(archive, draft)* `cpf archive` (plan and apply),
-  `cpf restore`; later `cpf test ls`). A per-command flag; elsewhere
+  `cpf restore`, *(commands, draft)* `cpf fetch` (the `fetch` document of
+  sites contract §11.2, written once a problem transaction has begun; a
+  failure before the first one, i.e. while the S §5.8.1 selection is
+  resolved (an unsupported URL, a failed enumeration, the bulk refusals),
+  writes the §4.12 `error` document with `command` `fetch` and its class,
+  `site` or `usage` among them);
+  later `cpf test ls`). A per-command flag; elsewhere
   clap rejects it (2): *(organisation, draft)* `cpf tag`, `untag` and
   `mark` have no document; *(archive, draft)* nor have `cpf archive
-  --close` and `cpf quarantine`.
+  --close` and `cpf quarantine`; *(commands, draft)* nor have `cpf fetch
+  --history` and `cpf interactor-test` (neither accepts `--events`
+  either: its jobs' reports are in their job directories).
 - Raw `cpf run` rejects `--json` and `--events` (E §8.1): 2.
 - `--json` with `--events`: 2 (decision D4).
 

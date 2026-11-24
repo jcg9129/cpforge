@@ -108,7 +108,8 @@ retention_days = 30
 - Layers 1 and 2 (user and workspace files), never the problem layer.
   Arrays are replace-as-unit; a profile's `keep`, `discard` and `cleanup`,
   when present, replace the base values for that run. At most one profile
-  per run (`--profile <name>`); an unknown name → 7.
+  per run (`--keep-profile <name>`; named so because `--profile` selects a
+  language profile in every other command); an unknown name → 7.
 - Paths in `roots`, `default_root` and `--to`/`--root` are absolute or
   start with `~/` (the user's home directory); anything else → 7.
 - `keep` and `discard` hold class names of §3.3. A class in both lists of
@@ -481,7 +482,7 @@ from hashes (§5.2), not from the lock.
 ### 5.1 Overview
 
 ```
-cpf archive <target> [--to <dir>] [--profile <name>] [--cleanup <mode>]
+cpf archive <target> [--to <dir>] [--keep-profile <name>] [--cleanup <mode>]
                      [--on-existing <mode>] [--apply [--plan <hash>]] [--json]
 cpf archive --resume [--apply] [--json]
 cpf archive --close <txn> [--apply]
@@ -1398,7 +1399,7 @@ pre-archive file's bytes are found in at least one of them.
   record is replaced by a `malformed` one.
 - **Keep/discard**: default config keeps every class and omits `submit`;
   `discard = ["tests:sample"]` drops exactly the unedited download files;
-  `--profile minimal` replaces the lists; `discard = ["metadata"]`,
+  `--keep-profile minimal` replaces the lists; `discard = ["metadata"]`,
   `discard = ["fetch"]`, a class in both lists, an unknown class → 7.
 - **Layout vectors** (pure): `{site}/{problem_id}` → `atcoder/abc400_a`;
   values `CON`, `con.txt`, `a.`, `a `, `a/b`, `a\b`, `a:b`, `C:`, `\\x`,
@@ -1418,7 +1419,7 @@ pre-archive file's bytes are found in at least one of them.
   `inventory_too_large`.
 - **Binding**: the plan hash changes after each single change of: one byte
   of a kept file, one byte of a discarded file, a new file, an executable
-  bit, `archive.layout`, `--profile`, `--cleanup`, the root, the selection,
+  bit, `archive.layout`, `--keep-profile`, `--cleanup`, the root, the selection,
   a contest listing the problem; `--apply --plan <old>` → 8
   `plan_changed`, nothing written. Two plans of an unchanged workspace have
   the same hash.

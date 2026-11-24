@@ -696,7 +696,8 @@ and ignored, never acted on.
 
 Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
 `.cpforge/staging/`, *(fetch, draft)* `.cpforge/downloads/`, *(submission,
-draft)* `.cpforge/submit/`, then the comment `# optional: .cpforge/facts/`
+draft)* `.cpforge/submit/`, *(archive, draft)* `.cpforge/archive/`,
+`.cpforge/quarantine/` (archive contract §9), then the comment `# optional: .cpforge/facts/`
 and *(fetch, draft)* the comment `# optional: .cpforge/fetch/` (settled:
 never an active line; fetch history is the provenance of downloaded test
 files, and ignoring it makes them user content in another checkout, which is
@@ -1179,7 +1180,7 @@ selection order, each with its own txn, area and lock acquisitions; a
 | entry, unedited | = recorded | `unchanged` |
 | entry, unedited | ≠ recorded | `updated`: publish a revision pair; `replace` the entry's `input`, `answer`, `download` (id, `enabled` and unknown keys kept, so a disabled entry stays disabled); new files `registered`, old files `superseded` |
 | entry, edited (input, answer or both; a file missing) | = recorded | `kept_edited`: nothing |
-| entry, edited | ≠ recorded | `kept_edited`: the whole pair and its entry are kept; the upstream pair is published as an unregistered revision pair (role `unregistered-upstream`) unless already retained (below) |
+| entry, edited | ≠ recorded | `kept_edited`: the whole pair and its entry are kept; the upstream pair is published as an unregistered revision pair (role `unregistered-upstream`) unless already retained (below); *(commands, draft)* the warning `edited_sample_kept{test, upstream}` names the entry and the upstream pair's stem, on stderr and in the `fetch` document; exit status unaffected (0 by itself) |
 | entry (any) | absent (`k > n ≥ 1`) | `removed_upstream`: reported; with `--disable-removed` the edit sets `enabled = false` (`disable`); files untouched |
 
 - **Already retained**: a valid history record of `<p>` (§5.8.10) lists,
