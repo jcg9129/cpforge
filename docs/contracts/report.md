@@ -1157,12 +1157,25 @@ platform. `Target`:
 Fixture: `src/report/wire/fixtures/status.json`.
 
 *(organisation, draft)* **Organisation fields in `status`.** `tags` and
-`user_status` carry the S §5.9.2 field only when it is `valid` (`tags`
-elements as spelled, in stored order); an `absent` field gives `[]` /
-`null`; an `invalid` one gives `[]` / `null` **and** a `diagnostics` entry
-naming the field and its reason. `user_status` is the stored value, never
-the effective status. The human form labels it `workflow: <value>` (S
-§5.9). Filters (S §5.9.6) change only which problems are listed.
+`user_status` keep their existing meaning unchanged: `tags` holds the
+string elements of `[problem] tags` as stored, in order (non-string
+elements skipped; `[]` when the key is absent or not an array), and
+`user_status` the stored `[problem] status` when it is a string, any
+string, otherwise `null`. They are **raw** values, not validated. A new
+member, placed after `diagnostics`, reports validity separately:
+
+| Member | Type | Meaning |
+|---|---|---|
+| `findings` | `[OrgFinding]` | every organisation field (S §5.9.2) that is `invalid`, with its reason; `[]` when all are absent or valid |
+
+Filters (S §5.9.6) use the validated and effective values, never the raw
+members, and change only which problems are listed; the run-fact
+comparison and every other member are computed exactly as before. The
+human form labels the stored status `workflow: <value>` (S §5.9). Fixture
+`status.json` gains `"findings":[]`; a second fixture
+`status_invalid_fields.json` holds `status = "Working on it"` and `tags =
+["dp", "DP"]`: `user_status` `"Working on it"`, `tags` `["dp","DP"]`, and
+two findings.
 
 *(organisation, draft)* **Common types.** `OrgFinding`: `{field: token,
 reason: text}`, `field` one of `tags`, `status`, `created_at`,
@@ -1191,8 +1204,8 @@ except where a cap is stated; a selection or workspace failure writes the
 | `problem` | `pident` | identity (`pident` as widened for remote identities by the fetch amendment) |
 | `origin` | token | `active` |
 | `title` | `string?` | `[problem] title` when present |
-| `tags` | `[string]` | as in `status` |
-| `user_status` | `string?` | as in `status` |
+| `tags` | `[string]` | the `tags` field when `valid`, else `[]` (validated, unlike `status`) |
+| `user_status` | `string?` | the stored `status` when `valid`, else `null` |
 | `effective_status` | `string?` | S §5.9.2: `new` when absent, `null` when invalid |
 | `created_at`, `updated_at`, `solved_at`, `archived_at` | `time?` | each field |
 | `contests` | `[ident]` | contests listing it, by name |
@@ -1226,7 +1239,7 @@ the absolute native path of `notes.md` (Windows without the verbatim
 prefix, S §5.7); `state` is `created` or `existing` (mutating form), or
 `absent`, `existing`, `not_regular` (`--path`).
 
-Fixtures: `src/report/wire/fixtures/ls.json`, `ls_contests.json`,
+Fixtures: `status_invalid_fields.json` (above), `src/report/wire/fixtures/ls.json`, `ls_contests.json`,
 `search.json`, `search_incomplete.json`, `notes.json` (encoder vectors and
 the Python oracle round trip, as for `status`).
 

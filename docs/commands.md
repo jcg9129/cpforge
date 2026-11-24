@@ -191,16 +191,19 @@ matches a contest's tag. An `upsolve` tag can sit next to any status.
 The **workflow status** is yours: `new`, `in-progress`, `solved`,
 `skipped`, plus the names in `[status] values` of your user or workspace
 configuration. A problem never marked counts as `new`. Passing tests never
-changes it. `cpf mark p solved` also records `solved_at`; marking another
-status later keeps `solved_at`. Every change records `updated_at`; new
+changes it. The first `cpf mark p solved` records `solved_at`; later marks,
+including solving again after reopening, keep that first time. Every change records `updated_at`; new
 problems get `created_at`. Times are stored in UTC, as
 `2026-11-24T10:00:00.000Z`.
 Contests have no workflow status of their own; `cpf ls --contests` counts
 their members per status.
 
 The commands edit only these keys; comments, formatting and every other key
-stay as they are, and an editor's save during the edit is detected (the
-edit is retried once, then refused). A key you wrote by hand that cpf
+stay as they are. cpf rereads the file just before replacing it and, if an
+editor changed it, starts over once from the new contents, then refuses. A
+save that lands in the short moment between that last check and the
+replacement is overwritten, as with every cpf record edit; an editor that
+later saves an older buffer overwrites cpf's change. A key you wrote by hand that cpf
 cannot read (`tags = "dp"`, an invalid date) is reported by `cpf status`,
 `cpf ls` and `cpf fsck`, never rewritten: the command that would change it
 refuses until you fix it. Such a key never stops builds or tests.

@@ -1337,7 +1337,7 @@ stays `user_status` (report §6.1). Contests have no stored workflow status;
 | `status` | `problem.toml` `[problem]` | a status name (§5.9.2) | `cpf mark` | any other command; jobs and facts never |
 | `created_at` | `problem.toml` `[problem]` | timestamp | `cpf add` (staged record, §5.2 step 2); fetch creation (§5.8.4, staged record) | every later command; never backfilled |
 | `updated_at` | `problem.toml` `[problem]` | timestamp | every committed `tag`, `untag`, `mark` edit of that record | fetch metadata edits (§5.8.4 step 6), `adopt`, test commands, `notes` |
-| `solved_at` | `problem.toml` `[problem]` | timestamp | `cpf mark <t> solved` when the stored status is not `solved` | everything else; no command removes it |
+| `solved_at` | `problem.toml` `[problem]` | timestamp | `cpf mark <t> solved` when the stored status is not `solved` and `solved_at` is absent | everything else; no command changes or removes it |
 | `archived_at` | `problem.toml` `[problem]` | timestamp | the archive (archive contract) | every §5.9 command (read only) |
 | `tags` | `contest.toml`, top level | array of tags | `cpf tag`, `cpf untag` on a contest | any other command |
 | — | `problems/<p>/notes.md` | free text | created empty, once, by `cpf notes` (§5.9.5) | everything: never modified, truncated or deleted |
@@ -1393,7 +1393,10 @@ stays `user_status` (report §6.1). Contests have no stored workflow status;
   report `time` form `YYYY-MM-DDTHH:MM:SS.mmmZ` (report §3.2): UTC from the
   system clock, milliseconds truncated, so values sort as strings and
   appear unchanged in JSON. A reader also accepts the hand-written forms
-  `YYYY-MM-DDTHH:MM:SSZ` and `YYYY-MM-DD` (read as `T00:00:00.000Z`). Every
+  `YYYY-MM-DDTHH:MM:SSZ` (an instant) and `YYYY-MM-DD` (a **date**, not an
+  instant). The parsed value keeps that distinction: an *instant* or a
+  *date*; only the report encoder writes a date as `T00:00:00.000Z`
+  (report §6.1), and nothing else converts it. Every
   component is range-checked (month 01–12, day valid for the month and leap
   year, hour 00–23, minute and second 00–59; no leap second), the year is
   1970–9999. A TOML date-time value, a local time, another offset or any
@@ -1447,28 +1450,41 @@ block marking. A status not in the vocabulary → 7, naming the vocabulary.
 
 1. Lock (leftover recovery first, §4.5). Resolve `<target>` under the lock
    (§5.7, or the contest directory: an Identifier, not a link, a directory,
-   `contest.toml` present).
+   `contest.toml` present). Record the **expected binding**: for a problem
+   its identity (bound to the directory, §2.1); for a contest the presence
+   and value of `[contest] id`.
 2. One §4.4 edit transaction on `problems/<p>/problem.toml` or
    `contests/<c>/contest.toml`, with the replay wrapper (at most two
    attempts, each from a fresh read). The schema check is the record's
    classification (§9; for a contest the §5.2 membership rules too):
-   anything but `valid` → refused (8), nothing written. The operation, on
-   the fresh document of each attempt:
+   anything but `valid` → refused (8), nothing written. The check then
+   compares the fresh document with the expected binding: a problem whose
+   `[problem] id` is no longer the resolved identity, or a contest whose
+   `[contest] id` appeared, disappeared or changed → refused
+   (`IdentityMismatch`, 8), nothing written, on the first attempt and on the
+   replay alike. The operation, on the fresh document of each attempt:
    - `tag`: if `tags` is `invalid` → refuse (8, naming the field and
-     reason). Otherwise append each argument tag, in argument order, whose
-     key is not already present (and not earlier in the same argument list);
-     a missing `tags` is created as an inline array in `[problem]` (problem)
-     or at the top level (contest). The array's existing elements, their
-     spelling, order and formatting are kept.
+     reason). The arguments are first reduced to one tag per key (the
+     first spelling wins). Then append each of them, in argument order,
+     whose key is not already present; a missing `tags` is created as an
+     inline array in `[problem]` (problem) or at the top level (contest).
+     The array's existing elements, their spelling, order and formatting
+     are kept. If the result would hold more than 64 tags → refused (8,
+     `too_many_tags`), nothing written; the count is computed on the fresh
+     document of each attempt, so an editor's addition before the replay
+     counts.
    - `untag`: if `tags` is `invalid` → refuse (8). Otherwise remove every
      element whose key equals an argument's key; the key stays, possibly as
      `tags = []`. A tag that is not present is reported on stderr and is
      not an error.
-   - `mark <s>`: if `status`, or `solved_at` when it would be written, is
-     `invalid` → refuse (8). If the stored `status` already equals `<s>`
-     (exact string) → no change. Otherwise set `status = "<s>"`; when `<s>`
-     is `solved`, set `solved_at` to now; any other `<s>` leaves `solved_at`
-     as it is (it records the last time the problem was marked solved).
+   - `mark <s>`: if `status` is `invalid`, or `<s>` is `solved` and
+     `solved_at` is `invalid` → refuse (8). If the stored `status` already
+     equals `<s>` (exact string) → no change, even when `solved_at` is
+     absent (cpf does not invent the time of an earlier solve). Otherwise
+     set `status = "<s>"`; when `<s>` is `solved` **and `solved_at` is
+     absent**, set `solved_at` to now. A `valid` `solved_at` is never
+     changed or removed: it records the **first** time cpf saw the problem
+     marked solved (settled), so reopening and re-solving keeps it.
    - Every operation that changes the document of a **problem** also sets
      `updated_at` to now (refused, 8, if the stored `updated_at` is
      `invalid`). A contest edit writes no date.
@@ -1526,7 +1542,7 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
 | `--tag <t>` (repeatable) | tag | its valid `tags` contains every value by key (AND); contest tags never count |
 | `--site <s>` (repeatable) | `local` or the site grammar (§2.1) | its identity's site equals one of the values (OR) |
 | `--contest <c>` (repeatable) | Identifier | a `[[problem]]` record of `contests/<c>/contest.toml` has its identity (OR over values) |
-| `--created <range>`, `--updated <range>`, `--solved <range>` | range | that field is `valid` and its UTC date lies in the range |
+| `--created <range>`, `--updated <range>`, `--solved <range>` | range | that field is `valid` and its **local date** (an instant converted as below; a date value as written) lies in the range |
 
 - **Range**: `D` (that day), `D..` (from D), `..D` (up to and including D),
   `D1..D2` (inclusive); `D` is `YYYY-MM-DD` with the §5.9.2 component
@@ -1545,16 +1561,31 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
   (`YYYY-MM-DD`) is already a local date and is compared as written, never
   converted; the JSON documents still show it as `T00:00:00.000Z` (report
   §6.1).
-- **Time zone source**, read once per invocation: Unix (Linux, macOS) —
-  `TZ` when set and non-empty (a POSIX TZ string, or a zone name or
-  `:`-path resolved in the system time zone database), otherwise
-  `/etc/localtime`; Windows — the system's dynamic time zone
-  (`GetDynamicTimeZoneInformation`, with its year-specific rules). If the
-  zone cannot be determined (an invalid `TZ`, an unreadable or invalid
-  `/etc/localtime`, an API failure), date filters use UTC and the command
-  prints one stderr warning naming the cause; nothing else changes. A test
-  seam (`storage-test-hooks`) replaces the zone with a given POSIX TZ string
-  on every OS, so date tests never depend on the host.
+- **Time zone backend**: the `jiff` crate, pinned to an exact `0.2.x`
+  version whose `rust-version` is ≤ 1.85, with `default-features = false`
+  and only `std`, `tz-system` (system zone discovery: `TZ`, then
+  `/etc/localtime` on Linux and macOS; the Windows system zone mapped to its
+  IANA name), `tzdb-zoneinfo` (the system TZif database on Linux and macOS)
+  and `tzdb-bundle-platform` (a bundled database only where the system has
+  none, i.e. Windows). The exact version, its declared MSRV and the feature
+  set are verified by the first organisation task before the dependency is
+  added (dependency review as for the HTTP stack, including an MSRV build on
+  every release target). cpf writes no time zone parser of its own.
+- **Time zone source**, read once per invocation, before any filter is
+  evaluated: jiff's system lookup (`TimeZone::try_system`), used
+  unmodified, so `TZ` (zone name, `:`-path or POSIX string) and
+  `/etc/localtime` follow jiff's documented rules, and Windows uses the
+  mapped IANA zone. cpf's only own rule is the failure case: if the lookup
+  fails (an invalid `TZ`, an unreadable `/etc/localtime`, an unmappable
+  Windows zone), date filters use UTC and the command prints one stderr
+  warning naming the cause; nothing else changes, and commands without a
+  date filter never look the zone up. Conversions use the zone's complete
+  rules (TZif transitions, then its POSIX footer for later instants).
+- **Test seam**: the filter evaluator takes a `jiff::tz::TimeZone` as a
+  parameter; production passes the system zone, unit tests pass zones built
+  through jiff's API (`TimeZone::posix`, `TimeZone::tzif` from fixture TZif
+  bytes, `TimeZone::get` from the bundled database), so date tests never
+  depend on the host. End-to-end tests set `TZ` on Linux and macOS.
 - Different flags combine with AND. A problem whose field is `invalid` or
   `absent` (dates) never matches a filter on that field and is still
   reported (§5.9.9).
@@ -1644,6 +1675,15 @@ cpf search <term>... [filters] [--no-notes] [--json]
     `notes.md`, and `contests/<c>/contest.toml` for each `--contest`, read
     once before the candidates) counts one, hits or not;
   - *bytes* B ≤ 64 MiB (67 108 864): every byte read from those files.
+  **One inventory.** `problems/` is enumerated once per invocation, and
+  `contests/` at most once (only when a `--contest` value must be
+  resolved); each is counted in E. Candidate resolution applies the §5.7
+  reader lookup and the §2.1 rules (spelling, collision key, link and type
+  checks, identity binding) **against that inventory** and the entry's own
+  metadata, never by re-enumerating a directory. Every other filesystem
+  operation the search performs (enumeration, open, `symlink_metadata`)
+  counts one entry, and every byte read counts in B; nothing the search
+  does is outside the two counters.
   `problems/` is enumerated completely first (counting entries), then the
   candidates are examined in directory-name byte order. Before reading a
   file, the length reported by its open handle (for `notes.md`, at most
@@ -1660,10 +1700,24 @@ cpf search <term>... [filters] [--no-notes] [--json]
   problem, an unreadable or non-regular `notes.md`, an invalid field),
   `cancelled`. A complete search has no reason. `--no-notes` never yields
   `notes_truncated`.
-- **Cancellation** (Ctrl-C, SIGTERM; report §5.3) is checked before every
-  counted action. The search stops, prints what it found with
-  `cancelled`, and exits with the cancellation status. It holds no lock and
-  wrote nothing, so there is nothing to clean up.
+- **Cancellation** (Ctrl-C, SIGTERM; Windows Ctrl-C, Ctrl-Break; report
+  §5.3). `cpf search` installs the job commands' signal listener. All
+  filesystem work runs on one worker thread, which checks cancellation
+  before every counted action and publishes each finished candidate (hit or
+  finding) to the main thread. The main thread waits for the worker **or**
+  a cancellation notification. On cancellation it stops waiting at once,
+  even while the worker is blocked inside a system call (a stalled
+  enumeration, open or read on a slow filesystem), and writes the results
+  published so far with `cancelled`. The candidate in progress is omitted.
+  The blocked worker is abandoned and ends with the process; it holds no
+  lock and writes nothing, so nothing is left to clean up. Guarantee: output
+  starts within 200 ms of the first signal unless stdout itself blocks; a
+  second signal at least 100 ms later forces exit (execution contract
+  §8.2). The exit status follows report §5.2 (delivery failure first, then
+  cancellation). The other commands of this section install no listener: a
+  signal has its default effect (an interrupted edit is a crash state,
+  §10). Slow or stalled **archive roots** are a prerequisite the archive
+  contract must settle before archive search.
 - **Output**: hits in examination order: identity, `origin`, the matched
   field names, for notes up to 16 matching line numbers, and
   `notes_truncated`; then every finding; then, if incomplete, one line
@@ -1686,8 +1740,14 @@ without filters) are **lock-free readers**: no lock, no leftover recovery,
 no file created, renamed or deleted, no hook, no process; the workspace is
 byte-identical afterwards (no `.cpforge/lock` created where there was none).
 They read records with the §9 classification and resolve problems with the
-§5.7 reader lookup. A concurrent edit can make an answer stale, never a
-mixture of two states of one file. Every source that cannot be used is
+§5.7 reader lookup. A concurrent **atomic replacement** (cpf's own edits,
+editors that save by rename) can make an answer stale, never a mixture of
+two states of one file. An editor writing **in place** gives no such
+promise: a record or `notes.md` read during the write may contain old and
+new bytes. Each file is read once into memory and that byte sequence is
+classified and used as it is (a torn record may classify `malformed` and
+is then reported, or may decode as a valid mixture); a reader never fails,
+hangs or rereads because of it. Every source that cannot be used is
 reported with its path and reason, in the human output and the document:
 an entry of `problems/` that is not a valid problem, an invalid
 organisation field (field name and reason), an unreadable `contest.toml`,
@@ -2676,7 +2736,8 @@ contest fetch completes its membership.
   actual `cpf` binary. A `storage-test-hooks` clock override fixes "now"
   (`2026-11-24T10:00:00.000Z` unless a row says otherwise); a bounds
   override lowers the search bounds E and B; pause barriers
-  `org.before_validation` (edit rendered, before the first §4.4 step-4
+  `org.after_resolve` (target resolved under the lock, before the first
+  read), `org.before_validation` (edit rendered, before the first §4.4 step-4
   validation), `notes.before_publish` (temp written, before the no-clobber
   call) and `search.before_action#k` (before the k-th counted action);
   crash points `org.edit_validated` (temp validated, before the rename),
@@ -2702,9 +2763,10 @@ contest fetch completes its membership.
   `2026-11-25T00:00:00.000Z`; `..2026-11-24`, `2026-11-24..`,
   `2026-11-20..2026-11-24` inclusive at both ends; `2026-11-25..2026-11-24`,
   `..`, `2026-02-29`, `2026-11-24T10:00Z` rejected.
-- **Local-day tables** (zone injected through the test seam on every OS,
-  and additionally through `TZ` on Linux and macOS with the same expected
-  results): `CET-1CEST,M3.5.0,M10.5.0/3` → `2026-11-24T23:30:00.000Z` is
+- **Local-day tables** (zones passed to the evaluator through jiff's API
+  on every OS, built with `TimeZone::posix` from the strings below; the
+  end-to-end rows repeat them through `TZ` on Linux and macOS with the same
+  expected results): `CET-1CEST,M3.5.0,M10.5.0/3` → `2026-11-24T23:30:00.000Z` is
   local 2026-11-25, `2026-07-01T22:30:00.000Z` is 2026-07-02,
   `2026-07-01T21:59:59.999Z` is 2026-07-01; `EST5EDT,M3.2.0,M11.1.0` →
   `2026-11-25T04:59:59.999Z` is 2026-11-24 and `T05:00:00.000Z` 2026-11-25;
@@ -2715,8 +2777,23 @@ contest fetch completes its membership.
   millisecond before it is the previous day; at the fall-back the repeated
   23:00–24:00 hour belongs to the earlier day and the following midnight
   instant to the new day. A date-only stored `2026-11-24` matches
-  `--solved 2026-11-24` under every zone above. An invalid `TZ` value
-  (`TZ=Nowhere/Invalid`, Unix) → one stderr warning and UTC-day results.
+  `--solved 2026-11-24` under every zone above and is never converted.
+  TZif rows (`TimeZone::tzif` with fixture bytes and `TimeZone::get` from
+  the bundled database): `America/Sao_Paulo` → `2018-12-01T02:30:00.000Z`
+  is local 2018-11-30 (−02, DST then in force) and `2026-12-01T02:30:00.000Z`
+  is 2026-11-30 (−03, DST abolished since 2019); `Europe/Berlin`
+  `2100-07-01T22:30:00.000Z` → 2100-07-02 (beyond the TZif transitions,
+  from its POSIX footer). Discovery: `TZ=Nowhere/Invalid` (Unix) → one
+  stderr warning and UTC-day results; `TZ=Europe/Berlin` and
+  `TZ=:Europe/Berlin` give the Berlin rows; a command without a date
+  filter under the invalid `TZ` prints no warning. Windows: the CI host's
+  zone is set (`tzutil /s`) to `W. Europe Standard Time` and to the same
+  with dynamic DST disabled (`_dstoff`); the expected local dates are those
+  jiff's mapped zone gives (asserted equal to `TimeZone::get("Europe/Berlin")`
+  for the first, and to the fixed standard offset +01 for the second, the
+  latter verified against jiff's behaviour by the first organisation task;
+  if jiff does not honour disabled DST, cpf reads
+  `DynamicDaylightTimeDisabled` itself and uses `TimeZone::fixed`).
 - **Argument errors before the workspace:** run outside any workspace, each
   of `cpf tag p 'a b'`, `cpf tag p`, `cpf mark p Solved`, `cpf mark
   contest:c solved`, `cpf --problem a tag . dp`, `cpf ls --tag 'a b'`,
@@ -2737,7 +2814,10 @@ contest fetch completes its membership.
 - **`mark`:** `cpf mark p solved` → `status`, `solved_at`, `updated_at` all
   equal the clock; again at a later clock → no write; `cpf mark p
   in-progress` (clock T2) → `status` changed, `solved_at` unchanged,
-  `updated_at` = T2; `cpf mark p solved` at T3 → `solved_at` = T3. With
+  `updated_at` = T2; `cpf mark p solved` at T3 → `status = "solved"`,
+  `updated_at` = T3, `solved_at` still T1. A hand-written `status =
+  "solved"` without `solved_at` → `cpf mark p solved` writes nothing;
+  `cpf mark p new` then `cpf mark p solved` at T4 → `solved_at` = T4. With
   workspace `status.values = ["wa"]` → `cpf mark p wa` succeeds; without →
   7, record byte-identical, message lists the five-name vocabulary; user
   `["wa"]` with workspace `["x"]` → `wa` is 7 (the array replaces);
@@ -2750,8 +2830,28 @@ contest fetch completes its membership.
   `tag`, `untag` and `mark` exit 8; `solved_at = "x"` → `mark p solved` 8,
   `mark p skipped` succeeds. In every case `cpf current --problem p`,
   `cpf switch p` and `cpf status p` still select the problem (the record is
-  `valid`); `cpf status` lists the invalid field in `diagnostics` with
-  `tags: []` / `user_status: null`.
+  `valid`); `cpf status --json` keeps the raw `tags` / `user_status`
+  members exactly as before this amendment and lists the invalid field in
+  `findings`; `cpf ls --json` gives `[]` / `null` with the finding.
+  Regression: the existing `status` fixtures and gate-1 status tests pass
+  with only the added `findings` member.
+- **Tag count:** 63 tags + `cpf tag p a A b` → `a` added once, `b` → 65 →
+  refused 8 `too_many_tags`, byte-identical; 63 tags + `cpf tag p a A` →
+  64, committed; 63 tags, an editor adds the 64th at `org.before_validation`
+  of the first attempt, `cpf tag p x` → the replay counts 65 → 8, the
+  record equals the editor's version.
+- **Binding on replay:** at `org.before_validation` an editor changes
+  `[problem] id` from `local:p` to `local:q` (a valid identity) → the
+  replay refuses with `IdentityMismatch`, exit 8, the record equals the
+  editor's; the same on the first attempt (the change made at the barrier
+  `org.after_resolve`, between resolution and the first read); a contest
+  whose `[contest] id` an editor adds at the barrier → 8. **Fetch overlap:**
+  `cpf tag p dp` while a refetch of `p` is paused at `fetch.network` → the
+  tag commits, the fetch ends `conflict` `base_changed` (problem base),
+  nothing published, and a rerun of the fetch commits with the tag kept
+  byte-identical; `cpf tag p dp` started while a refetch holds the lock
+  (paused at `fetch.before_metadata`) waits, then commits on the fetch's
+  result with both the fetch's metadata and the tag present.
 - **Targets:** `.` from inside `problems/p/` tags `p`; `.` with a saved
   selection and the root as cwd tags the saved problem; `.` with no
   selection → 8 `NoSelection`; a bare name naming only a contest → 8 with
@@ -2850,14 +2950,36 @@ contest fetch completes its membership.
   by a writer during the read at the barrier never makes B exceed the
   bound. One real-bound test on Linux: 100 001 empty directories in
   `problems/` → `entry_limit` with E = 100 000 and no file opened.
+  **Operation accounting:** a `storage-test-hooks` recorder counts every
+  enumeration entry, open and `symlink_metadata` the search performs; in
+  every bounds test the recorder's count equals the reported `entries`
+  and its byte total equals `bytes_read`. `problems/` with spelling
+  variants (`P1`, `p1`, Linux) → both reported `name_collision` with no
+  second enumeration. A `contests/` of 100 001 entries: `cpf search x` →
+  complete, the recorder shows no `contests/` access; `cpf search x
+  --contest c` → `entry_limit` during the `contests/` enumeration, no
+  problem examined.
 - **Cancellation:** SIGINT at `search.before_action#20` (Unix) → hits only
   among the actions before it, `cancelled`, death by SIGINT; with `--json`
   the delivered document has `cancelled`; Windows Ctrl-Break → 6. The
-  workspace is byte-identical.
+  workspace is byte-identical. **Blocked I/O:** a test hook stalls the
+  worker inside its 5th read indefinitely; SIGINT (Unix) or Ctrl-Break
+  (Windows) → output starts within 200 ms, the document lists exactly the
+  candidates finished before the stall plus `cancelled`, and the process
+  exits (death by SIGINT / 6) within 1 s; a second signal ≥ 100 ms after a
+  first one that is ignored by an injected stalled stdout → force exit.
+- **In-place writers:** with the reader paused after reading the first half
+  of `problem.toml` (hook `org.read_partial`) and the file rewritten in
+  place, `cpf ls` classifies exactly the bytes read (the expected
+  `malformed` finding for the fixture's torn bytes), exits 0 and reads the
+  file once; the same for `notes.md` in `cpf search` (searched as read, no
+  error).
 - **Search exit statuses:** outside a workspace → 8 with the `error`
   document under `--json`; no `problems/` → 0, complete, zero hits;
   `problems/` unreadable (Unix) → 8; closed stdout with `--json` → 11;
-  incomplete for each reason → 0.
+  incomplete for each reason except `cancelled` → 0; cancelled with
+  `--json` and a closed stdout → 11 (report §5.2 row 4 before row 5); a
+  usage error (`cpf search`) with `--json` and a closed stdout → 2.
 - Real runs on Linux, macOS and Windows on the supported filesystems;
   power-loss behaviour is not tested. Platform floor and toolchain as in
   [README](../../README.md) (platform floor).
