@@ -1125,6 +1125,8 @@ absent or `batch` is interactive; `[problem] kind = "interactive"` with a
 ("interactive problem needs `[check] kind = \"interactive\"` and an
 interactor"). A `[check]` on a problem of kind `answer`, `multi-file` or an
 unknown kind changes nothing: their refused operations stay refused.
+A per-test `check` key in a `tests.toml` entry (storage contract §8.1)
+is refused the same way for every selected entry that holds it.
 A version that does not implement a part of §9.1 rejects its keys on
 presence (even with default values) for `build`, `run`, `test` and `cmd`
 with `needs_build` / `for_each_test`, as a configuration planning error
@@ -1783,6 +1785,12 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
     address_space = "1GiB" }` → valid on Linux and a phase-3 error on
     macOS; the same `job_commit` value in the Windows overlay of that run
     stage (`[languages.python.windows.run]`) → valid on both.
+  - Per-test `check`: a `tests.toml` entry with `check = { kind =
+    "checker" }`, and one with `check = "x"`, selected by `cpf test` (and
+    by `--case`) → exit 7 "unsupported in this version" before admission,
+    no job directory, `job-seq` unchanged; the same entry unselected →
+    the job runs; `cpf test ls` and `cpf test disable` keep the key
+    byte-identical (Linux and macOS).
   - Unimplemented parts: while a part of §9.1 is not implemented, each of
     its keys present in `[check]`, also with its default value → `cpf
     build`, `run`, `test` and `cmd` with `needs_build` or `for_each_test`

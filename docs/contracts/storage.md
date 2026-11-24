@@ -2373,9 +2373,14 @@ enabled = true
   entry whose files differ is *edited* and is still run as it is now.
   Fetched answers are always present; a zero-byte fetched answer is
   present-empty.
-- Per-test checker overrides are a later design; until then such keys are
-  preserved as unknown keys, and a recognised execution-affecting key that
-  the running version does not support is a planning error, never ignored.
+- Per-test checker overrides are a later design. The key `check` of a
+  `[[test]]` entry is reserved for them and is the recognised
+  execution-affecting key: an entry holding it (any value) is preserved by
+  every edit and is not a catalog error, and a judged job (`cpf test`,
+  `cpf interactor-test`, `cpf submit-prep` stage mode) that selects such
+  an entry is refused with a configuration planning error, "unsupported in
+  this version", exit 7, before admission; it is never ignored. Every
+  other unknown key of an entry stays preserved and inert.
 - **Classification** (§9 user-editable): `missing` (no file: an empty
   catalog; `add` and `register` create it), `unreadable`, `malformed`
   (including any invalid known field or duplicate), `too_new` (raw display

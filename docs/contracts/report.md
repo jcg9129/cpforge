@@ -3076,6 +3076,14 @@ no request is sent.
 | R-U01 | `cpf --help`; `cpf <command> --help` for every command of §5.5 | the first lists every command of §5.5; each exits 0 |
 | R-U02 | each command of §5.5 in a build where its implementation has not landed | stderr names the command and says it is not available yet, exit 2, nothing created; in a release build no command does so |
 | R-U03 | usage errors of §5.1 code 2: `--problem` with `fetch`, `archive`, `restore` and `quarantine`; `fetch --history --json`; `fetch --only A` and `--all-in-section` with a selection they do not apply to; `archive --plan <hash>` without `--apply`; `archive --resume` with a target; `archive --close <txn>` with `--keep-profile`; `restore --into x` with a contest snapshot; `interactor-test --json` and `--events` | each exit 2, nothing created; on Windows the job commands among them also exit 2 (usage before the platform refusal) |
+| R-U05 | `--jobs 2` with `cpf test`, `cpf stress` and `cpf build` | exit 2 (unknown argument naming `--jobs`), nothing created |
+| R-U06 | build cache: `cpf doctor` | exit 0; the build cache listed as an unavailable feature (execution contract §7.2) |
+| R-U07 | cgroup accounting and containment: `cpf doctor` | exit 0; listed as an unavailable feature (execution contract §7.2) |
+| R-U08 | subtasks: `[check] subtasks = []` in `problem.toml` | `cpf config check` and `cpf test` exit 7, phase-1 unknown key naming `check.subtasks`, no job directory |
+| R-U09 | output-only kind: `[problem] kind = "output-only"` | `cpf build`, `cpf test` and `cpf run` exit 7 "unsupported in this version" (configuration contract §9), no job directory; `cpf config show` exit 0 |
+| R-U10 | multi-case kind: `[problem] kind = "multi-case"` | as R-U09 |
+| R-U11 | stress shrinking: `cpf stress --shrink` | exit 2 (unknown argument), nothing created |
+| R-U12 | byte-stream replay: `cpf test --replay-transcript <dir>` and `cpf stress --replay-transcript <dir>` | exit 2 (unknown argument), nothing created |
 | R-U04 | Windows: errors found only in phase-3 planning, with phases 1–2 valid: a `cpf test` plan of 10 001 runs (repeat), 1 001 judged tests, a `cpf stress` whose start seed + iterations wraps | exit 10 before admission, no job directory; the same command lines on Linux and macOS exit 7 |
 
 ## 10. Amendments to other documents
