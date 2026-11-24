@@ -33,6 +33,9 @@ generator and brute role specs, default budgets and the score threshold;
 stress plans (§8.2); the `cpf stress` row of §9. Marked *(stress, draft)*;
 the stress contract (`stress.md`) uses it.
 
+**Archive amendment: draft.** The `[archive]` keys (§1.1, §7.6) of the
+archive contract (`archive.md` §3.1). Marked *(archive, draft)*.
+
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
 time and captured output; it is not a security boundary (design §1). The only
@@ -72,6 +75,14 @@ and the problem record, not to configuration.
 | `retention.{keep_jobs, job_bytes, workspace_bytes, cwd_bytes, build_bytes}` | §7.1 types | 1, 2 | §7.3 |
 | `workspace.ignore` | array of patterns | 1, 2 | §7.4 |
 | `status.values` *(organisation, draft)* | array of status names | 1, 2 | §7.5; replace-as-unit |
+| `archive.roots` *(archive, draft)* | array of root paths, ≤ 16 | 1, 2 | §7.6; replace-as-unit |
+| `archive.default_root` *(archive, draft)* | root path | 1, 2 | §7.6 |
+| `archive.layout`, `archive.contest_layout` *(archive, draft)* | layout string | 1, 2 | §7.6 |
+| `archive.keep`, `archive.discard` *(archive, draft)* | array of class names | 1, 2 | §7.6; replace-as-unit |
+| `archive.cleanup` *(archive, draft)* | `"trash"`, `"quarantine"`, `"delete"`, `"keep"` | 1, 2 | §7.6 |
+| `archive.on_existing` *(archive, draft)* | `"error"`, `"reuse-identical"`, `"new"` | 1, 2 | §7.6 |
+| `archive.profiles.<p>.{keep, discard, cleanup}` *(archive, draft)* | as the base keys | 1, 2 | §7.6; `<p>` a name (§1.1 names) |
+| `archive.quarantine.retention_days` *(archive, draft)* | integer 0–36 500 | 1, 2 | §7.6 |
 | `hooks.on_switch`, `hooks.after_test` | array of command names | 1, 2 | §8.3 |
 | `hooks.trusted_workspaces`, `hooks.enabled` | array of absolute paths; boolean | default user file only | §8.3; an error in a `--config` file |
 | `config.language` | string | 3 | §6.2 |
@@ -115,8 +126,10 @@ digits, `-` and `_`, starting with a letter; `unix`, `linux`, `macos`,
 `windows` are refused as language and profile names (they would collide
 with overlay keys) but allowed as command names (§2).
 
-Keys from later designs (`submit`, `archive`, `check` outside `problem.toml`)
-are unknown keys in this version.
+Keys from later designs (`submit`, `check` outside `problem.toml`)
+are unknown keys in this version. *(archive, draft)* `archive` is no longer
+one of them: its keys are listed above; any other `archive.*` key is an
+unknown key.
 
 *(judging, draft)* `problem.toml` `[check]` is not a configuration layer:
 it is a table of the problem record whose schema this contract owns
@@ -828,6 +841,35 @@ determined. Readers (`ls`, `status`, `search`) never load it: a stored
 status outside the vocabulary is still a valid value. `cpf config show`
 shows the effective array with provenance like any array.
 
+### 7.6 Archive *(archive, draft)*
+
+The `[archive]` table configures `cpf archive`, `cpf restore`, `cpf
+quarantine` and archived listing and search (archive contract §3.1). Layers
+1 and 2; in a `problem.toml` `[config]` every `archive.*` key is a phase-1
+error. Phase-1 rules, each a diagnostic at the key with provenance:
+
+- root paths (`roots[i]`, `default_root`) are absolute or start with `~/`;
+  `roots` has at most 16 elements;
+- a layout is 1–8 `/`-separated non-empty segments of literal text and the
+  placeholders `{site}`, `{problem_id}`, `{contest_id}`, `{label}`,
+  `{contest_date_year}`; any other `{…}`, a lone `{` or `}`, a leading `/`,
+  a segment `.` or `..` is an error; literal text must itself be valid in a
+  portable component (storage contract §2.1). Expanded values are checked
+  per archive (archive contract §3.6), not here;
+- `keep` and `discard` elements are class names (`sources`,
+  `tests:sample`, `tests:custom`, `tests:stress`, `stress`, `notes`,
+  `submit`, `metadata`, `fetch`); `metadata` or `fetch` in `discard`, a
+  class in both arrays of one table, or a duplicate → error;
+- `cleanup` and `on_existing` take exactly the listed strings;
+- a profile table holds only `keep`, `discard`, `cleanup`.
+
+Arrays replace as a unit (§2), and a selected profile's present keys replace
+the base keys for that run (archive contract §3.1). Defaults: `roots = []`,
+`default_root` absent (the first root), `layout = "{site}/{problem_id}"`,
+`contest_layout = "{site}/contests/{contest_id}"`, `keep = []`,
+`discard = []`, `cleanup = "trash"`, `on_existing = "error"`,
+`retention_days = 30`. `cpf config show` shows them with provenance.
+
 ## 8. Commands, repeat, hooks
 
 ### 8.1 Commands
@@ -1407,6 +1449,15 @@ Each fixture asserts exact effective values, provenance and the resolved spec.
   `status = { values = [], other = 1 }`, and `status.values` in a
   `problem.toml` `[config]` → phase-1 diagnostics with provenance (7 from
   `cpf config check`).
+- *(archive, draft)* `[archive]`: workspace `discard = ["tests:sample"]`
+  over user `discard = ["stress"]` → `["tests:sample"]`; `roots =
+  ["rel/dir"]`, 17 roots, `layout = "{site}/{tags}"`, `"{site}//x"`,
+  `"/{site}"`, `"{site}/.."`, `"{site"`, `keep = ["notes"]` with `discard =
+  ["notes"]`, `discard = ["metadata"]`, `discard = ["fetch"]`, `cleanup =
+  "trash-it"`, `on_existing = "merge"`, `retention_days = -1` and `36501`,
+  an unknown profile key, `archive.roots` in a `problem.toml` `[config]` →
+  phase-1 diagnostics with provenance (7); an absent `[archive]` → the
+  defaults above in `cpf config show`.
 - **Cases with exact results:**
   - C++ built-in build: `{artifact}` expands to `<output root>/main`
     (`main.exe` on Windows); a build exiting 0 without writing it →

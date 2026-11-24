@@ -44,11 +44,19 @@ them belongs to cpf, whoever created it, and the documentation says so:
 | `<root>/.cpforge/facts/` | no | run facts (§3.2) |
 | `<root>/.cpforge/state.toml`, `lock` | no | S §3 |
 | `<root>/.cpforge/job-seq` | no | admission sequence (§3.2) |
+| `<root>/.cpforge/downloads/` *(fetch, draft)* | only by its lease protocol (storage contract §5.8.3) | download areas of running fetches |
+| `<root>/.cpforge/fetch/` *(fetch, draft)* | no | fetch journals, history and status (storage contract §5.8.2); moved with its problem by archive retirement |
+| `<root>/.cpforge/archive/` *(archive, draft)* | no: each transaction directory is removed by its own protocol | archive and restore transactions (archive contract §5.3, §7.3) |
+| `<root>/.cpforge/quarantine/` *(archive, draft)* | no: only `cpf quarantine purge --apply` | files displaced by archive cleanup; user content in a tool tree (archive contract §6.6) |
 
 There is **no** reserved or disposable path under `problems/` or
 `contests/`: builds and runs live in job directories (S §6.1). Every path
 outside the reserved trees is **protected**: no command deletes it
-automatically, whoever created it. File-I/O problems with a shared `cwd`
+automatically, whoever created it. *(archive, draft)* The one approved
+transaction that relocates protected paths is `cpf archive --apply`
+(archive contract): after a committed snapshot it moves the problem
+directory into `.cpforge/archive/<txn>/` and its cleanup sends files to the
+OS trash, the quarantine or, under `delete`, removes them. File-I/O problems with a shared `cwd`
 stay rejected in the CLI foundation (S §2); nothing here widens that rule.
 
 ### 2.2 Attributes of protected paths

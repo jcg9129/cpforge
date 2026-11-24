@@ -41,6 +41,15 @@ stress result lines (§8) and fixtures (§9.7); the stress contract
 (`stress.md`) defines what they report. Marked *(stress, draft)*; merged
 into schema 1 by the final reconciliation.
 
+**Archive amendment: draft.** The `archive_plan`, `archive` and `restore`
+documents, snapshot results in `ls` and `search` (§6.1), and the exit rows
+of `archive`, `restore` and `quarantine` (§5.1, §5.5); archive contract
+(`archive.md`). Marked *(archive, draft)*; merged into schema 1 by the
+final reconciliation. The snapshot manifest and the other archive records
+use the §3.1 writer profile and §3.5 reader rules with the archive
+contract's own size bounds (archive contract §4.4); they are not `--json`
+documents.
+
 **Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
 problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
 draft)* judged problems (configuration contract §9.1): checkers and
@@ -1571,7 +1580,7 @@ document (`command: "stress"`).
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
 | 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5) |
 | 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O |
-| 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`) |
+| 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`); *(archive, draft)* a snapshot was committed but retirement did not happen or cleanup ended `incomplete`, a restore published the problem but not its history, a quarantine purge left a selected entry (archive contract §5.4, §6.6, §7.3) |
 | 10 | `infrastructure` | cpf could not run or observe a program reliably; *(stress, draft)* `stress_cleanup_failed` (an iteration's files or resources could not be released) |
 | 11 | `delivery` | requested machine output could not be written (§6.3, §7.6) |
 | 70 | `internal` | failure class `internal`: a bug detected and handled (§5.4) |
@@ -1697,6 +1706,11 @@ condition:
 | *(organisation, draft)* `cpf notes` | 0, 8, 11 (`--json`); `--path`: 0, 8, 11 |
 | *(organisation, draft)* `cpf ls` | 0 (also with invalid entries and findings), 8, 11 (`--json`) |
 | *(organisation, draft)* `cpf search` | 0 (hits or none, complete or incomplete), 8, 11 (`--json`), cancellation |
+| *(archive, draft)* `cpf archive` | plan: 0, 7, 8, 11 (`--json`); `--apply`: 0, 7, 8, 9, 11; `--resume`, `--close`: 0, 8, 9 (archive contract §5.4) |
+| *(archive, draft)* `cpf restore` | 0, 8, 9, 11 (`--json`) |
+| *(archive, draft)* `cpf quarantine ls` | 0, 8 |
+| *(archive, draft)* `cpf quarantine purge` | 0, 8; `--apply`: 9 when a selected entry could not be renamed or deleted |
+| *(archive, draft)* `cpf ls --archived` | as `cpf ls`, plus cancellation |
 | `cpf --help`, `--version` | 0 |
 
 "Cancellation" is the §5.3 status. Raw `cpf run` never passes the child's
@@ -1712,9 +1726,11 @@ code through; the child's status is in the report and the stderr summary
 - Accepted by `cpf build`, `cpf test`, `cpf cmd`, and by non-job commands
   whose contract defines a document (schema 1: `cpf config show`, *(draft)*
   `cpf status` below, *(organisation, draft)* `cpf ls`, `cpf search`,
-  `cpf notes` below; later `cpf test ls`). A per-command flag; elsewhere
+  `cpf notes` below, *(archive, draft)* `cpf archive` (plan and apply),
+  `cpf restore`; later `cpf test ls`). A per-command flag; elsewhere
   clap rejects it (2): *(organisation, draft)* `cpf tag`, `untag` and
-  `mark` have no document.
+  `mark` have no document; *(archive, draft)* nor have `cpf archive
+  --close` and `cpf quarantine`.
 - Raw `cpf run` rejects `--json` and `--events` (E §8.1): 2.
 - `--json` with `--events`: 2 (decision D4).
 
@@ -1840,6 +1856,64 @@ prefix, S §5.7); `state` is `created` or `existing` (mutating form), or
 Fixtures: `status_invalid_fields.json` (above), `src/report/wire/fixtures/ls.json`, `ls_contests.json`,
 `search.json`, `search_incomplete.json`, `notes.json` (encoder vectors and
 the Python oracle round trip, as for `status`).
+
+*(archive, draft)* **Snapshot results.** `origin` gains its value
+`snapshot`. `LsProblem` and `Hit` gain a last member `snapshot:
+Snapshot?` (`null` for `active`): `Snapshot` = `{id: string, kind: token
+(problem | contest), root: ns, path: string, complete: bool}`, `root` the
+canonical root, `path` root-relative with `/`. For a snapshot, the
+`LsProblem` fields come from its summary (archive contract §4.5) and
+`contests` lists the summary's contest directories. The `ls` document's
+`kind` gains `archived` and `archived_contests` (`LsContest` entries then
+carry `snapshot` too, with `members` the planned count and `counts` empty).
+`Source.kind` gains `root_unavailable`, `not_an_archive_root`,
+`root_record_unreadable`, `root_record_malformed`, `root_record_too_new`,
+`roots_unavailable`, `unreadable_directory`, `summary_malformed`,
+`summary_too_new`, `summary_too_large`, `manifest_missing`; `path` is then
+the absolute native path. The `search` document gains `archives: bool`
+(false with `--no-archives`) after `notes`.
+
+*(archive, draft)* **`archive_plan` document** (plan mode, `--json`):
+`{"schema":1,"document":"archive_plan","platform":…,"plan":hex64,"target":
+Target,"problems":[PlanProblem],"warnings":[token]}`. `Target`: `{kind:
+token (problem | contest), identity: string, dir: ident}`. `PlanProblem`:
+`{problem: pident, dir: ident, decision: token (retire | export |
+snapshot_only), reason: token?, destination: {root: ns, path: string},
+cleanup: token, classes: [{class: token, files: u32, bytes: u64, kept:
+bool}], other_files: [string], omissions: [{what: token, count: u32,
+bytes: u64}], externals: [{kind: token, value: nsum(512), key: string}],
+selection: bool, contests: [ident], delete_warning: text?}`. `warnings`:
+`network_root`, `root_not_in_roots`. Lists are bounded by the archive
+contract's limits, not capped. The binding whose hash is `plan` (archive
+contract §3.7) is the canonical JSON of `{cpf_version, target, problems:
+[{problem, dir, source_object, entries: [{tree, path, kind, size, sha256,
+exec, class, decision}], config_sha256, references}], archive_config,
+destination}`, written only to compute the hash.
+
+*(archive, draft)* **`archive` document** (`--apply`, `--resume`): `{"schema":1,
+"document":"archive","platform":…,"plan":hex64?,"problems":[Outcome],
+"contest":ContestOutcome?,"resumed":[Outcome]}`. `Outcome`: `{problem:
+pident, snapshot: Snapshot?, reused: bool, retirement: token (retired |
+exported | snapshot_only | refused), reason: token?, txn: jid?,
+selection_cleared: bool, cleanup: Cleanup?}`. `Cleanup`: `{state: token
+(complete | incomplete), trashed: u32, quarantined: u32, deleted: u32,
+snapshot_only: u32, quarantine: jid?, unsettled: [{path: string, reason:
+token}; 64], unsettled_dropped: u32}`. `ContestOutcome`: `{contest: ident,
+snapshot: Snapshot, complete: bool, retired: bool}`. A refusal before any
+snapshot writes the §4.12 `error` document with `command` `archive`.
+
+*(archive, draft)* **`restore` document**: `{"schema":1,"document":
+"restore","platform":…,"snapshot":Snapshot,"restored":[{problem: pident,
+dir: ident, origin: string?, history: token (restored | not_restored |
+pending)}],"contest":ident?,"omissions":[…],"externals":[{kind: token,
+value: nsum(512), key: string, exists: bool?}],"findings":[token]}`;
+`exists` is `null` for programs and for truncated values (archive contract
+§7.3). A refusal writes the `error` document with `command`
+`restore`.
+
+Fixtures: `ls_archived.json`, `search_archives.json`, `archive_plan.json`,
+`archive.json`, `archive_incomplete.json`, `restore.json` (encoder vectors
+and the oracle round trip).
 
 ### 6.2 Output
 

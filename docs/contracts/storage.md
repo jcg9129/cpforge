@@ -33,6 +33,13 @@ confirmed removal and at promotion (§6.4), stress inputs (§7) and the
 crash rows (§10). The transactions themselves are in the stress contract
 (`stress.md` §§6–8). Amended content is marked *(stress, draft)*.
 
+**Archive amendment: draft.** Archive transactions and the quarantine
+(§3), their recovery (§4.5), `fsck` (§5.6), fetch records moving with their
+problem (§5.8.10), archived listing and search (§5.9.6–§5.9.8), records
+(§9) and allowed states (§10). The transactions themselves are specified in
+`archive.md` (archive contract). Amended content is marked *(archive,
+draft)*.
+
 Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
@@ -236,7 +243,10 @@ native error, never treated as success.
 | `problems/<p>/tests/*`, solution sources | user once created | created no-clobber; **never modified or deleted** |
 | `problems/<p>/notes.md` | user | *(organisation, draft)* created empty, no-clobber, under the lock, only by `cpf notes` (§5.9.5); never modified, truncated, renamed or deleted |
 | `problem.toml` `[problem]` `tags`, `status`, `created_at`, `updated_at`, `solved_at`; `contest.toml` top-level `tags` *(organisation, draft)* | user fields | edit transaction by `cpf tag`/`untag` (`tags`, `updated_at`), `cpf mark` (`status`, `updated_at`, `solved_at`); `created_at` only in the staged record of a creating command (§5.2, §5.8.4); never another command (§5.9.1) |
-| `problem.toml` `[problem]` `archived_at` *(organisation, draft)* | user field | the archive contract only; read by §5.9 readers |
+| `problem.toml` `[problem]` `archived_at` *(organisation, draft)* | user field | the archive contract only; read by §5.9 readers. *(archive, draft)* Set only in a snapshot's staged copy (archive contract §5.2); an active problem carries it after a restore |
+| *(archive, draft)* `problem.toml` `[problem]` `origin` | tool field | written only by `cpf restore --into` (archive contract §7.4) |
+| *(archive, draft)* `.cpforge/archive/<txn>/` | tool, leased | created with its journal and lease under the lock; holds the retired trees of one transaction; removed by its transaction, its recovery or `cpf archive --close` (archive contract §5.3, §6) |
+| *(archive, draft)* `.cpforge/quarantine/<txn>/` | tool tree holding user content | entries moved in by archive cleanup; never modified; removed only by `cpf quarantine purge --apply` (archive contract §6.6) |
 | `.cpforge/state.toml` | tool | atomic replace under the lock |
 | `.cpforge/runs/<job>/` | tool, disposable | by its job (§6) |
 | `.cpforge/staging/` | tool | only while holding the workspace lock |
@@ -262,7 +272,8 @@ outside every retention budget.
 
 **Reserved trees** *(draft)*: `.cpforge/runs/`, `.cpforge/cache/`,
 `.cpforge/staging/`, `.cpforge/facts/`, *(fetch, draft)* `.cpforge/downloads/`,
-`.cpforge/fetch/` and the files `.cpforge/state.toml`,
+`.cpforge/fetch/`, *(archive, draft)* `.cpforge/archive/`,
+`.cpforge/quarantine/` and the files `.cpforge/state.toml`,
 `lock`, `job-seq` belong to cpf in their entirety, whoever created an entry.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
 (initial feature release) are disposable; a `downloads/` entry is removed
@@ -273,6 +284,14 @@ with one exception: leftover recovery (§4.5) removes regular files named
 exactly `.cpf-tmp-` + 32 lowercase hex digits in its metadata recovery
 locations (a reserved name, §2.1). Fetch never deletes or modifies a file
 under `problems/<p>/tests/` (§5.8).
+*(archive, draft)* **Archive exception.** "Never modified or deleted" and
+"never renamed" (sources, tests, `notes.md`, fetch history records) have
+one exception: `cpf archive --apply` renames a whole problem or contest
+directory, and the problem's `.cpforge/fetch/<p>/`, into
+`.cpforge/archive/<txn>/` after its snapshot is committed, and cleanup then
+moves each file to the OS trash or the quarantine, or deletes it, by the
+archive contract's revalidation rules (archive contract §5.3, §6). Neither
+`archive/` nor `quarantine/` is disposable.
 Provenance and visibility of problem files are defined in workspace design §2.2.
 
 ## 4. Primitives
@@ -333,6 +352,10 @@ replace fail with the old file intact (reported). Documented for users.
   → `CrossFilesystem` (a device-id precheck is only a hint). Any failed
   directory publication leaves staging intact and reports `Cleanup::Pending`;
   the next outer operation's recovery removes it (§4.5).
+  *(archive, draft)* A workspace guard publishes directories from
+  `.cpforge/staging/` and, for restore, from `.cpforge/archive/<txn>/`
+  (archive contract §7.3 step 6); an archive root has its own guard and
+  primitives (archive contract §4.1), never a workspace guard.
 - **Windows retries**: file and directory no-clobber publication use the same
   monotonic backoff as replacement (≤ 2 s total) for sharing violations and
   access denied, without edit revalidation. On failure, a file temp is removed
@@ -438,6 +461,17 @@ An editor saving an older buffer after the tool overwrites the tool's change.
   or unprobeable area is kept. Every locked operation does this, `cpf
   clean` plan mode included. Recovery never reconciles fetch journals
   (§5.8.7).
+  *(archive, draft)* Each `.cpforge/archive/<txn>/` is a metadata recovery
+  location too; every record publication there happens under the
+  workspace lock (archive contract §6.2), so a temporary file found by this
+  recovery never belongs to a live operation. After the steps above,
+  recovery deletes `.cpforge/quarantine/.purge-*` leftovers and applies the
+  archive contract's rule R (archive contract §6.7): it removes
+  initialization leftovers, finishes teardowns, rolls `retiring`
+  retirements and interrupted restores forward or back by object identity,
+  renames only cpf's side trees, replaces `state.toml`, deletes facts or a
+  dead restore's copies, and never moves a user file. Archive cleanup
+  (trash, quarantine, delete) is never part of this recovery.
 - **Recovery outcome**: a missing location is skipped; a location that
   cannot be enumerated, or a leftover that cannot be removed, is kept and
   reported as the warning `RecoveryIncomplete{paths, errors}` of the
@@ -707,6 +741,15 @@ or is a link. It verifies no file hash (that is done at use) and
 `problems/<p>/stress/`: saved failures are user work. An id whose epoch
 is not the current `job-seq` epoch is valid (ids stay distinct across
 sequence repair, stress contract §7.1) and not reported.
+
+*(archive, draft)* `fsck` also reports open archive transactions (kind,
+phase, lease state, incomplete items, non-`valid` journals), quarantine
+entries by state (`ready`, `pending`, `record_missing`, record
+classification), `.purge-*` leftovers, unexpected entries in `archive/`
+and `quarantine/`, and an `[problem] origin` that is not an identity
+(archive contract §9). `--apply` does only what every locked operation's
+recovery does for these trees (rule R); it never moves, trashes or deletes
+a retired or quarantined file.
 
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
@@ -1270,7 +1313,10 @@ command; nothing else depends on it.
   file the txn published (`registered`, `unregistered-upstream`,
   `unreferenced`) and every file whose entry it replaced (`superseded`,
   with the hash of the replaced `download`). Derived from the journal
-  (§5.8.2), published no-clobber, never rewritten or removed by cpf.
+  (§5.8.2), published no-clobber, never rewritten or removed by cpf
+  *(archive, draft)* except by archive retirement, which moves
+  `.cpforge/fetch/<p>/` with its problem after the records are in a
+  committed snapshot (archive contract §5.3).
 - **Size**: each record is bounded (64 pairs, at most four files per pair,
   cpf-chosen names, catalog paths ≤ 255 bytes) and checked at step 2. The
   *set* of records is not bounded: it grows by at most one record per
@@ -1296,7 +1342,10 @@ command; nothing else depends on it.
   reported as edited.
 - Displays: `cpf status` shows counts by role and the latest txn; `cpf fetch
   --history` lists every record (a non-`valid` one by classification).
-  Records move with their problem into an archive.
+  Records move with their problem into an archive. *(archive, draft)*
+  They are class `fetch` of the snapshot, always kept, and are restored
+  with the problem unless `--into` changes its identity (archive contract
+  §7.3, §7.4).
 
 #### 5.8.11 Observation points and the remaining race
 
@@ -1399,6 +1448,8 @@ stays `user_status` (report §6.1). Contests have no stored workflow status;
   (§5.9.4).
 - `archived_at` on an active problem is shown and filterable but has no
   meaning for this section; the archive contract defines it.
+  *(archive, draft)* The archive sets it only in the snapshot's copy of
+  `problem.toml`; an active problem has it after a restore.
 - `notes.md` is a fixed name of the problem layout, like `problem.toml` and
   `tests.toml`: its provenance is never `unknown` and `cpf status` never
   lists it as untracked (workspace design §2.2, amended).
@@ -1584,6 +1635,7 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
 | `--site <s>` (repeatable) | `local` or the site grammar (§2.1) | its identity's site equals one of the values (OR) |
 | `--contest <c>` (repeatable) | Identifier | a `[[problem]]` record of `contests/<c>/contest.toml` has its identity (OR over values) |
 | `--created <range>`, `--updated <range>`, `--solved <range>` | range | that field is `valid` and its **local date** (an instant converted as below; a date value as written) lies in the range |
+| *(archive, draft)* `--archived-in <range>` | range | as the date filters above, for `archived_at` (active problems and, with `--archived` or in `search`, snapshots) |
 
 - **Range**: `D` (that day), `D..` (from D), `..D` (up to and including D),
   `D1..D2` (inclusive); `D` is `YYYY-MM-DD` with the §5.9.2 component
@@ -1671,7 +1723,8 @@ One grammar, parsed by one function, shared by `cpf ls`, `cpf status` and
 ```
 cpf ls [filters] [--json]
 cpf ls --contests [--tag <t>]... [--site <s>]... [--json]
-cpf ls --archived …        (archive contract; refused with 2 "not available yet" until archives exist)
+cpf ls --archived [filters] [--root <dir>]... [--json]     (archive, draft: archive contract §8)
+cpf ls --archived --contests [--root <dir>]... [--json]
 ```
 
 Lock-free and read-only (§5.9.9). Default form: one entry per valid problem
@@ -1704,7 +1757,7 @@ come with `--archived`.
 #### 5.9.8 `cpf search`
 
 ```
-cpf search <term>... [filters] [--no-notes] [--json]
+cpf search <term>... [filters] [--no-notes] [--no-archives] [--root <dir>]... [--json]
 ```
 
 - **Terms**: 1–16 positional terms, each non-empty, valid UTF-8 (a
@@ -1729,7 +1782,8 @@ cpf search <term>... [filters] [--no-notes] [--json]
   reported `notes_not_utf8`, and the file is still searched. Line numbers
   count LF-terminated lines from 1 (a CR before LF is ignored).
 - **Bounds**, per invocation, counted across every source of the search
-  (the workspace now; archive roots once archives exist):
+  (the workspace, then *(archive, draft)* every archive root, archive
+  contract §8):
   - *entries* E ≤ 100 000: each directory entry returned by the
     enumeration of `problems/` and each file open attempted (`problem.toml`,
     `notes.md`, and `contests/<c>/contest.toml` for each `--contest`, read
@@ -1782,8 +1836,9 @@ cpf search <term>... [filters] [--no-notes] [--json]
   §8.2). The exit status follows report §5.2 (delivery failure first, then
   cancellation). The other commands of this section install no listener: a
   signal has its default effect (an interrupted edit is a crash state,
-  §10). Slow or stalled **archive roots** are a prerequisite the archive
-  contract must settle before archive search.
+  §10). *(archive, draft)* Slow or stalled archive roots get no timeout:
+  this cancellation is the remedy, and `cpf ls --archived` installs the
+  same listener and worker (archive contract §8).
 - **Output**: hits in examination order: identity, `origin`, the matched
   field names, for notes up to 16 matching line numbers, and
   `notes_truncated`; then every finding; then, if incomplete, one line
@@ -1795,9 +1850,12 @@ cpf search <term>... [filters] [--no-notes] [--json]
   workspace; `problems/` cannot be enumerated; `--contest` names no valid
   contest), 11 (`--json`), cancellation. Incompleteness is a reported
   result, not a failure, as findings are for `cpf status` and `cpf fsck`.
-- **Archive roots** are not searched until archives exist: the archive
-  contract defines the snapshot fields searched, containment (restore's rules) and
-  `origin: snapshot` results, within the bounds above.
+- **Archive roots** *(archive, draft)*: after the workspace, every root of
+  `archive.roots` and `--root` is traversed and each snapshot's summary is
+  searched (identity, title, url, tags, status) together with the first
+  64 KiB of its `problem/notes.md`, within the bounds above, with restore's
+  containment rules (no link followed) and `origin: snapshot` results
+  (archive contract §8). `--no-archives` searches the workspace only.
 
 #### 5.9.9 Readers
 
@@ -2310,6 +2368,16 @@ finalizes them (execution contract §6.2).
   `valid`, selectable and executable. `notes.md` is free text, not a
   governed format: no schema, no cap except the 64 KiB that search reads
   (§5.9.8).
+- *(archive, draft)* **Archive records**: `.cpforge/archive/<txn>/journal.toml`
+  and an archive root's `.cpforge-archive/root.toml` are tool-only TOML
+  records (schema 1, unknown keys `malformed`, classified as below, 1 MiB
+  cap). Snapshot manifests, summaries, contest intents and member markers,
+  cleanup records and quarantine records are JSON documents with their own
+  bounded codec (archive contract §4.4), not TOML records, so the cap below
+  does not apply to them. A `too_new` archive record of either kind is never
+  acted on, rewritten or removed. `[problem] origin` is an addition to
+  schema 1 of `problem.toml`, preserved as an unknown key by versions
+  without it.
 - *(fetch, draft)* **Fetch records**: classified with the tool-only record
   classification below. Newer-schema handling: a `too_new` journal blocks
   `cpf fetch` of its problem and is never removed; a `too_new` history
@@ -2391,6 +2459,12 @@ finalizes them (execution contract §6.2).
 | *(stress, draft)* parents created (`stress.failure_parents`) | empty `stress/failures/` (user tree, kept) | — |
 | *(stress, draft)* saved-failure publish (`dir_noclobber.renamed`, `stress.failure_published`) | no `<id>/` under `failures/` | `<id>/` complete: `failure.toml` valid and every listed file matching its hash; nothing of it left in the job directory |
 | *(stress, draft)* iteration scratch removal | the iteration's directories partly present in the inactive job directory, pruned with it | — |
+| *(archive, draft)* snapshot publication (archive contract §5.2) | workspace unchanged; root staging may remain (removed at the next root lock) | complete snapshot; workspace unchanged |
+| *(archive, draft)* retirement rename (archive contract §5.3 step 3) | journal `retiring`, problem in place: rolled back by the next locked operation | problem in `.cpforge/archive/<txn>/retired`: side trees, selection and facts rolled forward by the next locked operation |
+| *(archive, draft)* each cleanup move, the trash call, the quarantine record (archive contract §6) | item in the retired tree or the bundle; cleanup recovery settles it by where it is | item in trash, quarantine or deleted; recovery continues with the next |
+| *(archive, draft)* contest manifest (archive contract §5.6) | incomplete contest snapshot, no member retired | complete contest snapshot |
+| *(archive, draft)* restore publication (archive contract §7.3) | nothing in `problems/`; staging and the transaction removed by recovery | problem published; history rolled forward |
+| *(archive, draft)* quarantine purge rename | entry intact | `.purge-<txn>` deleted by the next locked operation |
 
 *(fetch, draft)* **Fetch crash matrix** (the C5 gate; C6, C7 and C8 for
 their scenarios).
@@ -2556,6 +2630,7 @@ Coverage assignment (command rows remain assigned to their implementing tasks):
 | job admission, prune, job-seq replace, job.toml, fact replace/publication/classification, unreadable job-seq | C10/C15 tasks |
 | fsck new epoch; adopt; gitignore | their respective command tasks |
 | *(organisation, draft)* `tag`/`untag`/`mark`, `notes`, filters, `ls`, `status` with filters, `search`, `created_at` | the organisation command tasks (fetch creation's `created_at`: the fetch creation task); archive-root search with the archive |
+| *(archive, draft)* every crash table and test of the archive contract (§10 there) | the archive tasks: plan and classes; root guard and codec; snapshot publication; retirement; cleanup and trash; recovery; quarantine; restore validation, `--into`, containment and publication; contests; archived listing and search |
 | *(fetch, draft)* every cell of the fetch crash matrix, the §5.8.8 failure transitions, reconciliation, download-area reclamation, readers, records | C5 (transaction, recovery, matrix rows 1–24 for R, M, A, X), C6 (creation, row C cells), C7 (pair rules, provenance), C8 (selections, bulk bound, row 25), C9 (status surfaces) |
 
 Reruns: `init`, `add --contest` complete the operation; `test add` may
@@ -3039,7 +3114,8 @@ contest fetch completes its membership.
 - **Readers:** after each of `cpf ls`, `cpf ls --contests`, `cpf status`
   with filters, `cpf search` and `cpf notes --path` on F, the workspace is
   byte-identical and no `.cpforge/lock` exists where there was none;
-  `cpf ls --archived` → 2 "not available yet" (until archives exist). Document vectors
+  *(archive, draft)* `cpf ls --archived` tests are in the archive contract
+  §10.10. Document vectors
   for `ls` (problems and contests) and `search`.
 - **Search hits (fixture F with notes):** expected hit lists, with matched
   fields and note line numbers, for at least: `DP` (case), a precomposed
@@ -3099,6 +3175,15 @@ contest fetch completes its membership.
   incomplete for each reason except `cancelled` → 0; cancelled with
   `--json` and a closed stdout → 11 (report §5.2 row 4 before row 5); a
   usage error (`cpf search`) with `--json` and a closed stdout → 2.
+- *(archive, draft)* **Archive.** The archive contract §10 lists the
+  archive, cleanup, trash, quarantine, restore, contest and archived-search
+  tests, each killing the real `cpf` binary at every crash point it names
+  and asserting the recovered content; they run on Linux, macOS and Windows
+  (the archive starts no process), with the trash backend of each OS tested
+  on that OS and the quarantine-only paths on all three. Added here: after
+  each crash cell of those tables, a locked command that is not an archive
+  command (`cpf tag`) performs exactly rule R and nothing else (retired and
+  quarantined files byte-identical before and after it).
 - Real runs on Linux, macOS and Windows on the supported filesystems;
   power-loss behaviour is not tested. Platform floor and toolchain as in
   [README](../../README.md) (platform floor).
