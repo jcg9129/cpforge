@@ -33,6 +33,14 @@ and the exit rows of `tag`, `untag`, `mark`, `notes`, `ls`, `search`
 (§5.1, §5.5); storage contract §5.9. Marked *(organisation, draft)*; merged
 into schema 1 by the final reconciliation.
 
+**Stress amendment: draft.** The job kind `stress` (§1), its verdicts
+(§2.14), the types `irid` and `fid` (§3.2), the stress bound B_S and its
+reservation (§3.7), the `stress` member (§4.14), the `stress_failures`
+document (§4.15), the exit rows (§5), the iteration events (§7.3), the
+stress result lines (§8) and fixtures (§9.7); the stress contract
+(`stress.md`) defines what they report. Marked *(stress, draft)*; merged
+into schema 1 by the final reconciliation.
+
 **Scope of schema 1.** Built-in batch comparison (compare spec): `batch`
 problems, comparators `exact`, `tokens`, `lines`, `float`; and *(judging,
 draft)* judged problems (configuration contract §9.1): checkers and
@@ -45,7 +53,12 @@ here; schema 2 is not needed for judging.
 
 - **Job kinds**: `build` (`cpf build`), `test` (`cpf test`), `run` (raw
   `cpf run`, E §8.1), `cmd` (`cpf cmd <name>`), `hook` (the `on_switch`
-  hooks of a successful `cpf switch`, C §8.3, §2.10).
+  hooks of a successful `cpf switch`, C §8.3, §2.10); *(stress, draft)*
+  `stress` (`cpf stress` in every mode, stress contract §2). A stress
+  job's planned executions are its builds (C §8.2 stress plans); its
+  iteration runs (E §1) are not planned executions, have no plan index or
+  run id, never appear in `executions[]`, and are reported through the
+  `stress` member (§4.14) and the iteration events (§7.3).
 - **Planned execution**: one entry of the plan (C §8.2 planned runs):
   builds, tests × repeats (or repeats), the raw run, hooks; *(judging,
   draft)* in a judged plan also the role builds and every test's
@@ -520,6 +533,13 @@ under the verdict lock, atomic with respect to cancellation intent.
   stderr final-drain deadline ends the wait for it 5 s after its
   enqueue instant t_q, not after D), then the process status (§5).
 
+*(stress, draft)* A `stress` job runs the phases P, V, W, E, F, S, D (no
+fact, no hooks). Its phase P contains the builds and every iteration
+including its retirement (stress contract §6.3, saved-failure promotion
+included); W then settles the builds' artefacts (iteration artefacts
+settle at each retirement, E §6.2). Cancellation phases follow the table
+above with `settlement` and `closure` after V.
+
 ### 2.10 `hook` jobs (`on_switch`)
 
 After `cpf switch` committed its selection, its planned `on_switch` hooks
@@ -711,6 +731,44 @@ On a problem with a points `scoring` (C §9.1.5):
   `ProtocolUnsupported` (B31; for a session, checkers design §6.3) and
   `result.score` is `null`.
 
+### 2.14 Stress jobs *(stress, draft)*
+
+Iteration classes are derived by stress contract §4 (batch rows S1–S8,
+interactive rows T1–T7) from the iteration's records, using §2.2 classes,
+§2.4 comparisons, §2.11 check rows and the §2.12 session verdicts. They
+are folded into `stress` (§4.14) and never become `tests[]` entries.
+
+`result.primary_verdict` of a `stress` job, at V, first matching value:
+
+1. `internal_error`: an internal failure recorded before V (§2), including
+   an iteration orphan and an `internal_policy_error` session (stress
+   contract §4).
+2. `infrastructure`: a build result `infrastructure`, or a retired
+   iteration of class `infrastructure`.
+3. `cancelled`: a build result `cancelled` (or a build coverage cancelled,
+   §2.7 row 3), a retired iteration of class `cancelled`, or the stop
+   reason `cancelled` (intent prevented an iteration the budget allowed).
+   Intent set after the stop reason was already decided cancels nothing:
+   the completed verdict stands and the intent is recorded (§2.7).
+4. `build_failed`: a build result `failed`.
+5. `stress_cleanup_failed`: the stop reason `cleanup_failed` (stress
+   contract §6.4).
+6. `candidate_failure`, 7. `judge_failure`, 8. `oracle_failure`,
+   9. `validator_failure`, 10. `generator_failure`: the first of these
+   classes, in this order, among retired iterations (a solution failure
+   first, as test verdicts precede `checker_failed` in §2.7).
+11. `no_iterations`: no iteration retired (only reachable by the
+    `counter_limit` stop before k = 0).
+12. `passed`: otherwise.
+
+- A replay job (mode `replay` or `replay_binaries`) uses the same rows over
+  its single iteration; `stress.replay.reproduced` never changes the
+  verdict or status.
+- `result.partial` is true iff a build is not `started`; iterations not
+  admitted because a stop held are not partial coverage.
+- `result.counts` counts the builds (primary population) and zero tests;
+  `by_verdict` is all zero. Iteration counts are in `stress`.
+
 ## 3. JSON encoding
 
 Applies to `report.json`, the capture manifest (§4.2), every `--json`
@@ -751,6 +809,8 @@ Serialized maxima include quotes; they feed §3.7.
 | `hex64` / `hex32` | lowercase hex SHA-256 / epoch | 66 / 34 |
 | `token` | snake_case `[a-z0-9_]`, 1–32 bytes | 34 |
 | `rid` | run id `r` + 5 digits (§3.4) | 8 |
+| `irid` | *(stress, draft)* iteration run id `<iteration>.<role>`: the iteration a `u64` in decimal without leading zero, `.`, a stress contract §3.1 run-role token | 43 |
+| `fid` | *(stress, draft)* saved-failure id (stress contract §7.1) | 78 |
 | `jid` | job id (S §6.2) | 36 |
 | `ident` | Identifier (S §2.1, ≤ 64) | 66 |
 | `pident` | problem identity `local:` + Identifier | 72 |
@@ -801,6 +861,11 @@ List of n items: 2 + Σ items + (n − 1).
   execution becomes `not_started{setup}` with the OS error (class
   `infrastructure`), and its run id is consumed. A build's `build_id` is its
   run id (`builds/r00000/`).
+- *(stress, draft)* In a `stress` job only builds are admitted executions
+  with run ids (≤ 6). Iteration runs are identified by `irid` (§3.2),
+  which is disjoint from `rid` (it contains `.`), unbounded in its
+  iteration part and used as the run's directory name under
+  `iterations/` (S §6.1).
 
 ### 3.5 Reader acceptance
 
@@ -871,6 +936,15 @@ to check the arithmetic. Sizes in bytes.
 | **refusal document** | header members a refusal can carry (job, workspace, problem, result, 24 warnings, events, timing, persistence) + refusal (class, error with `nsum(256)`, 64 × 1 237 + dropped) | 103 966 | **104 KiB** |
 | **event line** | max of: `run_finished` (summary + 99) 6 873; `output_chunk` (4 096 bytes → 5 464 base64 + 157) 5 621; others ≤ 400 | 6 873 | **7 KiB** (final envelope: report bound + 28, 29 with the line feed) |
 
+| *(stress, draft)* `StressDiag` | iteration, seed, role, reason, source, text `nsum(1024)` | 2 401 | |
+| *(stress, draft)* class aggregate | class, count, `first` 66, 16 × `StressDiag` + dropped | 38 631 | |
+| *(stress, draft)* failure run | role, class 1 122, record `Ref` (path ≤ 64) 497 | 1 681 | |
+| *(stress, draft)* failure ref | `fid`, iteration, seed, 3 tokens, `saved` 433 (`not_promoted` with path ≤ 85 and text), 8 × failure run | 14 186 | |
+| *(stress, draft)* **`stress` member** | 2 tokens, seeds 62, budget, stop, iterations 144, 3 `u64`, 8 class aggregates 309 057, 20 failure refs 283 741, `failures_dropped`, 8 role timings 1 401, replay 192, `cleanup_failed` (16 × `nsum(256)` + dropped) 10 630, keys | 605 717 | **592 KiB** (606 208) |
+| *(stress, draft)* **stress report header** | the judging header 119 044 + 2 further `roles[]` entries (generator, brute) 2 × 21 454 + commas | 161 954 | **160 KiB** |
+| *(stress, draft)* **stress report** | header + ≤ 6 builds × (entry + comma) + `stress` member + key | 824 869 | **B_S = 1 MiB** (fixed) |
+| *(stress, draft)* **`stress_failures` entry** | name `nsum(256)`, state, detail text, `fid`, 4 tokens, iteration, seed, time, binaries | 1 391 | **1.5 KiB** |
+
 N is the number of planned executions (≤ 10 000, C §8.2); the test and
 aggregate terms are charged per planned execution because each test has at
 least one. *(judging, draft)* The judging rows **report header** and
@@ -885,6 +959,13 @@ kind `compare` at the cap, B = 128 KiB + 10 000 × (9 KiB + 3 KiB + 256) =
 follow-up checker (4 004 executions), B = 84 647 936 B (80.7 MiB). The comparator value is budgeted at 8 `dec`-sized members (the
 float comparator has 6, compare spec §5.1). The capture manifest has an
 exact size computed before it is written (§4.2).
+
+*(stress, draft)* A `stress` job's report bound is the fixed **B_S =
+1 MiB** whatever its iteration count, since iteration runs are never
+listed (§4.14 holds only fixed-size aggregates, the first 20 failure refs
+and the first 16 diagnostics per class); its report reservation is
+2 × B_S = 2 MiB, taken as below. Its `tests[]` and `aggregates[]` are
+empty and `executions[]` holds ≤ 6 builds.
 
 **Reservations** (amendment to E §5.4/§6.2 and S §6.4, §10): before the
 first run the job reserves, through the S §6.4 interface, the report bound
@@ -921,7 +1002,7 @@ run's own reservations; the capture manifest is already retained.
 | `platform` | `token` | `unix`, `windows` |
 | `outcome` | `token` | `finished` (a ready job ran) or `refused` (§4.12) |
 | `cpf_version` | `ver` | |
-| `command` | `token` | `build`, `test`, `run`, `cmd`, `hook` |
+| `command` | `token` | `build`, `test`, `run`, `cmd`, `hook`; *(stress, draft)* `stress` |
 | `job` | object? | §4.2; `null` only for a refusal before registration |
 | `workspace` | `nsum(1024)?` | workspace root as cpf located it |
 | `problem` | object? | §4.2 |
@@ -929,7 +1010,7 @@ run's own reservations; the capture manifest is already retained.
 | `capture` | object? | §4.2 |
 | `fingerprints` | object? | `{source: hex64, tests: hex64, judge: hex64?}` once run facts compute them (storage contract §6.5); `null` until then. *(judging, draft)* `judge` is the judge fingerprint (C §9.1.3), `null` for a problem without a role |
 | `build` | object? | §4.4 |
-| `roles` | `[Role; ≤3]` | *(judging, draft)* §4.4, order checker, validator, interactor; empty without roles |
+| `roles` | `[Role; ≤5]` | *(judging, draft)* §4.4, order checker, validator, interactor; *(stress, draft)* then generator, brute (stress jobs only); empty without roles |
 | `executions` | `[Execution; ≤10000]` | §4.5, plan order |
 | `tests` | `[Test; ≤10000]` | §4.6, frozen-manifest order |
 | `aggregates` | `[Aggregate; ≤10000]` | §4.7; empty unless `cmd` |
@@ -940,6 +1021,7 @@ run's own reservations; the capture manifest is already retained.
 | `events` | object | `{dropped: u64}` (§7.4; `"0"` without a consumer) |
 | `timing` | object | `{started_at: time, finished_at: time, duration_us: dur}`: admission start (S §6.2 step 1) to F |
 | `refusal` | object? | §4.12 |
+| `stress` | object? | *(stress, draft)* §4.14; `null` unless `command` is `stress` |
 | `persistence` | object | §4.11; stdout document and final event envelope only |
 
 ### 4.2 Job identity and capture
@@ -1035,8 +1117,8 @@ result: BuildResult, artifacts: [nsum(128); 16]}`.
 
 | Member | Type | Content |
 |---|---|---|
-| `role` | `token` | `checker`, `validator`, `interactor` |
-| `profile` | `token` | `testlib`, `simple` |
+| `role` | `token` | `checker`, `validator`, `interactor`; *(stress, draft)* `generator`, `brute` |
+| `profile` | `token?` | `testlib`, `simple`; *(stress, draft)* `null` for `generator` and `brute` |
 | `origin` | object | `{"kind":"built","language":ident,"entry":nsum(128)?}` or `{"kind":"prebuilt","program":nsum(128)}` (problem-relative path) |
 | `build` | object? | the role build, in the `build` form above; `null` for a prebuilt or build-free role |
 | `capture` | object | `{check: Check, sources: [nsum(128); 16], support_files: [nsum(128); 16], counts: {sources: u32, support_files: u32}, bytes: u64, lists_sha256: hex64, content_sha256: hex64}` as `capture` (§4.2), for the role's captured files (a prebuilt role: its program as the one source); `check` is the capture check of the role's source-consuming stage; `content_sha256` covers the copied bytes in the workspace design §3.2 file encoding |
@@ -1049,7 +1131,8 @@ source, the file a quoted include would resolve to first; `pinned` iff
 its SHA-256 equals the tested header's), `{"kind":"not_identified",
 "reason":token}` (profile `testlib`; reason `none`, `ambiguous`,
 `not_beside_sources`, `angle_include`) or `{"kind":"not_applicable"}`
-(profile `simple`). Human output says "header candidate", never "compiled
+(profile `simple`; *(stress, draft)* the roles `generator` and `brute`,
+which have no profile). Human output says "header candidate", never "compiled
 header". The compiler and flags are the role build's `executions[]`
 entry (`program`, `spec`), named by `build.execution`.
 
@@ -1353,8 +1436,8 @@ occurrence order, and count every omitted ordinary warning in
 |---|---|---|
 | `prune` | `job: jid?`, `detail: token` (`rename_failed`, `newer_schema`, `lease_unreadable`, `unmeasurable`, `measurement_incomplete`, `reclaim_leftover`, `reclaim_name_taken`) | S §6.3 at admission |
 | `recovery` | `paths: u32`, `first: nsum(128)?` | S §4.5 |
-| `persist` | `artefact: token` (`spec`, `record`, `cleanup_log`), `run: rid`, `error: PersistError` | E §6.2, final at W |
-| `durability` | `artefact: token`, `detail: token` (`uncertain`, `cleanup_pending`) | S §4.1 |
+| `persist` | `artefact: token` (`spec`, `record`, `cleanup_log`), `run: rid` (*(stress, draft)* or an `irid` for an iteration run, §3.2; the grammars are disjoint, so the warning bound still holds at 756 B), `error: PersistError` | E §6.2, final at W |
+| `durability` | `artefact: token`, `detail: token` (`uncertain`, `cleanup_pending`); *(stress, draft)* artefact `stress_failure` for a promoted saved failure | S §4.1 |
 | `retention` | `detail: token` (`cwd_overflow`, `workspace_over_target`), `run: rid?`, `bytes: u64` | S §6.4 |
 | `cleanup_unverified` | `runs: u32` | E §4.4 |
 | `fact` | `outcome` (§4.9 fact outcome) | S §6.5 |
@@ -1404,6 +1487,75 @@ Location S §6.1; written once per finished job by temp + rename (E §6.2)
 within the §3.7 reservation; never rewritten; classified by S §9
 (tool-only). cpf reads only its prefix in the CLI foundation.
 
+### 4.14 `stress` *(stress, draft)*
+
+Present iff `command` is `stress` (stress contract). Every count is
+cumulative over the job.
+
+| Member | Type | Content |
+|---|---|---|
+| `mode` | `token` | `search`, `replay`, `replay_binaries` |
+| `shape` | `token` | `batch`, `interactive` |
+| `seeds` | object | `{start: u64, last: u64?}`: the start seed (§2.1 of the stress contract; drawn or given) and the generator seed of the last admitted iteration (`null` when none) |
+| `budget` | object | `{iterations: u64, time_us: dur}` as effective (CLI over `[stress]`) |
+| `stop` | object | `{reason: token, iteration: u64?}`: stress contract §5 stop reasons `cancelled`, `build_failed`, `failure`, `infrastructure`, `admission_closed`, `cleanup_failed`, `iterations`, `time_budget`, `counter_limit`, `replay`; `iteration` the k whose admission check decided it (`null` for `build_failed`) |
+| `iterations` | object | `{admitted: u64, retired: u64, saved: u32, promoted: u32, not_saved: u64}`; `saved` counts failures staged with disposition `save`, `promoted` those published, `not_saved` failing iterations counted only (cap) or whose staging failed |
+| `runs` | `u64` | iteration runs started (coverage `started`) |
+| `captured_bytes` | `u64` | stored stdout and stderr bytes over every iteration run |
+| `binaries_bytes` | `u64` | preserved-program bytes copied into saved failures (≤ 256 MiB) |
+| `classes` | `[ClassAggregate; ≤8]` | one per class that occurred, in the order `passed`, `generator_failure`, `validator_failure`, `oracle_failure`, `judge_failure`, `candidate_failure`, `infrastructure`, `cancelled` |
+| `failures` | `[FailureRef; 20]` | the first 20 iterations of a failing class, in iteration order, then `failures_dropped: u64` (the one capped list whose dropped count is a `u64`: failing iterations are unbounded) |
+| `timing` | `[RoleTiming; ≤8]` | one per run role that started, in stress contract §3.1 order |
+| `replay` | object? | `{of: fid, original_class: token, reproduced: bool, from_input: bool, binaries: bool}` for a replay job (stress contract §8), else `null` |
+| `cleanup_failed` | object? | `{paths: [nsum(256); 16], paths_dropped: u32}`: job-relative leftover paths (stress contract §6.4), else `null` |
+
+- `ClassAggregate`: `{class: token, count: u64, first: {iteration: u64,
+  seed: u64}, diagnostics: [StressDiag; 16], diagnostics_dropped: u32}`;
+  `first` is the first iteration of the class; `passed` has no
+  diagnostics.
+- `StressDiag`: `{iteration: u64, seed: u64, role: token, reason: token,
+  source: token, text: nsum(1024)}`; `source` `message` (a judge's
+  message), `stderr` (the deciding run's stderr head), `compare_diag` (the
+  comparator's `Diag` rendered as in human output) or `none` (empty
+  `text`).
+- `FailureRef`: `{id: fid?, iteration: u64, seed: u64, class: token, role:
+  token, reason: token, saved: Saved, runs: [FailureRun; ≤8]}`; `id` is
+  `null` for a counted-only iteration. `Saved`:
+  `{"kind":"promoted","path":rel,"binaries":token}` (`path`
+  problem-workspace-relative `problems/<p>/stress/failures/<id>` ≤ 166;
+  `binaries` `all`, `partial`, `none`),
+  `{"kind":"not_promoted","reason":token,"path":rel,"message":text?}`
+  (`lock_busy`, `exists`, `cross_filesystem`, `unsupported`,
+  `problem_changed`, `path_blocked`, `io`; `path` job-relative
+  `failures/<id>` ≤ 85, where the staged directory stays),
+  `{"kind":"not_saved","reason":token}` (`cap`, `retention_budget`, `io`,
+  `manifest_too_large`, `resources_held`, `replay`).
+- `FailureRun`: `{role: token, class: object?, record: Ref?}`: the run's
+  §2.2 class (`null` without a record) and its persisted `record.json`
+  (`iterations/<irid>/record.json`, ≤ 64) for a saved or kept iteration,
+  `null` for a counted-only one; a `Ref` error is the iteration
+  artefact's `PersistError` (E §6.2).
+- `RoleTiming`: `{role: token, runs: u64, wall_us: {min: dur, max: dur,
+  total: dur}?}` over the role's started runs with a measured wall (E
+  §6.3); `null` when none. `total` uses checked addition (a sum of
+  measured walls cannot exceed `u64` microseconds in a job's lifetime).
+  Per-iteration timing is not reported.
+
+### 4.15 `stress_failures` document *(stress, draft)*
+
+`cpf stress ls --json` (stress contract §2.3): `{"schema":1,"document":
+"stress_failures","platform":…,"problem":pident,"entries":[Entry; 10000],
+"entries_dropped":u32}`, entries in byte order of the entry name, not
+persisted. `Entry`: `{name: nsum(256), state: token, detail: text?, id:
+fid?, class: token?, role: token?, reason: token?, iteration: u64?, seed:
+u64?, shape: token?, created_at: time?, binaries: token?}`; `state` is the
+stress contract §7.6 classification (`valid`, `unexpected`, `missing`,
+`unreadable`, `malformed`, `too_new`), `detail` the reason for any other
+state, and the members after `detail` are non-null iff `valid`;
+`binaries` is `all`, `partial` or `none` (from the manifest's `[[build]]`
+entries). A selection or workspace failure writes the §4.12 `error`
+document (`command: "stress"`).
+
 ## 5. Exit statuses
 
 ### 5.1 Codes (decision D1)
@@ -1411,16 +1563,16 @@ within the §3.7 reservation; never rewritten; classified by S §9
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | `success` | the command did what was asked; jobs: `passed`, `succeeded`, *(judging, draft)* `scored` with a full aggregate |
-| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full |
+| 1 | `failed` | the solution or a program failed: `wrong_answer`, `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`; *(judging, draft)* `presentation_error`, `session_limit`, `idle`, `scored` with an aggregate that is not full; *(stress, draft)* `candidate_failure` |
 | 2 | `usage` | invalid arguments (clap) or a rejected combination: `--json`/`--events` with raw `cpf run`, `--json` with `--events`, `--problem` with `switch`, both test sources on stdin; *(organisation, draft)* an organisation argument outside its grammar (tag, status name, filter value, search term), `--problem` with `tag`/`untag`/`mark`, `mark` or `notes` on `contest:<name>` (S §5.9) |
 | 3 | `build_failed` | the build failed |
-| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests` |
-| 5 | `checker_failed` | judging could not decide: the comparator's invalid answer; *(judging, draft)* a checker, validator or interactor failure of any class (checkers design §1), including invalid test data |
+| 4 | `not_verified` | nothing failed but not everything was checked: `unchecked` (no answer; *(judging, draft)* a judge's cleanup not verified), `no_tests`; *(stress, draft)* `no_iterations` |
+| 5 | `checker_failed` | judging could not decide: the comparator's invalid answer; *(judging, draft)* a checker, validator or interactor failure of any class (checkers design §1), including invalid test data; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` (a stress harness role failed; no solution verdict) |
 | 6 | `cancelled` | cancellation (API, Windows, or Unix when not re-raised, §5.3) |
 | 7 | `config` | failure class `config`: C §3 phases 1–3, unsupported problem kind (C §9), missing context (C §8.1), accident guard (S §7); *(organisation, draft)* a workflow status outside the vocabulary, or an undeterminable `status.values` (S §5.9.4, C §7.5) |
 | 8 | `workspace` | failure class `workspace`: no workspace, selection errors (S §5.7, `NoSelection`), record classification failures, unknown or unhealthy test, lock `Busy`, admission refused, freeze, capture or manifest failures, storage I/O |
 | 9 | `partial` | failure class `partial`: a metadata command committed part of its work (S §5.2 step 5, S §5.3 step 4, `clean --apply`) |
-| 10 | `infrastructure` | cpf could not run or observe a program reliably |
+| 10 | `infrastructure` | cpf could not run or observe a program reliably; *(stress, draft)* `stress_cleanup_failed` (an iteration's files or resources could not be released) |
 | 11 | `delivery` | requested machine output could not be written (§6.3, §7.6) |
 | 70 | `internal` | failure class `internal`: a bug detected and handled (§5.4) |
 
@@ -1443,11 +1595,11 @@ condition:
 | 6 | failure class `config` | 7 |
 | 7 | failure class `workspace` | 8 |
 | 8 | failure class `partial` | 9 |
-| 9 | job verdict `infrastructure` | 10 |
+| 9 | job verdict `infrastructure`; *(stress, draft)* `stress_cleanup_failed` | 10 |
 | 10 | job verdict `build_failed` | 3 |
-| 11 | job verdict `checker_failed` | 5 |
-| 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error` | 1 |
-| 13 | job verdict `unchecked`, `no_tests` | 4 |
+| 11 | job verdict `checker_failed`; *(stress, draft)* `judge_failure`, `oracle_failure`, `validator_failure`, `generator_failure` | 5 |
+| 12 | job verdict `wall_deadline`, `output_budget`, `signal`, `nonzero_exit`, `wrong_answer`; *(judging, draft)* `session_limit`, `idle`, `presentation_error`; *(stress, draft)* `candidate_failure` | 1 |
+| 13 | job verdict `unchecked`, `no_tests`; *(stress, draft)* `no_iterations` | 4 |
 | 14 | *(judging, draft)* job verdict `scored` and `result.score.full = false` | 1 |
 | 15 | otherwise (including `scored` with a full aggregate) | 0 |
 
@@ -1527,7 +1679,9 @@ condition:
 | `cpf add` | 0, 7 (template, language), 8, 9 |
 | `cpf current` | 0, 8 |
 | `cpf switch` | 0, 8, cancellation (during its `hook` job) |
-| `cpf test add` | 0, 8, 9 |
+| `cpf test add` | 0, 8, 9; *(stress, draft)* also with `--from-stress` |
+| *(stress, draft)* `cpf stress` (search, `--replay`, `--replay-binaries`) | 0, 1, 3, 4, 5, 7, 8, 10, 11, cancellation |
+| *(stress, draft)* `cpf stress ls` | 0 (any entries, any classification), 8, 11 (`--json`) |
 | `cpf test register`, `enable`, `disable` | 0, 8 |
 | `cpf test ls` | 0; 8 when the catalog is not `missing` or `valid` (listing still printed) |
 | `cpf config show` | 0, 7, 11 (`--json`, C §10) |
@@ -1553,6 +1707,8 @@ code through; the child's status is in the report and the stderr summary
 
 ### 6.1 Availability
 
+- *(stress, draft)* Also accepted by `cpf stress` (every mode, a job
+  command, with `--events` too) and `cpf stress ls` (document §4.15).
 - Accepted by `cpf build`, `cpf test`, `cpf cmd`, and by non-job commands
   whose contract defines a document (schema 1: `cpf config show`, *(draft)*
   `cpf status` below, *(organisation, draft)* `cpf ls`, `cpf search`,
@@ -1741,6 +1897,17 @@ Each job event envelope starts with `"event"` (token) and `"seq"` (`u64`):
 | `run_finished` | `run: rid, summary: RunSummary` |
 | `progress` | `done: u32, total: u32` |
 | `job_finished` | `job: jid, verdict: token, report: {path: rel}?, dropped: u64` |
+| `iteration_started` | *(stress, draft)* `iteration: u64, seed: u64, seeds: {interactor: u64?, solution: u64?}` |
+| `iteration_run_started` | *(stress, draft)* `run: irid, stage: token, role: token, digest: hex64` (stages `generator`, `brute`, `run`, judges' stages; `role` the run role) |
+| `iteration_run_finished` | *(stress, draft)* `run: irid, summary: RunSummary` (≤ 6 898 B, within the 7 KiB event-line bound) |
+| `iteration_finished` | *(stress, draft)* `iteration: u64, class: token, role: token, reason: token, saved: fid?` |
+
+*(stress, draft)* In a `stress` job, builds emit `run_started` and
+`run_finished` with their run ids; iteration runs emit only the iteration
+events, which carry no `rid`; no `progress` event is emitted after the
+builds. Every iteration event is non-terminal and droppable (§7.4); `seq`
+is a `u64`, so streams longer than 10 000 executions keep the gap
+equation.
 
 ### 7.4 Sequence and drops
 
@@ -1789,6 +1956,18 @@ at start: as §6.3.
     a stress job. Each takes the next number of one sequence starting at 0
     in the critical section that queues it; the writer writes them in that
     order without gaps. The queue never drops a result line.
+  - *(stress, draft)* **Stress result lines** (stress contract §9), in
+    the final batch before the summary: one budget line ("<retired>
+    iterations from seed <start> in <elapsed>"), one stop line (reason and
+    iteration), one line per class that occurred (≤ 8, with count and the
+    first iteration and seed), one line per failure ref (≤ 20: id or
+    "not saved", class, deciding role, reason, seed, saved outcome), one
+    line per failing class with its first diagnostic (≤ 5), one line per
+    run role timing (≤ 8), one saved-failure line (saved, promoted, not
+    saved, binaries), one replay line (replay jobs: "reproduced" / "not
+    reproduced" and both classes), one cleanup line (≤ 1): at most 46
+    lines, within the 128 stress aggregate lines of the final allowance.
+    Every string in them is sanitized and cut as every line.
   - **Progress lines**: every other line (execution counts, build progress,
     stress iteration updates). Lossy.
 - **Result ceiling**, charged in encoded bytes and fixed when the plan is
@@ -2425,6 +2604,19 @@ row allows it. Ids cite the design's normative statements one by one.
 | J-P11 | seeded rerun of a failing session, deterministic and nondeterministic | `rerun.reproduced` true / false |
 | J-P12 | `cpf interactor-test`: a passing `good` list; a `bad` solution that passes | success; the command fails |
 | J-P13 | interactive, `cwd_bytes` configured small: an interactor writing a valid `accepted` report and a large `tout` (mode `interactor`), and the same with a follow-up checker (mode `checker`) | `tout` and report extracted to `judge/` before the interactor's `cwd/` is measured and cleared (`CwdOverflow` diagnostic); OK in mode `interactor`; in mode `checker` the checker receives the extracted `tout` and decides; injected extraction failures, each → verdict `infrastructure`, the closed record passes step 0, no `AuthorityComplete`, never `artefact_invalid` or `internal_policy_error`: (a) mode `interactor`, reservation refusal for the interactor's `tout` → `ValidationDone{interactor, NotRead}` reason `extraction_failed` + `Infrastructure{judge_extraction}`, no checker fact; (b) mode `checker`, write error for the interactor's report → the same, and the checker `CheckerSkipped{NotEligible}` (coverage `skipped{not_eligible}`); (c) mode `checker`, intent set before (b)'s checker decision → `CheckerSkipped{Cancelled}`, verdict still `infrastructure` (step 1); (d) mode `checker`, interactor accepted, the follow-up checker started and its report extraction fails → the checker keeps `Started`, `RootExited`, `CleanupResult`, gets `ValidationDone{checker, NotRead}`, no `CheckerSkipped`; (e) S's cleanup `Incomplete` already recorded `Infrastructure`, then the interactor's extraction fails → no second fact, `suppressed` = 1 |
+
+### 9.7 Stress *(stress, draft)*
+
+| Id | Fixture | Expected |
+|---|---|---|
+| R-S01 | §2.14 derivation table: every row with the minimal iteration set that reaches it (pure, all OSes) | the verdict and the §5.2 status: 70, 10, cancellation, 3, 10, 1, 5, 5, 5, 5, 4, 0 |
+| R-S02 | `irid` vectors: `0.generator`, `18446744073709551615.candidate_interactor` | accepted, 43 bytes serialized at the maximum; rejected: `01.candidate`, `1.Candidate`, `18446744073709551616.brute`, `1.`, `.brute`, `r00001` (as `irid`) |
+| R-S03 | `fid` vectors (stress contract §10.3 ST-F02) | as there, 78 bytes serialized at the maximum |
+| R-S04 | worst-case `stress` member: 8 classes × 16 diagnostics of 1 024 `"`-heavy bytes, 20 failure refs with 8 infrastructure-class runs each (8 causes) and `not_promoted` with a 260-byte message, 16 cleanup paths of 256 bytes, every `u64` at `u64::MAX` | ≤ 606 208 B; the whole report with 6 builds at their worst ≤ B_S; the reservation equals 2 × B_S |
+| R-S05 | `persist` warning for an iteration run with an `irid` at its maximum and an `io` error at its maximum | ≤ 768 B |
+| R-S06 | `stress_failures` entry at its maximum; 10 001 entries | ≤ 1.5 KiB; 10 000 listed, `entries_dropped` 1 |
+| R-S07 | stalled-then-resumed stress case (portable, injected engine; §9.3): 10 000 iterations, `--keep-going`, 3 failing iterations, `stderr.write` blocked from the first iteration and released 1 s after t_q | stderr holds, in order, the start-up diagnostics, the stress result lines (each present exactly once, in the §8 order), the warnings with `progress_dropped.lines` > 0, the summary last; peak queued result bytes within the final allowance; Linux and macOS repeat it with real fixture programs |
+| R-S08 | `--events` on a stress job of 10 005 iterations with the consumer stalled, then released | `job_finished.seq` equals the number of earlier attempts; the gap equation holds; `iteration_run_*` events carry `irid`, none carries `rid` |
 
 ## 10. Amendments to other documents
 

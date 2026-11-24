@@ -28,6 +28,11 @@ declaration; run counts and the judged-test cap (§8.2); problem kinds
 *execution contract* and *storage contract* to the documents in this
 directory.
 
+**Stress amendment: draft.** The `problem.toml` table `[stress]` (§9.2):
+generator and brute role specs, default budgets and the score threshold;
+stress plans (§8.2); the `cpf stress` row of §9. Marked *(stress, draft)*;
+the stress contract (`stress.md`) uses it.
+
 **Trust model.** Configuration is code: every build, run and command argv,
 shell script and hook executes with the user's rights. The supervisor bounds
 time and captured output; it is not a security boundary (design §1). The only
@@ -118,6 +123,9 @@ it is a table of the problem record whose schema this contract owns
 (§9.1). It is read only from the selected problem's `problem.toml`, is
 validated in the phases of §3 with ordinary diagnostics (file
 `problem.toml`, key path `check.…`), and never appears in layers 1–3.
+
+*(stress, draft)* `problem.toml` `[stress]` is a table of the problem
+record in the same way (§9.2), with key path `stress.…`.
 
 ### 1.2 Discovery
 
@@ -879,6 +887,15 @@ repeat = 5
 - Planned runs = builds + tests × repeats + hooks, computed with checked
   arithmetic in phase 3; more than **10 000** is a plan error (execution contract §6.2
   report bound).
+- *(stress, draft)* **Stress plans** (`cpf stress`, stress contract §6.1):
+  the planned runs are the builds only: the solution build and one role
+  build per built role with a build stage, in the order solution, checker,
+  validator, interactor, generator, brute (≤ 6). Iterations and their runs
+  are not planned runs and never count towards the 10 000; they are bounded
+  by the iteration and time budgets (§9.2, stress contract §5). The
+  judged-test cap below does not apply (a stress job has no tests), and the
+  report reservation is the fixed 2 × B_S of report contract §3.7. No hook
+  is planned for a stress job.
 - *(judging, draft)* **Judged plans** (`cpf test` on a problem with a
   `[check]` role, §9.1). Every role run and role build is a planned run
   and counts towards the 10 000:
@@ -982,6 +999,7 @@ enabled = true                         # master switch, default true
 | build, raw `cpf run`; `cmd` with `needs_build` | ✓ | – | ✓ *(judging, draft)*: the solution target only; raw `cpf run` connects the solution to the console, without an interactor | – | – |
 | `cpf test` | ✓ | – | ✓ *(judging, draft)*: needs `[check] kind = "interactive"` (§9.1) | – | – |
 | `cmd` with `for_each_test` | ✓ | – | – (a test input is not a dialogue) | – | – |
+| *(stress, draft)* `cpf stress` (search, `--replay`, `--replay-binaries`) | ✓: needs `[stress]` (§9.2) | – | ✓: needs `[stress]`, `[check] kind = "interactive"` and `answer = "none"` | – | – |
 | `check` against a recorded answer (design §5.4) | – | ✓ | – | – | – |
 | problem-dependent `cmd` without build/test dependencies (e.g. `echo {problem_id}`) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | problem-independent `cmd` | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -1273,6 +1291,68 @@ the other commands (`../commands.md`).
 On Windows a judged `cpf test` with a valid configuration is refused with
 exit 10 before admission, after phases 1–2 and the early refusals and
 before phase 3 (report contract §5.2).
+
+### 9.2 Stress: `[stress]` *(stress, draft)*
+
+`[stress]` lives in `problem.toml` beside `[check]` (§1.1) and is owned by
+this contract like `[check]` (§9.1: not decoded by the storage record
+classification, an invalid table is a configuration diagnostic, never a
+`malformed` problem record). It is validated (phases 1–2) by `cpf stress`
+in every mode, `cpf config check` and `cpf config show` (member `stress`,
+with defaults, in the §10 mapping); other commands do not read it, so an
+invalid `[stress]` never blocks `build`, `test`, `run` or `cmd`. Fetch
+never writes it, and no part of it is taken from fetched data (design §7).
+Judging (`[check]`: comparator or checker, validator, interactor, answer
+policy, scoring) is reused as declared; `[stress]` adds only the stress
+roles and budgets.
+
+```toml
+[stress]
+generator = { sources = ["gen.cpp"], language = "cpp" }        # required
+brute = { sources = ["brute.cpp"], language = "cpp" }          # see the brute rule below
+iterations = 10000                                             # default iteration budget
+time_s = 60                                                    # default time budget
+# min_score = "90"                                             # points problems only; default the scale
+```
+
+| Key | Type | Default | Rules |
+|---|---|---|---|
+| `generator` | stress role spec | required | invoked as `gen <seed>` (stress contract §3.2) |
+| `brute` | stress role spec | – | required for an interactive problem, and for a batch problem unless `[check] kind = "checker"` with `answer = "none"` (a constructive problem whose checker decides validity alone); else a missing brute is a phase-2 error |
+| `iterations` | integer | 10 000 | 1 ≤ value ≤ 9 223 372 036 854 775 807 (a TOML integer); `--iterations` overrides it with any `u64` ≥ 1 |
+| `time_s` | duration (§7.1) | 60 s | 1 ms–24 h; `--time` overrides it |
+| `min_score` | string | the scale | only with a points `scoring` (§9.1.5), else a phase-2 error; the checkers design §4 points grammar; 0 < value ≤ scale (phase 2); a scored iteration below it is a candidate failure (stress contract §4) |
+
+Unknown keys are phase-1 errors naming them.
+
+**Stress role specs** (`generator`, `brute`): the role spec of §9.1.2
+with the fields `sources`, `support_files`, `language`, `entry`,
+`program`, `deadline_s`, `stdout_cap`, `stderr_cap` and `assets`, by the
+same rules (built or prebuilt, field exclusivity, path rules, asset
+names); `profile` and `seed` are unknown fields for these roles (phase 1).
+Their stages are composed by §9.1.2 (built role: language rows 1–3, then
+the role spec's `deadline_s` and caps; prebuilt role: `argv = [<captured
+program>]`; the `cwd` must be `{ selector = "run" }` and the forbidden
+placeholders are the same; `{iteration}` is not available). The
+generator's seed is appended after expansion as its last argument (stress
+contract §3.2). In an interactive problem the brute's run stage is the
+session's solution stage (its stdin and stdout are connected), as the
+target's is. Role capture is §9.1.3 with `<role>` `generator` and `brute`
+(`inputs/roles/generator/`, `inputs/roles/brute/`), after the judges'
+roles; they are not covered by the judge fingerprint.
+
+**Validation phases** for `cpf stress`:
+
+| Phase | `[stress]` checks |
+|---|---|
+| 1 raw | key set, types, role spec fields and their path rules, `iterations` range, `time_s` (§7.1), the `min_score` grammar |
+| 2 effective | the effective kind (§9) `batch` or `interactive`, else "unsupported in this version"; the brute rule; an interactive problem with `[check] answer` other than `"none"` ("interactive stress needs `answer = \"none\"`: a generator writes no answer"); `min_score` against `scoring` and the scale; `[config] io` declared → "stress with file-based I/O is unsupported in this version"; role `language` defined with a complete run stage; composed stage `cwd` and placeholders; the `[check]` checks of §9.1.8 phase 2 |
+| 3 selected plan | captured files present (§9.1.3); program resolution (§4.4); local limits (§7.2); the CLI budgets and `start + iterations − 1 ≤ u64::MAX` (stress contract §2.1); for `--replay` / `--replay-binaries` the failure checks of stress contract §8 |
+| 4 post-build | each role build's declared outputs (§6.3) |
+
+On Windows `cpf stress` with a valid configuration is refused with exit 10
+after phases 1–2 and the early refusals, before phase 3 (stress contract
+§2.5).
 
 ## 10. `cpf config`
 

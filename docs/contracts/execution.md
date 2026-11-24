@@ -13,6 +13,13 @@ defined in `report.md` (the report contract).
 items (§9a). Amended content is marked *(judging, draft)*. References
 labelled *checkers design* point to `../design-checkers.md`.
 
+**Stress amendment: draft.** Iterations and iteration runs (§1), stages
+`Generator` and `Brute` (§2), the one-live-iteration rule (§3.3), byte
+release after confirmed removal (§5.4), the retirement deadline (§5.5),
+per-iteration persistence settlement (§6.2) and iteration events (§9).
+The lifecycle itself is `stress.md` §6 (the stress contract). Amended
+content is marked *(stress, draft)*.
+
 MUST / MUST NOT / never are requirements. Defaults are overridable by
 configuration (see `config.md`) unless marked *fixed*. Where a guarantee is
 narrower than
@@ -26,6 +33,12 @@ honest weak guarantee to an unproven strong one.
   iteration, one custom command or hook invocation).
 - **Job:** a cancellable unit made of runs (`cpf test` = build + one run per
   test + comparisons). Jobs own cancellation and produce the final report.
+- *(stress, draft)* **Iteration:** the admission unit of a stress job
+  (stress contract §1): one generated input and its ≤ 5 (batch) or ≤ 8
+  (interactive) **iteration runs**, each an ordinary run of this contract
+  identified by `<iteration>.<role>` instead of a report run id. Cumulative
+  counts of iterations and runs are unbounded `u64`s; what a job holds at
+  once is bounded by one live iteration (§3.3, stress contract §6.6).
 - **Root:** the process `cpf` creates. **Containment unit:** Unix process
   group, Windows Job Object. **Tree:** the live members of the unit.
 - **Supervisor:** the per-run state machine. **Cleanup service:** one
@@ -50,7 +63,8 @@ someone else are documented limitations; this is not a sandbox.
 ```rust
 pub struct ResolvedExecutionSpec {
     pub stage: Stage,                    // Build | Run | Command | Hook | Checker | Validator
-                                         // | Interactor (judging, §2.1); Generator, Brute: stress
+                                         // | Interactor (judging, §2.1) | Generator | Brute
+                                         // (stress, draft: stress contract §3.1)
     pub program: PathBuf,                // resolved executable; shell mode already turned into program+args (configuration contract)
     pub args: Vec<OsString>,
     pub cwd: PathBuf,                    // absolute (storage contract decides which directory)
@@ -447,6 +461,16 @@ diagnose an absent `record.json`.
   returns keeps its slot for the life of the `cpf` process; this is reported
   (`ReapTimeout`, `WriteStalled`), and further runs are refused once all
   slots are held.
+- *(stress, draft)* **Iterations.** A stress job admits its iteration runs
+  one iteration at a time (stress contract §6.2): the first run of an
+  iteration is not admitted before the previous iteration is retired, and
+  retirement waits for every run of the iteration to reach resources
+  released, up to the retirement deadline (§5.5); past it the job admits
+  nothing more (stress contract §6.4). Each iteration run reserves its slot
+  and credits by the rules above, so at most 2 are admitted at once (a
+  session pair), and a run transferred to the cleanup service keeps its
+  slot as above, so a leaking stress job is stopped by the 4-slot bound
+  (`NotStarted{CleanupCapacity}`), never by memory growth.
 
 ### 3.4 Creation
 
@@ -791,6 +815,17 @@ contract §6, not a reservation ceiling):
   disk become retained, the rest is returned. A stalled writer keeps its full
   stream reservation until it returns (a directory lease alone does not
   preserve headroom).
+- *(stress, draft)* **Release after removal.** For an iteration run (§1)
+  the conversion above still happens at resources released. When the
+  stress job then removes the iteration's scratch (stress contract §6.3
+  R10) and the no-follow walker (storage contract §2) confirms the whole
+  removal, the job releases exactly the retained bytes it committed for
+  the removed files, through the storage accounting interface (storage
+  contract §6.4); a partial or failed removal releases nothing and stops
+  the job (stress contract §6.4). Bytes of files moved into a saved-failure
+  staging directory stay retained until its publication commits, then are
+  released (stress contract §7.5). Retained bytes are never released for a
+  file that still exists in the job directory.
 - Budgets count **logical file lengths**, not allocated blocks.
 - Other tool-owned retained classes (copied test inputs and answers, build
   artifacts, job reports) are governed by the storage contract; storage MUST
@@ -811,10 +846,11 @@ contract §6, not a reservation ceiling):
 | Cleanup verification deadline, from root exit observed | 1 s (*fixed*) |
 | Drain deadline, from drain milestone | 500 ms (*fixed*) |
 | Sink finalisation deadline, from drain milestone | 5 s (*fixed*) |
+| *(stress, draft)* Retirement deadline, from the last record of an iteration finalized: every run of the iteration at resources released (stress contract §6.3 R6) | 5 s (*fixed*) |
 | Persistence deadline, from the enqueue call (records: from record finalized; §6.2) | 5 s (*fixed*) |
 | Persistence queue credits Q (§6.2) | 2 MiB; charge 8 KiB + encoded length (record: 64 KiB bound) (*fixed*) |
 | Persistence credit wait limit, from the enqueue call | 1 s (*fixed*) |
-| Persistence credit budget B per job | 10 s + 4 ms × 3 × planned executions (*fixed* formula) |
+| Persistence credit budget B per job | 10 s + 4 ms × 3 × planned executions (*fixed* formula); *(stress, draft)* a stress job counts 6 + 8 × 21 = 174 executions |
 | Human stderr final-drain deadline, from the final-batch enqueue instant t_q (not from delivery; rendering and lock acquisition before t_q are not covered); absolute, covers every write call, partial write and retry (report contract §8) | 5 s (*fixed*) |
 | Console flush deadline (raw mode), from drain milestone | 2 s (*fixed*) |
 | Raw final-diagnostic wait (raw mode), from the enqueue instant of the summary line; separate from the console flush deadline (report contract §8) | 2 s (*fixed*) |
@@ -958,6 +994,19 @@ empty captures.
   warning, never the execution's evidence, result or course. The job's
   total credit waiting is ≤ B; with a stalled thread it is ≤ 1 s, because
   the first limit expiry makes the queue nonblocking.
+- *(stress, draft)* **Iteration runs** (§1) are an exception to "specs are
+  enqueued at admission": an iteration run's spec is encoded and its size
+  checked at admission (§2), and held in memory with the live iteration.
+  At the iteration's retirement (stress contract §6.3), a **saved** or
+  **kept** iteration enqueues, for each of its runs, the spec, the record
+  and the first `cleanup.log` (≤ 24 artefacts); a passing or counted-only
+  iteration enqueues nothing. The iteration's artefacts **settle** (each
+  has a result, by the rules below) before the next iteration is admitted,
+  so at most one iteration's artefacts are ever queued. All other rules
+  of this section apply unchanged (charges, waits, B, deadlines,
+  settlement owners). The job's final settlement (report contract §2.9 W)
+  then covers only the builds' artefacts and the last retired iteration's,
+  already settled. For B, "planned executions" of a stress job is 174 (§5.5).
 - **Correctness** is the state machine above and below with its *fixed*
   values (Q, the charge, the 1 s limit, B, the 5 s deadlines), for any
   write service times. It is tested with a controlled writer and a
@@ -1218,6 +1267,15 @@ pub enum Event {
 }
 ```
 
+- *(stress, draft)* A stress job's iteration runs emit
+  `IterationRunStarted { seq, run: IterationRunId, stage, digest }` and
+  `IterationRunFinished { seq, run: IterationRunId, summary }` instead of
+  `RunStarted` / `RunFinished`, and the job emits `IterationStarted { seq,
+  iteration: u64, seed: u64 }` and `IterationFinished { seq, iteration:
+  u64, class }` instead of `Progress`; `IterationRunId` is
+  `<iteration>.<role>` (stress contract §1). They are ordinary, droppable
+  events (report contract §7.3). Builds keep `RunStarted` / `RunFinished`
+  with their run ids.
 - Every event carries a job-wide sequence number. When the transport budget is
   full, events other than `JobFinished` are dropped and counted. `seq`
   starts at 0 and is assigned in one critical section with the
@@ -1398,6 +1456,10 @@ contract §9.2); budget breach plus an independent write error
 compatible outer job and inside one forbidding nesting; address-space limit
 with a lower inherited hard limit; `Connected` variants and `deadline_group`
 rejected outside a session; real Ctrl-C and second Ctrl-C (after CLI integration).
+*(stress, draft)* The iteration lifecycle cases (one live iteration,
+retirement deadline, release after removal, per-iteration settlement,
+cancellation between and during iterations, plateau ceilings) are stress
+contract §10.1.
 
 ## 11. Guarantee caveats and rationale
 

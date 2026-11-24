@@ -25,6 +25,14 @@ publication: tests are published through the catalog commit of §5.8.
 (§9) and allowed states and tests (§10). Amended content is marked
 *(organisation, draft)*.
 
+**Stress amendment: draft.** Saved failures under
+`problems/<p>/stress/failures/` (§3 ownership, §9 `failure.toml`),
+`cpf test add --from-stress` (§5.3), the gitignore comment (§5.5), `fsck`
+recognition (§5.6), the stress job layout (§6.1), byte release after
+confirmed removal and at promotion (§6.4), stress inputs (§7) and the
+crash rows (§10). The transactions themselves are in the stress contract
+(`stress.md` §§6–8). Amended content is marked *(stress, draft)*.
+
 Related: design §4, `execution.md` and `report.md` (report contract).
 
 ## 1. Assumptions and guarantee levels
@@ -243,6 +251,8 @@ native error, never treated as success.
 | `.cpforge/fetch/<p>/txn-<txn>.toml` *(fetch, draft)* | tool, durable | no-clobber under the lock; never rewritten or removed by cpf (§5.8.10) |
 | `.cpforge/fetch/<p>/status.toml` *(fetch, draft)* | tool | atomic replace under the lock (§5.8.9) |
 | `problems/<p>/tests.toml` `[fetch]`, entry `download`; `problem.toml` `[problem]` `url`, `title`, `kind`, `limits`; `contest.toml` `[contest]` *(fetch, draft)* | tool fields | edit transaction by `cpf fetch` (§5.8), never another command |
+| `problems/<p>/stress/`, `problems/<p>/stress/failures/` *(stress, draft)* | user once created | created with `create_dir` under the lock by saved-failure promotion when absent (stress contract §7.5); never removed or renamed; other entries of `stress/` are user files cpf ignores |
+| `problems/<p>/stress/failures/<id>/` *(stress, draft)* | user once published | published complete by `publish_dir_noclobber` under the lock (stress contract §7.5); **never modified, renamed or deleted** by cpf; read only as untrusted input (stress contract §7.6) |
 
 Tool fields (`id`, `url`, `kind`, published limits, `schema`) and user fields
 (tags, status, language, comparator, comments, unknown keys) share a TOML
@@ -257,7 +267,8 @@ outside every retention budget.
 Only `runs/` (by §6.3 pruning and the job's own §6.4 cleanup) and `cache/`
 (initial feature release) are disposable; a `downloads/` entry is removed
 only by its protocol (§5.8.3), and `fetch/` is not disposable. No path under `problems/` or `contests/` is
-disposable; outside the reserved trees nothing is deleted automatically,
+disposable (*(stress, draft)* saved failures included: they are user work,
+never pruned and outside every retention budget); outside the reserved trees nothing is deleted automatically,
 with one exception: leftover recovery (§4.5) removes regular files named
 exactly `.cpf-tmp-` + 32 lowercase hex digits in its metadata recovery
 locations (a reserved name, §2.1). Fetch never deletes or modifies a file
@@ -566,6 +577,19 @@ bytes are published from them with the §4.3 primitive. Then:
 
 Output: the new id on stdout.
 
+*(stress, draft)* **`cpf test add --from-stress <id>`** (stress contract
+§2.4). Instead of `--input` and `--answer`, the sources are the saved
+failure's `input` and, iff its manifest has an `answer` key, the file it
+names (stress contract §7.3). Before the lock: classify the failure
+(stress contract §7.6; not `valid` → refused, exit 8, nothing written),
+then capture each source into a private temporary file as above while
+computing its length and SHA-256; a mismatch with the manifest, a link or
+a non-regular file → refused, exit 8, the captures removed. Then steps
+1–4 above with `stress-<n>` in place of `custom-<n>` (the same smallest-`n`
+and collision rules, over the keys of `stress-<n>`, `tests/stress-<n>.in`
+and `.ans`) and the entry `origin = "stress"`. The failure directory is
+only read.
+
 **`cpf test register <input> [--answer <file> | --no-answer] [--id <id>]`.**
 Registers existing files without copying or changing them. `<input>` and
 `--answer` name files in the problem's `tests/` (a path relative to the
@@ -623,7 +647,9 @@ Prints exactly these lines: `.cpforge/runs/`, `.cpforge/cache/`,
 and *(fetch, draft)* the comment `# optional: .cpforge/fetch/` (settled:
 never an active line; fetch history is the provenance of downloaded test
 files, and ignoring it makes them user content in another checkout, which is
-safe).
+safe), and *(stress, draft)* the comment `# optional: problems/*/stress/failures/`
+(never an active line: saved failures are user work that a user may want
+to commit, but they can be large and hold platform-specific programs).
 `--write` is a **text edit transaction**, §4.4 with these differences:
 lock; read `<root>/.gitignore` (absent → publish no-clobber a file holding
 only the block, §4.3); refuse a link, a non-regular file or more than one
@@ -671,6 +697,16 @@ record the user must repair or move. `--apply` reconciles every `valid`
 journal (§5.8.7) and removes `malformed` journals; it never removes a
 download area other than through recovery's lease probe, never a history
 or status record, never a test file.
+
+*(stress, draft)* `fsck` also reports, per problem, the entries of
+`stress/failures/` that do not classify `valid` (stress contract §7.6:
+`unexpected`, `missing`, `unreadable`, `malformed`, `too_new`, with the
+reason), and a `stress` or `stress/failures` path that is not a directory
+or is a link. It verifies no file hash (that is done at use) and
+`--apply` never repairs, renames or removes anything under
+`problems/<p>/stress/`: saved failures are user work. An id whose epoch
+is not the current `job-seq` epoch is valid (ids stay distinct across
+sequence repair, stress contract §7.1) and not reported.
 
 Never user files, never `.cpforge/lock`, never lock abandonment inferred
 from age or PIDs.
@@ -1806,8 +1842,20 @@ The archive class `notes` (design §7a) is the archive contract's.
     inputs/capture.json            capture manifest (report contract §4.2)
     builds/<build-id>/             fresh output directory per build (build planning)
     <run-id>/  spec.json record.json cleanup.log  out/stdout out/stderr  cwd/
+    inputs/roles/<role>/...        (judging, draft; stress, draft: also generator, brute) captured role files
+    iterations/<k>.<role>/         (stress, draft) iteration run directory, the <run-id>/ layout (stress contract §3.1)
+    failures/<id>/                 (stress, draft) staged saved failure until promotion (stress contract §7.5)
+    inputs/replay/input            (stress, draft) replay: verified copy of a saved input (stress contract §8)
+    inputs/bin/<role>/...          (stress, draft) --replay-binaries: verified copies of preserved programs
 .cpforge/runs/.reclaim-<job-id>/   being deleted
 ```
+
+*(stress, draft)* A stress job's `iterations/` holds, at any time, the
+live iteration's directories, the persisted `spec.json`, `record.json`
+and `cleanup.log` of its saved iterations, and at most one `keep`
+iteration (stress contract §6.3); a passing or counted-only iteration's
+directories are removed at its retirement. `failures/` holds staged
+failures that are not yet promoted or whose promotion failed.
 
 `<run-id>` is `r` + the five-digit admission index (report contract §3.4);
 `<build-id>` is the build's run id.
@@ -1968,6 +2016,16 @@ It never touches anything else.
   report reservation (report contract §3.7), and their temp files during
   replacement), with checked arithmetic; released when the file is removed or
   when the job's owner is released. Reflinks count at full logical length.
+- *(stress, draft)* **Release after confirmed removal.** A stress job
+  removes each retired iteration's scratch with the no-follow walker (§2)
+  and, only when the walker confirms the whole removal, releases the
+  retained bytes it committed for the removed files (the interface's
+  release-after-removal call; stress contract §6.3 R10–R11). A partial
+  removal releases nothing and stops the job (stress contract §6.4).
+  Files moved into a staged saved failure keep their retained bytes until
+  the promotion commits; then their bytes, and those of copied programs,
+  are released, since a published saved failure is a user file outside
+  every budget (stress contract §7.5).
 - **Child output:** after each run, `cwd/` beyond `cwd_bytes` (*default*
   256 MiB) is cleared and `CwdOverflow{bytes}` recorded (diagnostic, not a
   verdict). After each build, output beyond the build cap (configuration contract) →
@@ -2017,6 +2075,17 @@ It never touches anything else.
   completed run. Nothing is recovered from interrupted jobs.
 
 ## 7. Frozen inputs and execution directories
+
+*(stress, draft)* A stress job freezes no tests (its frozen manifest is
+empty) and captures the solution target and every role as below and in
+C §9.1.3. Its iteration inputs are generated during the job (the
+generator's stdout capture, stress contract §3.3) and are tool-created
+run files, not frozen copies; nothing in `problems/<p>/tests/` is read. A
+replay freezes the saved input (verified against the manifest) as
+`inputs/replay/input` and, for `--replay-binaries`, the preserved
+programs as `inputs/bin/<role>/` by the same copy rules (regular files
+only, exclusive creation, counted in the job budget); a failure is a
+capture failure (class `workspace`, exit 8).
 
 - **Freeze at job start:** the job resolves its test list once, copies every
   input and answer it will use into `inputs/` (reflink where supported, else
@@ -2217,6 +2286,12 @@ finalizes them (execution contract §6.2).
 
 ## 9. Schema versions
 
+- *(stress, draft)* `problems/<p>/stress/failures/<id>/failure.toml`
+  (stress contract §7.3): schema 1, tool-written once and then user-owned;
+  read with the tool-only record classification below (unknown keys
+  `malformed`, absent `schema` `malformed`), never mutated by cpf in any
+  classification; a `too_new` manifest is listed raw and its failure is
+  never replayed.
 - Governed formats: `cpforge.toml`, `problem.toml`, `tests.toml`,
   `contest.toml` (user-editable, ordered `[[problem]]` membership, §5.2);
   `state.toml`, `spec.json`, `record.json`, `report.json`, *(draft)* `job-seq`, `job.toml`, `facts/*.toml` (tool-only).
@@ -2312,6 +2387,10 @@ finalizes them (execution contract §6.2).
 | *(organisation, draft)* `tag`, `untag`, `mark` edit (§5.9.4) | record byte-identical to before; temp may remain (recovered by the next locked operation) | record with exactly the new organisation values and every other byte unchanged |
 | *(organisation, draft)* `notes` publish (§5.9.5) | no `notes.md`; temp may remain (recovered) | empty regular `notes.md` |
 | *(fetch, draft)* every fetch boundary | see the fetch crash matrix below | |
+| *(stress, draft)* saved-failure staging (`stress.failure_staged`) | nothing under `problems/<p>/stress/failures/`; the staged directory in the inactive job directory, pruned with it | — |
+| *(stress, draft)* parents created (`stress.failure_parents`) | empty `stress/failures/` (user tree, kept) | — |
+| *(stress, draft)* saved-failure publish (`dir_noclobber.renamed`, `stress.failure_published`) | no `<id>/` under `failures/` | `<id>/` complete: `failure.toml` valid and every listed file matching its hash; nothing of it left in the job directory |
+| *(stress, draft)* iteration scratch removal | the iteration's directories partly present in the inactive job directory, pruned with it | — |
 
 *(fetch, draft)* **Fetch crash matrix** (the C5 gate; C6, C7 and C8 for
 their scenarios).
