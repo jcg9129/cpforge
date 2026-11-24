@@ -303,11 +303,13 @@ nothing is trimmed afterwards, so leading and trailing blank lines and
 spaces stay. Raw response provenance (URL, time, status, body hash) is
 kept separately, in the fetch report and the disposable cache.
 
-Aggregate result precedence: spawn failure > cancellation > wall deadline >
-output limit > signal > nonzero exit > checker failure > wrong answer >
-unchecked > pass. The execution contract §6.4 refines it with the
-interactive session verdicts and presentation errors, and its list is the
-normative one. Checking still runs after an unsuccessful execution for
+Aggregate result precedence puts any failure of cpf's own observation
+first (infrastructure: a process that could not start, a supervisor error,
+incomplete cleanup, lost capture), then cancellation, then the program's
+own failures before checker failures, wrong answers, unchecked and pass,
+so a result is never better than what was observed. The order and its
+derivation are the execution contract §6.4 and the report contract §§2.7,
+2.11–2.12. Checking still runs after an unsuccessful execution for
 diagnostics, but a matching partial output never yields success. A requested
 limit the platform cannot enforce is an error, never silently ignored.
 
@@ -396,8 +398,12 @@ contract has the exact rules; three points narrow the original promises:
   Without one the version records the tool as `unpinned` and the report
   warns. A generic stage cannot know how an arbitrary tool reports its
   version.
-- **The artifact test is isolated by location, not by observation.** A
-  stage's artifact is built and tested in a fresh directory outside the
+- **A stage's artifact is tested by default, not always.** `test = false`
+  in the submit table (for a tool whose output the target's stages cannot
+  build) or `--no-test` skips the artifact test, and the version then says
+  `tested = false` (submission contract §3.2).
+- **The artifact test is isolated by location, not by observation.** When
+  it runs, a stage's artifact is built and tested in a fresh directory outside the
   workspace holding only the artifact and the files it is provided with,
   with the accident guard on its operands. An absolute `#include` of a
   workspace file, an include path in the inherited environment or a
@@ -606,12 +612,14 @@ The organisation rules are storage contract §5.9.
 - **Notes:** an optional `notes.md` per problem (ideas, editorial links).
   `cpf notes` creates it empty if absent and prints its path; cpf never
   writes it otherwise. Archive rules keep it like any other class.
-- `cpf search` / `cpf ls --archived` scan workspace metadata, archive
-  manifests (archive roots are included by default) and bounded notes files
-  directly, without a database or index; results say whether they are
-  active problems or snapshots. A search that reaches its file, byte or
-  traversal bound says the result is incomplete, and unreadable roots or
-  malformed manifests are reported, never hidden behind "no matches".
+- `cpf ls --archived` lists snapshots only, from their summaries in the
+  archive roots. `cpf search` scans the workspace metadata and notes, then
+  (unless `--no-archives`) every snapshot's summary and bounded notes file
+  (archive contract §8). Both read files directly, without a database or
+  index, and every result says whether it is an active problem or a
+  snapshot. A search that reaches its file, byte or traversal bound says
+  the result is incomplete, and unreadable roots or malformed summaries
+  are reported, never hidden behind "no matches".
 
 ### Feature backlog (to prioritise later)
 

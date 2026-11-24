@@ -3071,8 +3071,10 @@ compare spec remain, to be applied by the design ratification:
   wakeup (item 8), or, when the record already has its one
   `Infrastructure` fact, that fact's `suppressed` count is incremented and
   no second fact is recorded"; step 0 accepts `NotRead` after a
-  `Confirmed` cleanup of a naturally exited judge iff the record has an
-  `Infrastructure` fact at or before that `ValidationDone`'s wakeup. Item 1
+  `Confirmed` cleanup of a judge that exited naturally without a crash
+  status (rule 5.1 not applying) iff the record has an `Infrastructure`
+  fact at or before that `ValidationDone`'s wakeup; a rule 5.1 `NotRead`
+  (a crash, which decides) is unaffected. Item 1
   and item 6 are unchanged: only a planned follow-up checker that never
   started gets `CheckerSkipped` (`Cancelled` before `NotEligible`).
   The fact payload's detail kind gains `judge_extraction`.

@@ -39,8 +39,8 @@ Limits of this version:
 - Seeded stress testing, with saved failures, replay and promotion of a
   failure to a test.
 - Submission artifacts: a plain source copy, or a configurable submit stage
-  (for example `distill`) whose artifact is built and tested outside the
-  workspace.
+  (for example `distill`) whose artifact is by default built and tested
+  outside the workspace; an untested artifact is marked as such.
 - Tags, workflow status, notes, filtered listing and search.
 - Conservative archive snapshots, with trash or quarantine cleanup and
   restore.

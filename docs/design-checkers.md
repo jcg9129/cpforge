@@ -129,11 +129,14 @@ profile description says so, and authors who need the distinction use
 Own profiles; invalid input is `TestDataError` for the test, never a solution
 verdict:
 
-- `testlib-validator`: input on stdin, exit 0 valid; anything else is
-  "validation failed (invalid input and validator error are
-  indistinguishable)", with stderr kept.
-- `simple-validator`: `validator <input>` and stdin; exit 0 valid, 1 invalid,
-  anything else validator error.
+- profile `testlib` (in the validator role): input on stdin, exit 0 valid;
+  anything else is "validation failed (invalid input and validator error
+  are indistinguishable)", with stderr kept.
+- profile `simple` (in the validator role): `validator <input>` and stdin;
+  exit 0 valid, 1 invalid, anything else validator error.
+
+The profile names are the checker's (C §9.1.2); what they mean depends on
+the role they are declared for.
 
 ### 2.4 Other conventions and paths
 
@@ -496,9 +499,11 @@ role's `StopRequested`; a `NotStarted{_, CancelledBeforeStart}` has a
 `decision_pos`** (rule 5.1 makes a judge's crash and its `ValidationDone`
 exclusive, and every other decisive fact has its own `obs_seq`), so no tie
 order between decisive facts is needed; the §6.1 bound. A
-`ValidationDone{_, NotRead}` after a `Confirmed` cleanup of a naturally
-exited judge is valid iff the record has an `Infrastructure` fact at or
-before that `ValidationDone`'s wakeup (rule 5.4 extraction failure). Items 1
+`ValidationDone{_, NotRead}` after a `Confirmed` cleanup of a judge that
+exited naturally **without** a crash status (so rule 5.1 does not apply) is
+valid iff the record has an `Infrastructure` fact at or before that
+`ValidationDone`'s wakeup (rule 5.4 extraction failure); a `NotRead` from
+rule 5.1, a crash deciding, needs no such fact. Items 1
 and 6 are unchanged: only a planned follow-up checker that never started
 gets `CheckerSkipped` (`Cancelled` before `NotEligible`).
 
@@ -637,8 +642,9 @@ changes the stored result.
   - Generator: **always** `gen <seed>` as argv; this is the stress contract
     (design §6.5), not opt-in.
   - Interactor and solution: opt-in by environment, `CPF_SEED_INTERACTOR`,
-    `CPF_SEED_SOLUTION`, each only to its role and only if that role declares
-    `seed = "env"`. An argv seed is allowed only for a declared **wrapper**
+    `CPF_SEED_SOLUTION`, each only to its role and only when declared: the
+    interactor's spec has `seed = "env"`, the solution's seed is declared
+    by `[check.interactive] solution_seed = "env"` (C §9.1.6). An argv seed is allowed only for a declared **wrapper**
     that removes it before testlib registration (stock `registerInteraction`
     rejects extra arguments). Undeclared → no seed, and the report
     says the session is not seed-controlled for that role.
@@ -664,9 +670,11 @@ changes the stored result.
 - **Single reference success predicate**: the reference session's
   verdict is OK, or a score equal to the full scale `S`.
 - **Outcome class per iteration**, by precedence (the first matching class):
-  1. *infrastructure*: either session `infrastructure` or
+  1. *infrastructure*: a generator or validator run with class
+     `infrastructure`, or either session `infrastructure` or
      `internal_policy_error`;
-  2. *cancelled*: either session `cancelled`;
+  2. *cancelled*: a generator or validator run cancelled, cancellation
+     before the iteration's first admission, or either session `cancelled`;
   3. *generator / validator failure*: before any session;
   4. *judge failure*: either session `CheckerFailed{…}` or `Unchecked{…}`;
   5. *oracle failure*: the reference fails the success predicate (any
@@ -675,7 +683,8 @@ changes the stored result.
      `session_limit`, `idle`, or a score below the declared threshold;
   7. *pass*: otherwise.
   Every terminal verdict maps to exactly one class. Only candidate failures
-  are reported as bugs in the solution. Classes 3–6 are failing iterations,
+  are reported as bugs in the solution (exact rows: stress contract §4.2).
+  Classes 3–6 are failing iterations,
   saved with all seeds under the caps of design §6.5 (the stress contract
   splits class 3 into generator and validator failures); an
   infrastructure or cancelled iteration is never saved and stops the job.

@@ -84,11 +84,16 @@ under `tests/` that no record names is `downloaded` only when its name and
 current SHA-256 appear in the open fetch journal or a valid fetch history
 record of the problem (several matches: the role precedence and txn rule
 of storage contract §5.8.10, independent of record order and clocks);
-otherwise it is `unknown`. A downloaded file is
-never discarded either. **Untracked** = provenance `unknown` and visibility `normal`.
-Untracked files are never discarded; only an approved, inventory-bound
-transaction (archive; later `move`, §6.2) may relocate them, and its plan
-lists them.
+otherwise it is `unknown`. **Untracked** = provenance `unknown` and
+visibility `normal`. Neither downloaded nor untracked files are ever removed
+by automatic cleaning (`clean`, pruning, `fsck`). Only an approved,
+inventory-bound transaction (archive; later `move`, §6.2) may relocate
+them, and its plan lists them. In an archive each file falls into an
+archive class (archive contract §3.3: superseded downloads are
+`tests:sample`, revision pairs `tests:custom`, untracked files with a
+language extension `sources`), and it is left out of the snapshot only
+when an explicit `discard` rule names that class (archive contract §3.4);
+files of class `other` are always kept.
 
 ### 2.3 Adoption
 
