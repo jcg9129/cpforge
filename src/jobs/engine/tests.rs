@@ -3158,3 +3158,10 @@ fn report_deadline_has_its_own_five_second_origin_after_empty_w() {
         assert!(receiver.terminal().await.report_id.is_none());
     });
 }
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+#[path = "cwd_tests.rs"]
+mod cwd_tests;

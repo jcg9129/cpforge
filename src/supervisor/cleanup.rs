@@ -409,6 +409,7 @@ pub struct Counters {
     pub owned_resources: usize,
     pub slots_in_use: usize,
     pub credits_in_use: usize,
+    /// Includes slot-free creation, post-run cwd and persistence workers.
     pub service_pending: usize,
     /// Job persistence workers handed over without consuming a run slot.
     pub transferred_workers: usize,

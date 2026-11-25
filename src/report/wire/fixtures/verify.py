@@ -167,6 +167,12 @@ def verify():
     errors = json.loads((ROOT / "persist_errors.json").read_bytes())
     assert errors == [dict(kind=kind) for kind in ["timeout", "queue_full", "cancelled", "worker_unavailable"]] + [dict(kind="io", os_error=None, message="publication failed")]
     assert all(len(encode(error)) <= 337 for error in errors)
+    cwd = json.loads((ROOT / "cwd_unmeasured_summaries.json").read_bytes())
+    base = json.loads((ROOT / "run_finished.json").read_bytes())["summary"]
+    assert cwd == [dict(base, notes=["cwd_unmeasured_" + reason])
+                   for reason in ["timeout", "io", "cancelled"]]
+    assert all(len(value["notes"][0]) <= 32 and
+               value["cwd_overflow_bytes"] is None for value in cwd)
     # Exact length of a complete serialization, counting all list commas.
     actual = len(encode(header())) + 10_000 * sum(len(encode(v)) for v in [entry(), test(signal(), check()), aggregate()]) + 3 * 9999
     table = 53645 + 11946 * 10_000

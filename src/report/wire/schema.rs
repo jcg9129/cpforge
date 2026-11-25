@@ -4,6 +4,27 @@ use crate::jobs::engine as e;
 use crate::report as r;
 use std::path::Path;
 
+/// A failed cwd step cannot also claim a successfully cleared overflow.
+pub(super) fn cwd_notes(notes: &[r::RunNote], bytes: Option<u64>) -> Result<()> {
+    let unmeasured = notes
+        .iter()
+        .filter(|note| {
+            matches!(
+                note,
+                r::RunNote::CwdUnmeasuredTimeout
+                    | r::RunNote::CwdUnmeasuredIo
+                    | r::RunNote::CwdUnmeasuredCancelled
+            )
+        })
+        .count();
+    if unmeasured > 1
+        || (unmeasured != 0 && (bytes.is_some() || notes.contains(&r::RunNote::CwdOverflow)))
+    {
+        return Err(Error("inconsistent cwd notes"));
+    }
+    Ok(())
+}
+
 pub(super) fn relative(path: &Path, base: Option<&Path>, max: usize) -> Result<Value> {
     let path = if path.is_absolute() {
         path.strip_prefix(base.ok_or(Error("absolute path needs root"))?)

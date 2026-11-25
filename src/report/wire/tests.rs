@@ -929,3 +929,28 @@ fn persistence_errors_match_golden_decoder_and_report_lane_schema() {
         );
     }
 }
+
+#[test]
+fn cwd_unmeasured_summary_notes_match_golden_and_validate_exclusivity() {
+    let mut values = Vec::new();
+    for note in [
+        r::RunNote::CwdUnmeasuredTimeout,
+        r::RunNote::CwdUnmeasuredIo,
+        r::RunNote::CwdUnmeasuredCancelled,
+    ] {
+        let mut summary = small_summary();
+        summary.notes = vec![note];
+        values.push(run::summary(&summary).unwrap());
+        summary.cwd_overflow_bytes = Some(9);
+        assert!(encode_run_summary(&summary).is_err());
+        summary.cwd_overflow_bytes = None;
+        summary.notes.push(r::RunNote::CwdOverflow);
+        assert!(encode_run_summary(&summary).is_err());
+        summary.notes = vec![note, r::RunNote::CwdUnmeasuredIo];
+        assert!(encode_run_summary(&summary).is_err());
+    }
+    assert_eq!(
+        encode(&value::Value::Array(values)),
+        include_bytes!("fixtures/cwd_unmeasured_summaries.json")
+    );
+}

@@ -17,6 +17,8 @@ mod creation;
 mod creation_worker;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use creation::create_root;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use creation::post_run;
 pub use creation::{CreationError, Creator};
 mod events;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -262,6 +262,49 @@ mod unix {
         }
     }
 
+    /// A disposable post-run worker shares creation's join/transfer protocol,
+    /// but cannot hold up the job's FIFO when its filesystem stops responding.
+    pub(crate) async fn post_run<T: Send + 'static>(
+        cancel: &CancelToken,
+        deadline: tokio::time::Instant,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, crate::report::RunNote> {
+        use crate::report::RunNote;
+
+        // The guard also transfers ownership if the caller's future is dropped.
+        struct TransferOnDrop(Option<CreationWorker<cleanup::Credits>>);
+        impl Drop for TransferOnDrop {
+            fn drop(&mut self) {
+                if let Some(mut worker) = self.0.take() {
+                    if !worker.resources_released() {
+                        cleanup::transfer_creation(worker);
+                    }
+                }
+            }
+        }
+
+        if cancel.is_cancelled() {
+            return Err(RunNote::CwdUnmeasuredCancelled);
+        }
+        let credit = cleanup::global_bounds()
+            .and_then(|bounds| bounds.thread_credits.try_reserve(1))
+            .ok_or(RunNote::CwdUnmeasuredIo)?;
+        let (reply, receiver) = oneshot::channel();
+        let worker = CreationWorker::spawn(credit, move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            let _ = reply.send(result.map_err(|_| RunNote::CwdUnmeasuredIo));
+        })
+        .map_err(|_| RunNote::CwdUnmeasuredIo)?;
+        let _worker = TransferOnDrop(Some(worker));
+        // A result that has already arrived wins over cancellation and the
+        // deadline; otherwise either stops waiting without joining the thread.
+        tokio::select! { biased;
+            result = receiver => result.map_err(|_| RunNote::CwdUnmeasuredIo)?,
+            _ = cancel.cancelled() => Err(RunNote::CwdUnmeasuredCancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(RunNote::CwdUnmeasuredTimeout),
+        }
+    }
+
     pub async fn create_root(
         creator: &Creator,
         spec: ProgramSpec,
@@ -286,6 +329,8 @@ mod unix {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use unix::post_run;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::supervisor) use unix::{CreationState, Request, receive};
 #[cfg(any(target_os = "linux", target_os = "macos"))]

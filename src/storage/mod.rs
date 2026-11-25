@@ -46,6 +46,11 @@ pub(crate) use record::{RECORD_SIZE_LIMIT, RecordBytes, read_record_bytes};
 pub(crate) use sys::is_link;
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 pub(crate) use walk::{measure_owned_tree, remove_owned_tree};
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) use walk::{measure_tree_observed, remove_tree_observed};
 
 #[derive(Debug)]
 pub struct Published {

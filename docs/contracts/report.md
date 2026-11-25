@@ -223,7 +223,17 @@ For an execution with a record, first matching row:
   first 8 are listed, then `causes_dropped`; the first is the primary
   cause.
 - Cleanup `Unverified` (note `cleanup_unverified`) and `CwdOverflow` (note
-  `cwd_overflow`) change no class. A program failing under a local limit
+  `cwd_overflow`) change no class. The post-run cwd step (S §6.4) also
+  changes no class or verdict when measurement/clearing fails or times out:
+  `cwd_unmeasured{reason: timeout|io|cancelled}` is diagnostic only. Schema 1
+  uses the note tokens `cwd_unmeasured_timeout`, `cwd_unmeasured_io`, and
+  `cwd_unmeasured_cancelled`. `timeout` includes a run whose job's earlier
+  walker is still running. `io` includes incomplete walks (skipped
+  boundaries or per-entry errors), worker credit refusal, worker creation
+  failure and panic. An unmeasured note is exclusive with `cwd_overflow`,
+  and `cwd_overflow_bytes` is null for it; only a complete over-cap
+  measurement and clearing sets those overflow fields. A program failing
+  under a local limit
   gets its ordinary class; there is no memory class (§2.8).
 
 ### 2.3 Build result
@@ -1372,7 +1382,7 @@ entry (`program`, `spec`), named by `build.execution`.
 | `measurements` | `[Measurement; ≤5]` | one per requested kind |
 | `limits` | `[InstalledLimit; ≤2]` | `LocalLimit` plus `normalised: u64`, `inherited_soft: u64?`, `inherited_hard: u64?` |
 | `supervisor_errors` | `[token; ≤8]` | §2.2 order |
-| `notes` | `[token; 16]` | E §6.1 `Note` values and §2.2 notes, first-occurrence order |
+| `notes` | `[token; 16]` | E §6.1 `Note` values and §2.2 notes, first-occurrence order; includes `cwd_unmeasured_timeout`, `cwd_unmeasured_io`, `cwd_unmeasured_cancelled` (at most one; exclusive with `cwd_overflow` and non-null `cwd_overflow_bytes`) |
 | `cwd_overflow_bytes` | `u64?` | S §6.4 |
 
 - `Cause`: `{"kind":"not_started","reason":token}`,
@@ -3345,7 +3355,10 @@ Top level (§4.1): `schema`, `document`, `platform`, `outcome` (`finished`,
   `not_validated`, `cleanup_not_confirmed`, `accounting_failed`).
   `InstalledLimit`: `LocalLimit` + `normalised`, `inherited_soft`,
   `inherited_hard`. Notes: E §6.1 `Note` values, `truncated_stdout`,
-  `truncated_stderr`, `cleanup_unverified`, `cwd_overflow`.
+  `truncated_stderr`, `cleanup_unverified`, `cwd_overflow`,
+  `cwd_unmeasured_timeout`, `cwd_unmeasured_io`, `cwd_unmeasured_cancelled`
+  (S §6.4; diagnostic only; at most one unmeasured reason and no simultaneous
+  `cwd_overflow` or non-null `cwd_overflow_bytes`).
 - `tests[]` (§4.6): `id`, `origin` (`sample`, `custom`, `stress`,
   `imported`), `answer` (`absent`, `empty`, `present`), `input_sha256`,
   `answer_sha256`, `executions` {`first`, `count`}, `class`, `check`,

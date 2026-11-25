@@ -40,6 +40,7 @@
 //! separately from the frozen value and the terminal slot is then filled.
 
 mod cancel;
+mod cwd;
 mod events;
 mod executor;
 mod persistence;
@@ -133,6 +134,10 @@ pub enum Point {
     BeforeRunMkdir(u32),
     #[cfg(feature = "storage-test-hooks")]
     BeforeRecipeCompletion(u32),
+    #[cfg(feature = "storage-test-hooks")]
+    BeforeCwdMeasure(u32),
+    #[cfg(feature = "storage-test-hooks")]
+    BeforeCwdClear(u32),
     BeforeCheck(u32),
     AfterCheckAdmission(u32),
     #[cfg(feature = "storage-test-hooks")]
@@ -489,6 +494,7 @@ impl<'probe> Engine<'probe> {
             events: &events,
             output_events,
             cwd_bytes: ready.cwd_bytes,
+            cwd_walker: Arc::default(),
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer: observer.as_ref(),
         };
@@ -1186,6 +1192,8 @@ struct Context<'a> {
     events: &'a Events,
     output_events: bool,
     cwd_bytes: Option<u64>,
+    /// Set while this job's post-run cwd walker runs (at most one).
+    cwd_walker: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(any(test, feature = "storage-test-hooks"))]
     observer: Option<&'a Observation>,
 }
@@ -1463,6 +1471,31 @@ impl Context<'_> {
         };
         let mut summary = None;
         if let Some(record) = &record {
+            // An invalid-limit refusal derives no summary and keeps its cwd/.
+            let invalid_limit = matches!(
+                record.as_ref(),
+                ExecutionRecord::NotStarted(failure) if failure.invalid_limit.is_some()
+            );
+            let cwd_result = if let Some(limit) = self.cwd_bytes.filter(|_| {
+                plan.stage != Stage::Build
+                    && !invalid_limit
+                    && spec.as_ref().is_some_and(|s| !s.resolved.shared_cwd)
+            }) {
+                cwd::finish(
+                    self.owner.clone(),
+                    directory.join("cwd"),
+                    limit,
+                    self.cancel.token(),
+                    &self.cwd_walker,
+                    #[cfg(feature = "storage-test-hooks")]
+                    self.observer.cloned(),
+                    #[cfg(feature = "storage-test-hooks")]
+                    plan.index,
+                )
+                .await
+            } else {
+                Ok(None)
+            };
             result.coverage = match record.as_ref() {
                 ExecutionRecord::Started(_) => Coverage::Started,
                 ExecutionRecord::Transferred => Coverage::Transferred,
@@ -1479,18 +1512,10 @@ impl Context<'_> {
                     return Err(Invariant::SummaryUnderivable);
                 }
                 let mut input = record.input(matches!(plan.role, Role::Test { .. }), policies);
-                if let Some(limit) = self.cwd_bytes.filter(|_| {
-                    plan.stage != Stage::Build
-                        && spec.as_ref().is_some_and(|s| !s.resolved.shared_cwd)
-                }) {
-                    let guard = crate::storage::WorkspaceGuard::leased(self.owner);
-                    let cwd = directory.join("cwd");
-                    if let Ok(measured) = crate::storage::measure_tree(&guard, &cwd) {
-                        if measured.bytes > limit {
-                            input.cwd_overflow_bytes = Some(measured.bytes);
-                            let _ = crate::storage::remove_tree(&guard, &cwd);
-                        }
-                    }
+                input.cwd_overflow_bytes = cwd_result.ok().flatten();
+                let mut notes = report::run_notes(&input);
+                if let Err(note) = cwd_result {
+                    notes.push(note);
                 }
                 result.class = Some(report::classify_run(&input));
                 #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -1502,7 +1527,7 @@ impl Context<'_> {
                     deadline: spec.as_ref().map_or(Duration::ZERO, |s| {
                         Duration::from_millis(s.resolved.deadline.milliseconds.value)
                     }),
-                    notes: report::run_notes(&input),
+                    notes,
                     cwd_overflow_bytes: input.cwd_overflow_bytes,
                 }));
                 Ok(())

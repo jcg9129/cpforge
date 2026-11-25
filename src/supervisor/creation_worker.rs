@@ -1,4 +1,4 @@
-//! Slot-free ownership of a job's creation thread.
+//! Slot-free ownership of creation and disposable post-run threads.
 use std::io;
 use std::thread::{self, JoinHandle};
 

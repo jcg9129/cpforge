@@ -287,7 +287,13 @@ cleanup has a result:
   and extracted as above; (2) the staged copies and assets are removed
   (judge scratch, below, for this run's own staged files); (3) only then is
   `cwd/` measured and, beyond `cwd_bytes`, cleared with `CwdOverflow`
-  (storage contract §6.4). Staged files are tool-created and never count
+  on a credited per-run worker, within a single fixed 5 s deadline from
+  the start of step 3, with cancellation able to stop waiting. Timeout or
+  I/O failure adds `cwd_unmeasured` (reason `timeout` or `io`), cancellation
+  adds reason `cancelled`; the step never changes the verdict. A still
+  running worker and its credit, lease and retained-byte accounting pass
+  to cleanup until it returns (storage contract §6.4). Staged files are
+  tool-created and never count
   towards `cwd_bytes`; what remains measured is what the judge wrote,
   including its own `report` and `tout` in `cwd/`, which clearing may
   delete. The retained evidence is the extracted copies in `judge/`, which
@@ -483,14 +489,16 @@ diagnose an absent `record.json`.
   recovery route for every observer failure; the cleanup path never needs a
   new thread.
 - Bounds (*fixed*): **4** cleanup slots and **32** credited supervisor worker
-  threads (cleanup, creation, persistence, sinks, forwarders and transcript
-  writers). The fixed process/command threads `cpf-control`, `cpf-stdout`
+  threads (cleanup, creation, persistence, sinks, forwarders, transcript
+  writers and post-run cwd workers). The fixed process/command threads
+  `cpf-control`, `cpf-stdout`
   and `cpf-stderr` (at most one each) are outside the credits: the process-wide
   maximum is 32 credited threads plus these three. Every
   admitted run holds a slot from admission to resources released, so at most
   **4 runs are admitted concurrently** (the CLI foundation runs tests sequentially; an
   interactive pair needs 2).
-- **Workers, all created before any child exists**: per job, one
+- **Workers** (except the post-run cwd worker below, all created before
+  any child exists): per job, one
   creation thread and one persistence thread, created at job start after
   reserving their 2 thread credits atomically from the 32 (failure: credits returned, the
   job does not start, nothing to recover). Job threads hold no cleanup slot;
@@ -507,6 +515,15 @@ diagnose an absent `record.json`.
   worker completes its own blocking operations (its partial copy
   included) before reporting to the cleanup service, whose poller only
   receives the completion and releases the credit and reservations.
+  After run finalization, cwd measurement and clearing use one additional
+  per-run worker credited from the same 32, with the creation worker's
+  join/transfer machinery and no run slot (S §6.4). A separate worker keeps
+  later run setup off a stalled walk's FIFO. A job holds at most one such
+  worker at a time, so a stalled filesystem pins one credit per job, not one
+  per run; a run whose job still has one running records
+  `cwd_unmeasured{reason: timeout}` without starting another. Credit or thread
+  creation failure is diagnostic `cwd_unmeasured{reason: io}` and does not
+  refuse the run.
 - **Admission:** before entering `Creating`, a run reserves atomically and
   without blocking one cleanup slot (with its transfer-queue entry) and its
   thread credits, then creates its workers. Reservation failure →
@@ -931,6 +948,7 @@ contract §6, not a reservation ceiling):
 | Cleanup verification deadline, from root exit observed | 1 s (*fixed*) |
 | Drain deadline, from drain milestone | 500 ms (*fixed*) |
 | Sink finalisation deadline, from drain milestone | 5 s (*fixed*) |
+| Post-run cwd measurement and clearing, including worker admission, from the start of the step; cancellation stops waiting | 5 s (*fixed*) |
 | Retirement deadline, from the last record of an iteration finalized: every run of the iteration at resources released (stress contract §6.3 R6) | 5 s (*fixed*) |
 | Persistence deadline, from the enqueue call (records: from record finalized; §6.2) | 5 s (*fixed*) |
 | Persistence queue credits Q (§6.2) | 2 MiB; charge 8 KiB + encoded length (record: 64 KiB bound) (*fixed*) |
@@ -960,13 +978,15 @@ cancellation and ownership rules; collecting the output is one more
 worker** with the sink workers' admission, finalisation-deadline and
 transfer rules (§§3.3, 5.1–5.2); removing the I/O scratch is part of the
 existing post-run `cwd/` measurement step (storage contract §6.4). Reason:
-each of those steps already has an owner, and the first two already have
-a bound and a transfer rule (the cleanup service already receives
-completions from transferred workers); a separate worker would need its
-own. The post-run `cwd/` measurement step has **no bound today** (for any
-run, not only file-based I/O); that is a pre-existing gap of the storage
-and execution contracts, tracked separately, which file-based I/O neither
-widens nor closes.
+each step has an owner and a bound. Post-run measurement and clearing use
+one credited per-run worker and one fixed 5 s deadline from the start of
+that step (storage contract §6.4), with cancellation able to stop waiting.
+Timeout, I/O failure or cancellation produces a diagnostic
+`cwd_unmeasured{reason: timeout|io|cancelled}`; no verdict is changed.
+A still-running worker transfers to cleanup, retaining its credit, lease
+and any retained-byte accounting until it returns. The cleanup poller
+performs no filesystem work. Using a separate credited worker keeps later
+runs' preparation available on the job's FIFO creation thread.
 
 **Spec.** The job puts the declaration into the run's
 `ResolvedExecutionSpec` (§2), so the supervisor reads no configuration:

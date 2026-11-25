@@ -379,6 +379,9 @@ tokens! {
     /// Policy notes supplementing, without replacing, the supervisor's notes.
     pub enum RunNote {
         CleanupUnverified => "cleanup_unverified", CwdOverflow => "cwd_overflow",
+        CwdUnmeasuredTimeout => "cwd_unmeasured_timeout",
+        CwdUnmeasuredIo => "cwd_unmeasured_io",
+        CwdUnmeasuredCancelled => "cwd_unmeasured_cancelled",
         TruncatedStdout => "truncated_stdout", TruncatedStderr => "truncated_stderr"
     }
 }

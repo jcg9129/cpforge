@@ -767,6 +767,18 @@ fn actual_engine_values_fill_every_available_cap() {
     assert_eq!(parsed["measurements"].as_array().unwrap().len(), 5);
     assert_eq!(parsed["limits"].as_array().unwrap().len(), 2);
     assert_eq!(parsed["stdout"]["losses"].as_array().unwrap().len(), 6);
+    // Unmeasured reasons replace a successful overflow and keep schema 1's
+    // token and summary bounds, including alongside all other policy notes.
+    summary.cwd_overflow_bytes = None;
+    for note in [
+        r::RunNote::CwdUnmeasuredTimeout,
+        r::RunNote::CwdUnmeasuredIo,
+        r::RunNote::CwdUnmeasuredCancelled,
+    ] {
+        summary.notes[1] = note;
+        assert!(note.wire_token().len() <= 32);
+        assert!(encode_run_summary(&summary).unwrap().len() <= 6774);
+    }
     // Both native representations are exercised through the actual build and
     // capture adapters, in addition to the conservative structural maxima.
     for name in ["\"".repeat(512), "\n".repeat(512)] {

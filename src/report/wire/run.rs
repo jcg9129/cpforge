@@ -355,6 +355,7 @@ pub(super) fn timing(v: &p::RootOutcome) -> Result<Value> {
     ]))
 }
 pub(super) fn summary(v: &e::RunSummary) -> Result<Value> {
+    super::schema::cwd_notes(&v.notes, v.cwd_overflow_bytes)?;
     let (execution, timing, stdout, stderr, measurements, limits, errors, mut notes) =
         match v.record.as_ref() {
             e::ExecutionRecord::Started(root) => (

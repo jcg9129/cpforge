@@ -2137,7 +2137,31 @@ It never touches anything else.
   every budget (stress contract §7.5).
 - **Child output:** after each run, `cwd/` beyond `cwd_bytes` (*default*
   256 MiB) is cleared and `CwdOverflow{bytes}` recorded (diagnostic, not a
-  verdict). For a judge run, `cwd/` is measured only after the judge's
+  verdict). Measurement and clearing share one fixed **5 s** policy deadline
+  from the start of this post-run step (including worker admission); the
+  deadline is never scaled. Both run on a per-run credited worker using the
+  creation worker's join/transfer protocol. This keeps a stalled filesystem
+  off the async executor and leaves the job's FIFO creation thread available
+  for later runs. A complete measurement within the cap adds nothing; an
+  over-cap measurement followed by complete clearing adds `CwdOverflow{bytes}`
+  as before; an absent `cwd/` adds nothing. Timeout or incomplete/erroring
+  measurement or clearing adds `cwd_unmeasured{reason: timeout|io}` instead;
+  cancellation stops waiting promptly and adds
+  `cwd_unmeasured{reason: cancelled}`. A result that has already arrived wins
+  over cancellation and the deadline. The worker checks cancellation and the
+  deadline before measuring and again before clearing, so it never starts
+  deleting after the wait may have ended. A job has at most one such worker:
+  while an earlier one is still running (transferred), the step is not
+  started and records reason `timeout`. Worker credit or creation failure
+  is `io`. These notes never change a class or verdict, and
+  the job continues under its ordinary cancellation/admission rules. A still
+  running worker transfers to the cleanup service, without a run slot, with
+  its credit and job lease: the poller only joins finished threads and performs
+  no filesystem work. No credit or retained-byte accounting held by that
+  worker is released before it returns. Dropping the waiting future uses the
+  same transfer rule. Schema 1 encodes the reasons as distinct note tokens
+  (report contract §§2.2, 4.5).
+  For a judge run, `cwd/` is measured only after the judge's
   report and `tout` were read and its staged copies removed; for a
   file-based I/O run, only after the output file was collected and the I/O
   scratch removed (execution contract §§2.1, 5.6). Staged files never count

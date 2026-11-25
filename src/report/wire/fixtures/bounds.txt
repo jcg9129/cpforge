@@ -1,4 +1,4 @@
-14 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+16 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169

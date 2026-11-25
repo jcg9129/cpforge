@@ -53,6 +53,54 @@ pub fn remove_tree(
     Ok(report)
 }
 
+/// Per-operation observation inside the actual walker; no global test state.
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn measure_tree_observed(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    on_entry: &mut dyn FnMut(&Path),
+) -> Result<WalkReport, StorageError> {
+    let path = guard.entry_path(path)?;
+    run_owned(
+        guard.root(),
+        &path,
+        Action::Measure,
+        Some(&guard.test_hooks),
+        None,
+        Some(on_entry),
+    )
+}
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+pub(crate) fn remove_tree_observed(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    on_entry: &mut dyn FnMut(&Path),
+) -> Result<WalkReport, StorageError> {
+    let path = guard.entry_path(path)?;
+    let report = run_owned(
+        guard.root(),
+        &path,
+        Action::Remove,
+        Some(&guard.test_hooks),
+        None,
+        Some(on_entry),
+    )?;
+    if report.errors.is_empty() && report.skipped.is_empty() {
+        guard
+            .created
+            .borrow_mut()
+            .retain(|created| !created.starts_with(&path));
+    }
+    Ok(report)
+}
+
 pub(crate) fn sync_tree(guard: &WorkspaceGuard<'_>, path: &Path) -> Result<(), StorageError> {
     let report = run(guard, path, Action::Sync)?;
     if let Some((path, error)) = report.errors.into_iter().next() {
