@@ -314,6 +314,29 @@ mod unix {
         }
     }
 
+    pub async fn create_root(
+        creator: &Creator,
+        spec: ProgramSpec,
+        admission: Admission,
+        opts: &SpawnOptions,
+        cancel: &CancelToken,
+    ) -> Result<Spawned, CreationError> {
+        if cancel.is_cancelled() {
+            return Err(NotStarted::CancelledBeforeStart.into());
+        }
+        let state = Arc::new(CreationState::default());
+        let (reply, receiver) = oneshot::channel();
+        creator.send(Request::Root(Box::new(RootRequest {
+            spec,
+            admission,
+            options: opts.clone(),
+            state: state.clone(),
+            handle: Handle::current(),
+            reply,
+        })))?;
+        receive(state, cancel, receiver).await?.map_err(Into::into)
+    }
+
     #[cfg(test)]
     mod post_run_tests {
         use super::*;
@@ -357,29 +380,6 @@ mod unix {
                 );
             });
         }
-    }
-
-    pub async fn create_root(
-        creator: &Creator,
-        spec: ProgramSpec,
-        admission: Admission,
-        opts: &SpawnOptions,
-        cancel: &CancelToken,
-    ) -> Result<Spawned, CreationError> {
-        if cancel.is_cancelled() {
-            return Err(NotStarted::CancelledBeforeStart.into());
-        }
-        let state = Arc::new(CreationState::default());
-        let (reply, receiver) = oneshot::channel();
-        creator.send(Request::Root(Box::new(RootRequest {
-            spec,
-            admission,
-            options: opts.clone(),
-            state: state.clone(),
-            handle: Handle::current(),
-            reply,
-        })))?;
-        receive(state, cancel, receiver).await?.map_err(Into::into)
     }
 }
 
