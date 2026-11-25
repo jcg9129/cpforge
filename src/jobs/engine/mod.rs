@@ -600,6 +600,9 @@ impl<'probe> Engine<'probe> {
                             Some(BuildResult::Succeeded)
                         ),
                     earlier_retention_refusal,
+                    submit_not_succeeded: false,
+                    input_not_validated: false,
+                    not_eligible: false,
                     keep_going,
                     earlier_primary_failed: stopped,
                     intent_before_admission: cancel.lock().intent.is_some(),
@@ -705,6 +708,9 @@ impl<'probe> Engine<'probe> {
                     check: Some(check),
                     verdict: Some(verdict),
                     output_file: None,
+                    score: None,
+                    validation: None,
+                    judges: Vec::new(),
                 };
                 if let Some(progress) = &progress {
                     let context = report::DisplayContext {
@@ -780,6 +786,9 @@ impl<'probe> Engine<'probe> {
                         check: None,
                         verdict: None,
                         output_file: None,
+                        score: None,
+                        validation: None,
+                        judges: Vec::new(),
                     });
                 }
             }
@@ -814,6 +823,7 @@ impl<'probe> Engine<'probe> {
         let mut result = {
             let mut state = cancel.lock();
             let result = report::job_verdict(&report::JobInput {
+                scoring: crate::report::Scoring::PassFail,
                 kind,
                 build: build.as_ref().map(|b| &b.result),
                 primary: &primary,
@@ -926,6 +936,9 @@ impl<'probe> Engine<'probe> {
                         job: kind,
                         depends_on_unsucceeded_build: false,
                         earlier_retention_refusal: admission_closed,
+                        submit_not_succeeded: false,
+                        input_not_validated: false,
+                        not_eligible: false,
                         keep_going: true,
                         earlier_primary_failed: false,
                         intent_before_admission: cancel.lock().intent.is_some(),
@@ -991,6 +1004,7 @@ impl<'probe> Engine<'probe> {
                     .map(|execution| execution.result.clone())
                     .collect();
                 let verdict = report::job_verdict(&report::JobInput {
+                    scoring: crate::report::Scoring::PassFail,
                     kind,
                     build: None,
                     primary: &primary,
@@ -1100,7 +1114,8 @@ impl<'probe> Engine<'probe> {
             if late_cancellation {
                 warnings.push(Warning::LateCancellation);
             }
-            details.pre_delivery_exit = pre_delivery_exit(kind, result.verdict, cancellation);
+            details.pre_delivery_exit =
+                pre_delivery_exit(kind, result.verdict, cancellation, details.score.as_ref());
             let report = FinalizedReport {
                 data: Arc::new(ReportData {
                     details,
@@ -1829,6 +1844,7 @@ fn report_details(
                 profile: target.profile.as_ref().map(|p| p.value.clone()),
                 build_free: target.build.is_none(),
                 compare: comparator,
+                check: None,
                 io: None,
                 run_deadline: Some((deadline.value.saturating_mul(1000), source)),
                 published_limits: ready
@@ -1838,6 +1854,8 @@ fn report_details(
                 local_limits: configured_limits(&target.run.limits),
             }
         }),
+        score: None,
+        judge_fingerprint: None,
         fingerprints: None,
         fact: (kind == JobKind::Test).then_some(Fact {
             outcome: FactOutcome::NotAttempted {

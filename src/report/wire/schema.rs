@@ -117,7 +117,8 @@ pub(super) fn comparator(v: &Comparator) -> Result<Value> {
     })
 }
 pub(super) fn target(v: &Target) -> Result<Value> {
-    let mut value = obj([
+    let default_check = v.compare.as_ref().map(|_| r::CheckConfig::default());
+    let value = obj([
         (
             "name",
             v.name
@@ -152,6 +153,22 @@ pub(super) fn target(v: &Target) -> Result<Value> {
                 .unwrap_or(Value::Null),
         ),
         (
+            "check",
+            v.check
+                .as_ref()
+                .or(default_check.as_ref())
+                .map(super::judging::config)
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "io",
+            v.io.as_ref()
+                .map(super::io::config)
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
+        (
             "run_deadline",
             match v.run_deadline {
                 Some((us, source)) => {
@@ -174,12 +191,6 @@ pub(super) fn target(v: &Target) -> Result<Value> {
             checked_array(&v.local_limits, 2, |v| limit(v, false))?,
         ),
     ]);
-    if let Some(io) = &v.io {
-        let Value::Object(fields) = &mut value else {
-            unreachable!()
-        };
-        fields.insert(5, ("io", super::io::config(io)?));
-    }
     Ok(value)
 }
 pub(super) fn capture_check(v: &crate::jobs::CaptureCheck) -> Result<Value> {
@@ -310,6 +321,14 @@ pub(super) fn build(v: &e::BuildReport, root: &Path) -> Result<Value> {
     ]))
 }
 pub(super) fn check(v: &r::CheckKind) -> Result<Value> {
+    if let r::CheckKind::Judged { outcome } = v {
+        if let r::JudgedCheck::Scored { raw, scale, .. } = outcome.as_ref() {
+            if raw > scale {
+                return Err(Error("check score exceeds scale"));
+            }
+        }
+        return super::judging::serialized(outcome);
+    }
     let mut fields = vec![("kind", s(v.wire_token()))];
     if let Some(fail) = v.fail_token() {
         fields.push(("fail", s(fail)));
@@ -357,7 +376,7 @@ pub(super) fn test(v: &e::TestReport) -> Result<Value> {
             (if *len == 0 { "empty" } else { "present" }, hex(sha256))
         }
     };
-    let mut value = obj([
+    let value = obj([
         ("id", ident(v.frozen.id.as_str())?),
         (
             "origin",
@@ -399,18 +418,36 @@ pub(super) fn test(v: &e::TestReport) -> Result<Value> {
             b(v.check.as_ref().is_some_and(|v| v.diagnostic)),
         ),
         ("verdict", opt(v.verdict.as_ref(), verdict)),
+        ("score", super::judging::serialized(&v.score)?),
+        (
+            "validation",
+            v.validation
+                .as_ref()
+                .map(super::judging::validation)
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "judges",
+            checked_array(&v.judges, 2, super::judging::judge)?,
+        ),
+        ("session", Value::Null),
+        (
+            "output_file",
+            v.output_file
+                .as_ref()
+                .map(super::io::output_file)
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
     ]);
-    if let Some(output) = &v.output_file {
-        let Value::Object(fields) = &mut value else {
-            unreachable!()
-        };
-        fields.push(("output_file", super::io::output_file(output)?));
-    }
-    // Only an output-file entry carries the 192-byte shape term (report §3.7.1).
-    bounded(
-        &value,
-        3 * 1024 + if v.output_file.is_some() { 192 } else { 0 },
-    )?;
+    let shape = super::ReportShape {
+        validator: v.validation.is_some(),
+        judges: v.judges.len() as u8,
+        interactive: false,
+        output_file: v.output_file.is_some(),
+    };
+    bounded(&value, shape.test_bound()?)?;
     Ok(value)
 }
 pub(super) fn aggregate(v: &e::Aggregate) -> Result<Value> {
@@ -451,7 +488,7 @@ pub(super) fn counts(v: r::Counts) -> Value {
         ("tests", n(v.tests)),
         (
             "by_verdict",
-            counts_object!(v.by_verdict;passed,wrong_answer,unchecked,checker_failed,wall_deadline,output_budget,signal,nonzero_exit,cancelled,infrastructure,not_run,internal_error),
+            counts_object!(v.by_verdict;passed,wrong_answer,unchecked,checker_failed,wall_deadline,output_budget,signal,nonzero_exit,cancelled,infrastructure,not_run,internal_error,presentation_error,scored,session_limit,idle),
         ),
         (
             "by_class",
@@ -512,6 +549,14 @@ pub(super) fn result(v: &e::ReportResult, meta: &e::ReportDetails) -> Result<Val
             v.internal
                 .as_ref()
                 .map(|v| internal(v, &meta.internal_message))
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "score",
+            meta.score
+                .as_ref()
+                .map(super::judging::aggregate)
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),

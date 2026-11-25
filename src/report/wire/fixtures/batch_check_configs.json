@@ -1,0 +1,1 @@
+[{"kind":"compare","answer":"file","scoring":{"kind":"pass_fail"},"display":"cpf","interactive":null},{"kind":"checker","answer":"none","scoring":{"kind":"points","scale":"100","aggregation":"sum"},"display":"judge_cf","interactive":null},{"kind":"checker","answer":"none","scoring":{"kind":"points","scale":"100","aggregation":"min"},"display":"judge_cf","interactive":null}]

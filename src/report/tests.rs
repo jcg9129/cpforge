@@ -1212,6 +1212,9 @@ fn conditions() -> SkipConditions {
         job: JobKind::Test,
         depends_on_unsucceeded_build: false,
         earlier_retention_refusal: false,
+        submit_not_succeeded: false,
+        input_not_validated: false,
+        not_eligible: false,
         keep_going: false,
         earlier_primary_failed: false,
         intent_before_admission: false,
@@ -1402,6 +1405,7 @@ fn orphan_fixtures_propagate_to_internal_job_result() {
         let verdict = test_verdict(&execution, &check);
         assert_eq!(verdict, TestVerdict::InternalError { invariant }, "{name}");
         let result = job_verdict(&JobInput {
+            scoring: crate::report::Scoring::PassFail,
             kind: JobKind::Test,
             build: None,
             primary: &[execution],
@@ -1416,6 +1420,7 @@ fn orphan_fixtures_propagate_to_internal_job_result() {
     }
     let build = build_result(&skipped(SkipReason::StopPolicy), &PostBuild::default());
     let result = job_verdict(&JobInput {
+        scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Build,
         build: Some(&build),
         primary: &[],
@@ -1809,6 +1814,7 @@ fn job_verdict_fixtures() {
     }
     for row in rows {
         let actual = job_verdict(&JobInput {
+            scoring: crate::report::Scoring::PassFail,
             kind: row.kind,
             build: row.build.as_ref(),
             primary: &row.primary,
@@ -1834,6 +1840,7 @@ fn job_verdict_fixtures() {
         locus: InternalLocus::Execution { index: 2 },
     };
     let actual = job_verdict(&JobInput {
+        scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Test,
         build: None,
         primary: &[],
@@ -2149,7 +2156,8 @@ fn coverage_counts_fixtures() {
             cancelled: 1,
             infrastructure: 1,
             not_run: 1,
-            internal_error: 1
+            internal_error: 1,
+            ..ByVerdict::default()
         }
     );
 }

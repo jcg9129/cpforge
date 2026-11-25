@@ -291,6 +291,11 @@ fn max_test(class: Value, check: Value) -> Value {
             "verdict",
             obj([("kind", s("internal_error")), ("invariant", tok())]),
         ),
+        ("score", Value::Null),
+        ("validation", Value::Null),
+        ("judges", Value::Array(vec![])),
+        ("session", Value::Null),
+        ("output_file", Value::Null),
     ])
 }
 fn max_diag_check() -> Value {
@@ -331,10 +336,7 @@ fn file_io_structural_maxima_and_ten_thousand_entries_fit_the_shape_formula() {
         obj([("reserved", s(format!("{}x", "\"".repeat(1016))))]),
     );
     let mut test = max_test(max_signal(), check);
-    let Value::Object(fields) = &mut test else {
-        unreachable!()
-    };
-    fields.push(("output_file", collected));
+    replace(&mut test, "output_file", collected);
     let class = run::class(&r::RunClass::OutputBudget {
         streams: r::BudgetStreams {
             stdout: true,
@@ -364,10 +366,7 @@ fn file_io_structural_maxima_and_ten_thousand_entries_fit_the_shape_formula() {
             .find(|(key, _)| *key == "target")
             .unwrap()
             .1;
-        let Value::Object(fields) = target else {
-            unreachable!()
-        };
-        fields.insert(5, ("io", io.clone()));
+        replace(target, "io", io.clone());
         let actual = encode(&header).len()
             + 10_000
                 * (encode(&max_entry(binary)).len()
@@ -431,6 +430,8 @@ fn max_header(binary: bool) -> Value {
             ("profile", s("x".repeat(64))),
             ("build_free", b(false)),
             ("compare", Value::Object(dec_fields)),
+            ("check", max_check_config()),
+            ("io", Value::Null),
             (
                 "run_deadline",
                 obj([("us", u(u64::MAX)), ("source", tok())]),
@@ -446,7 +447,11 @@ fn max_header(binary: bool) -> Value {
     replace(
         &mut value,
         "fingerprints",
-        obj([("source", hex(&[0xff; 32])), ("tests", hex(&[0xff; 32]))]),
+        obj([
+            ("source", hex(&[0xff; 32])),
+            ("tests", hex(&[0xff; 32])),
+            ("judge", hex(&[0xff; 32])),
+        ]),
     );
     replace(&mut value, "build", max_build(binary));
     replace(&mut value, "executions", Value::Array(vec![]));
@@ -483,6 +488,17 @@ fn max_header(binary: bool) -> Value {
             ("message", txt()),
         ]),
     );
+    replace(
+        &mut result,
+        "score",
+        obj([
+            ("kind", tok()),
+            ("aggregation", tok()),
+            ("value", max_score()),
+            ("max", max_score()),
+            ("full", b(false)),
+        ]),
+    );
     replace(&mut value, "result", result);
     replace(
         &mut value,
@@ -516,6 +532,27 @@ fn max_header(binary: bool) -> Value {
         ]),
     );
     value
+}
+/// Fourteen integer digits and nine fractional digits (report §3.2 `score`).
+fn max_score() -> Value {
+    s(format!("{}.{}", "9".repeat(14), "9".repeat(9)))
+}
+/// A batch `CheckConfig`; the interactive member is still `null` here.
+fn max_check_config() -> Value {
+    obj([
+        ("kind", tok()),
+        ("answer", tok()),
+        (
+            "scoring",
+            obj([
+                ("kind", tok()),
+                ("scale", max_score()),
+                ("aggregation", tok()),
+            ]),
+        ),
+        ("display", tok()),
+        ("interactive", Value::Null),
+    ])
 }
 fn max_counts() -> Value {
     fn fill(v: &mut Value) {
@@ -565,13 +602,13 @@ fn every_arithmetic_row_in_both_native_forms() {
         row(
             "tests entry with diagnostic",
             &max_test(max_signal(), max_diag_check()),
-            2868,
+            3002,
             3 * 1024,
         );
         row(
             "tests entry infrastructure",
             &max_test(max_class(), kind("passed")),
-            1723,
+            3002,
             3 * 1024,
         );
         row("aggregate", &max_aggregate(), 224, 256);
@@ -579,7 +616,10 @@ fn every_arithmetic_row_in_both_native_forms() {
         row("hook", &max_hook(), 244, 244);
         row("capture", &max_capture(binary), 13311, 13311);
         row("build", &max_build(binary), 6664, 6664);
-        row("report header", &max_header(binary), 53645, 64 * 1024);
+        row("report header", &max_header(binary), 119638, 128 * 1024);
+        // Without `roles[]` the header also fits the unshaped (compare-only)
+        // reservation's header term.
+        assert!(encode(&max_header(binary)).len() <= REPORT_HEADER_BOUND);
         row("Diagnostic", &max_diagnostic(binary), 1237, 1237);
         let mut refusal = super::refusal_value(&tests::refusal()).unwrap();
         let header = max_header(binary);
@@ -688,7 +728,7 @@ fn ten_thousand_full_structural_entries_fit_reserved_report() {
     }
     bytes.push(b'}');
     let len = bytes.len() - start;
-    let table = 53645 + 11946 * 10_000;
+    let table = 119638 + 12080 * 10_000;
     eprintln!("10000 executions: serialized={len}, table={table}, reserved={bound}");
     assert!(len <= table);
     assert!(len <= bound);

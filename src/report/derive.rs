@@ -1,6 +1,7 @@
 //! Pure first-matching-row derivations from report §§2.1–2.7.
 
 use super::OutputFile;
+use super::judging::*;
 use super::types::*;
 use crate::compare::{self, Diag};
 use crate::supervisor::{CaptureLoss, Cleanup, StopTrigger, Termination};
@@ -122,6 +123,9 @@ pub struct SkipConditions {
     pub job: JobKind,
     pub depends_on_unsucceeded_build: bool,
     pub earlier_retention_refusal: bool,
+    pub submit_not_succeeded: bool,
+    pub input_not_validated: bool,
+    pub not_eligible: bool,
     pub keep_going: bool,
     pub earlier_primary_failed: bool,
     pub intent_before_admission: bool,
@@ -141,6 +145,9 @@ pub fn validate_execution(
     if execution.invariant.is_none() {
         if let Coverage::Skipped { reason } = execution.coverage {
             let legal = match reason {
+                SkipReason::SubmitNotSucceeded => conditions.submit_not_succeeded,
+                SkipReason::InputNotValidated => conditions.input_not_validated,
+                SkipReason::NotEligible => conditions.not_eligible,
                 SkipReason::BuildNotSucceeded => conditions.depends_on_unsucceeded_build,
                 SkipReason::AdmissionClosed => conditions.earlier_retention_refusal,
                 SkipReason::StopPolicy => {
@@ -436,14 +443,20 @@ pub fn test_verdict(execution: &ExecutionResult, check: &CheckOutcome) -> TestVe
                 },
             ) => TestVerdict::Cancelled,
             (
-                SkipReason::BuildNotSucceeded | SkipReason::AdmissionClosed,
+                SkipReason::BuildNotSucceeded
+                | SkipReason::AdmissionClosed
+                | SkipReason::SubmitNotSucceeded,
                 CheckKind::NotAdmitted {
                     reason: CheckNotAdmitted::RunNotEligible,
                 },
             ) => TestVerdict::NotRun { reason },
-            (SkipReason::StopPolicy | SkipReason::JobNotEligible, _) => {
-                internal(Invariant::TestCoverage)
-            }
+            (
+                SkipReason::StopPolicy
+                | SkipReason::JobNotEligible
+                | SkipReason::InputNotValidated
+                | SkipReason::NotEligible,
+                _,
+            ) => internal(Invariant::TestCoverage),
             _ => internal(Invariant::TestCheck),
         };
     }
@@ -552,6 +565,7 @@ pub fn hook_outcome(execution: &ExecutionResult) -> HookOutcome {
 #[derive(Clone, Copy, Debug)]
 pub struct JobInput<'a> {
     pub kind: JobKind,
+    pub scoring: Scoring,
     pub build: Option<&'a BuildResult>,
     pub primary: &'a [ExecutionResult],
     pub tests: &'a [TestVerdict],
@@ -627,6 +641,9 @@ fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
             .tests
             .iter()
             .any(|v| matches!(v, TestVerdict::InternalError { .. }))
+        || input.scoring == Scoring::PassFail
+            && input.tests.iter().any(|v| matches!(v, TestVerdict::Scored))
+        || test_score(input.scoring, &TestVerdict::Passed, None).is_err()
         || input.kind != JobKind::Test && !input.tests.is_empty()
         || input.kind == JobKind::Test && (input.selected_tests == 0) != input.tests.is_empty()
     {
@@ -661,11 +678,14 @@ fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
     }
     for (token, verdict) in [
         ("wall_deadline", JobVerdict::WallDeadline),
+        ("session_limit", JobVerdict::SessionLimit),
+        ("idle", JobVerdict::Idle),
         ("output_budget", JobVerdict::OutputBudget),
         ("signal", JobVerdict::Signal),
         ("nonzero_exit", JobVerdict::NonzeroExit),
         ("checker_failed", JobVerdict::CheckerFailed),
         ("wrong_answer", JobVerdict::WrongAnswer),
+        ("presentation_error", JobVerdict::PresentationError),
         ("unchecked", JobVerdict::Unchecked),
     ] {
         if relevant(token) {
@@ -675,6 +695,13 @@ fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
     if input.kind == JobKind::Test {
         if input.selected_tests == 0 {
             JobVerdict::NoTests
+        } else if input
+            .tests
+            .iter()
+            .all(|v| matches!(v, TestVerdict::Passed | TestVerdict::Scored))
+            && matches!(input.scoring, Scoring::Points { .. })
+        {
+            JobVerdict::Scored
         } else if input.tests.iter().all(|v| matches!(v, TestVerdict::Passed)) {
             JobVerdict::Passed
         } else {
@@ -734,6 +761,10 @@ pub fn coverage_counts(
     for verdict in tests {
         counts.tests += 1;
         let field = match verdict {
+            TestVerdict::PresentationError => &mut counts.by_verdict.presentation_error,
+            TestVerdict::Scored => &mut counts.by_verdict.scored,
+            TestVerdict::SessionLimit => &mut counts.by_verdict.session_limit,
+            TestVerdict::Idle => &mut counts.by_verdict.idle,
             TestVerdict::Passed => &mut counts.by_verdict.passed,
             TestVerdict::WrongAnswer => &mut counts.by_verdict.wrong_answer,
             TestVerdict::Unchecked => &mut counts.by_verdict.unchecked,
@@ -750,4 +781,463 @@ pub fn coverage_counts(
         *field += 1;
     }
     counts
+}
+
+/// Per-test points depend on the final verdict, never a diagnostic check.
+pub fn test_score(
+    scoring: Scoring,
+    verdict: &TestVerdict,
+    raw: Option<Score>,
+) -> Result<Option<Score>, Invariant> {
+    let Scoring::Points { scale, .. } = scoring else {
+        return Ok(None);
+    };
+    if scale.nanounits() < Score::UNIT
+        || scale.nanounits() % Score::UNIT != 0
+        || scale.nanounits() > 1_000_000_000 * Score::UNIT
+    {
+        return Err(Invariant::CheckEvidence);
+    }
+    Ok(match verdict {
+        TestVerdict::Passed => Some(scale),
+        TestVerdict::Scored => Some(
+            raw.filter(|v| *v <= scale)
+                .ok_or(Invariant::CheckEvidence)?,
+        ),
+        TestVerdict::WrongAnswer
+        | TestVerdict::PresentationError
+        | TestVerdict::WallDeadline
+        | TestVerdict::SessionLimit
+        | TestVerdict::Idle
+        | TestVerdict::OutputBudget
+        | TestVerdict::Signal
+        | TestVerdict::NonzeroExit => Score::new(0),
+        _ => None,
+    })
+}
+/// Checked arithmetic also makes malformed producer input an invariant.
+pub fn aggregate_score(
+    scoring: Scoring,
+    scores: &[Option<Score>],
+) -> Result<Option<AggregateScore>, Invariant> {
+    let Scoring::Points { scale, aggregation } = scoring else {
+        return Ok(None);
+    };
+    test_score(scoring, &TestVerdict::Passed, None)?;
+    if scores.len() > 10_000 || scores.iter().flatten().any(|v| *v > scale) {
+        return Err(Invariant::JobEvidence);
+    }
+    if scores.is_empty() {
+        return Ok(Some(AggregateScore::NoTests));
+    }
+    let missing = scores.iter().filter(|v| v.is_none()).count() as u32;
+    if missing != 0 {
+        return Ok(Some(AggregateScore::Incomplete {
+            aggregation,
+            missing,
+        }));
+    }
+    let (value, max) = match aggregation {
+        Aggregation::Sum => (
+            scores.iter().flatten().map(|v| v.nanounits()).sum(),
+            scale.nanounits() * scores.len() as i128,
+        ),
+        Aggregation::Min => (
+            scores
+                .iter()
+                .flatten()
+                .map(|v| v.nanounits())
+                .min()
+                .ok_or(Invariant::JobEvidence)?,
+            scale.nanounits(),
+        ),
+    };
+    Ok(Some(AggregateScore::Points {
+        aggregation,
+        value: Score::new(value).ok_or(Invariant::JobEvidence)?,
+        max: Score::new(max).ok_or(Invariant::JobEvidence)?,
+        full: value == max,
+    }))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BatchInput<'a> {
+    pub validator: Option<&'a JudgeInput>,
+    pub solution: &'a ExecutionResult,
+    /// None selects B8's built-in comparison path.
+    pub checker: Option<&'a JudgeInput>,
+    pub scoring: Scoring,
+    pub admission: CheckAdmission,
+    pub answer_present: bool,
+    pub comparison: &'a Comparison,
+    pub output_file: Option<&'a OutputFile>,
+}
+fn judged(outcome: JudgedCheck) -> CheckKind {
+    CheckKind::Judged {
+        outcome: Box::new(outcome),
+    }
+}
+fn judge_failure(class: JudgeFailClass, role: JudgeRole, reason: JudgeReason) -> CheckKind {
+    judged(JudgedCheck::JudgeFailed {
+        class,
+        role,
+        reason,
+    })
+}
+fn batch_pair(kind: CheckKind, verdict: TestVerdict) -> (CheckOutcome, TestVerdict) {
+    (
+        CheckOutcome {
+            kind,
+            diagnostic: false,
+        },
+        verdict,
+    )
+}
+fn batch_internal() -> (CheckOutcome, TestVerdict) {
+    batch_pair(
+        CheckKind::InternalError {
+            invariant: Invariant::CheckEvidence,
+        },
+        TestVerdict::InternalError {
+            invariant: Invariant::CheckEvidence,
+        },
+    )
+}
+/// B1–B4 and B9–B12 share this coverage prefix, before profile decisions.
+fn batch_coverage(execution: &ExecutionResult) -> Option<(CheckOutcome, TestVerdict)> {
+    let (reason, verdict) = match execution.coverage {
+        Coverage::Skipped {
+            reason: SkipReason::Cancelled,
+        } => (CheckNotAdmitted::Cancelled, TestVerdict::Cancelled),
+        Coverage::Skipped { reason }
+            if matches!(
+                reason,
+                SkipReason::BuildNotSucceeded
+                    | SkipReason::AdmissionClosed
+                    | SkipReason::SubmitNotSucceeded
+            ) =>
+        {
+            (
+                CheckNotAdmitted::RunNotEligible,
+                TestVerdict::NotRun { reason },
+            )
+        }
+        Coverage::NotStarted {
+            reason: NotStartedReason::CancelledBeforeStart,
+        }
+        | Coverage::Transferred => (CheckNotAdmitted::RunNotEligible, TestVerdict::Cancelled),
+        Coverage::NotStarted { .. } => (
+            CheckNotAdmitted::RunNotEligible,
+            TestVerdict::Infrastructure,
+        ),
+        _ => match execution.class {
+            Some(RunClass::Infrastructure { .. }) => (
+                CheckNotAdmitted::RunNotEligible,
+                TestVerdict::Infrastructure,
+            ),
+            Some(RunClass::Cancelled) => (CheckNotAdmitted::RunNotEligible, TestVerdict::Cancelled),
+            _ => return None,
+        },
+    };
+    Some(batch_pair(CheckKind::NotAdmitted { reason }, verdict))
+}
+/// B18–B37: profile, crash, cleanup, extraction, syntax, protocol, matrix.
+/// `read` carries finalized stage-2–4 observations; parsing belongs to producers.
+fn checker_outcome(checker: &JudgeInput, scoring: Scoring) -> (CheckOutcome, TestVerdict) {
+    use JudgeFailClass as C;
+    use JudgeReason as R;
+    let Some(class) = checker.execution.class.as_ref() else {
+        return batch_internal();
+    };
+    let failed = |class, reason| {
+        batch_pair(
+            judge_failure(class, JudgeRole::Checker, reason),
+            TestVerdict::CheckerFailed,
+        )
+    };
+    if checker.profile == JudgeProfile::Simple {
+        if !matches!(
+            class,
+            RunClass::ExitedZero | RunClass::NonzeroExit { code: 1 }
+        ) {
+            return JudgeReason::from_class(class)
+                .map_or_else(batch_internal, |reason| failed(C::Crashed, reason));
+        }
+    } else if matches!(
+        class,
+        RunClass::Signal { .. } | RunClass::WallDeadline | RunClass::OutputBudget { .. }
+    ) {
+        return failed(
+            C::Crashed,
+            JudgeReason::from_class(class).unwrap_or(R::ExitCode),
+        );
+    }
+    if checker.cleanup_unverified {
+        return batch_pair(
+            judged(JudgedCheck::Unchecked {
+                reason: CheckingUnchecked::CheckingUnverified,
+            }),
+            TestVerdict::Unchecked,
+        );
+    }
+    let reject = |fail| {
+        batch_pair(
+            judged(JudgedCheck::Rejected {
+                fail,
+                role: JudgeRole::Checker,
+            }),
+            if fail == JudgeFail::WrongAnswer {
+                TestVerdict::WrongAnswer
+            } else {
+                TestVerdict::PresentationError
+            },
+        )
+    };
+    if checker.profile == JudgeProfile::Simple {
+        return if matches!(class, RunClass::ExitedZero) {
+            batch_pair(CheckKind::Passed, TestVerdict::Passed)
+        } else {
+            reject(JudgeFail::WrongAnswer)
+        };
+    }
+    let (outcome, raw) = match &checker.read {
+        JudgeRead::Io { os_error } => {
+            return batch_pair(
+                CheckKind::CheckError {
+                    os_error: *os_error,
+                },
+                TestVerdict::Infrastructure,
+            );
+        }
+        JudgeRead::Invalid(reason)
+            if matches!(
+                reason,
+                R::ReportMissing
+                    | R::ReportNotRegular
+                    | R::ReportUnreadable
+                    | R::ReportTooLarge
+                    | R::ReportUndecodable
+                    | R::ReportMalformed
+                    | R::ReportSchema
+                    | R::PointsInvalid
+            ) =>
+        {
+            return failed(C::ReportInvalid, *reason);
+        }
+        // Points outside a `points` outcome are a stage-4 schema error (B28)
+        // that the producer classifies; reaching here they are an orphan.
+        JudgeRead::Parsed { outcome, raw }
+            if raw.is_none() || *outcome == TestlibOutcome::Points =>
+        {
+            (*outcome, *raw)
+        }
+        _ => return batch_internal(),
+    };
+    if outcome == TestlibOutcome::Points
+        && raw.is_none_or(|raw| match scoring {
+            Scoring::Points { scale, .. } => raw > scale,
+            Scoring::PassFail => false,
+        })
+    {
+        return failed(C::ReportInvalid, R::PointsInvalid);
+    }
+    let exit = match class {
+        RunClass::ExitedZero => 0,
+        RunClass::NonzeroExit { code } => *code,
+        _ => return batch_internal(),
+    };
+    if ![0, 1, 2, 3, 7].contains(&exit) {
+        return failed(C::ProtocolUnsupported, R::ExitUnsupported);
+    }
+    if outcome == TestlibOutcome::Unsupported {
+        return failed(C::ProtocolUnsupported, R::OutcomeUnsupported);
+    }
+    if outcome == TestlibOutcome::Points && scoring == Scoring::PassFail {
+        return failed(C::ProtocolUnsupported, R::PointsNotEnabled);
+    }
+    const MATRIX: &[(i64, TestlibOutcome)] = &[
+        (0, TestlibOutcome::Accepted),
+        (1, TestlibOutcome::WrongAnswer),
+        (2, TestlibOutcome::PresentationError),
+        (3, TestlibOutcome::Fail),
+        (7, TestlibOutcome::Points),
+    ];
+    if !MATRIX.contains(&(exit, outcome)) {
+        return failed(C::ReportInvalid, R::Disagreement);
+    }
+    match outcome {
+        TestlibOutcome::Accepted => batch_pair(CheckKind::Passed, TestVerdict::Passed),
+        TestlibOutcome::WrongAnswer => reject(JudgeFail::WrongAnswer),
+        TestlibOutcome::PresentationError => reject(JudgeFail::PresentationError),
+        TestlibOutcome::Fail => failed(C::DeclaredFail, R::DeclaredFail),
+        TestlibOutcome::Points => match (raw, scoring) {
+            (Some(raw), Scoring::Points { scale, .. }) => batch_pair(
+                judged(JudgedCheck::Scored {
+                    raw,
+                    scale,
+                    role: JudgeRole::Checker,
+                }),
+                TestVerdict::Scored,
+            ),
+            _ => batch_internal(),
+        },
+        TestlibOutcome::Unsupported => batch_internal(),
+    }
+}
+/// First matching batch row, over evidence only. Orphans never invent success.
+pub fn batch_outcome(input: &BatchInput<'_>) -> (CheckOutcome, TestVerdict) {
+    if [input.validator, input.checker]
+        .into_iter()
+        .flatten()
+        .any(|v| execution_invariant(&v.execution).is_some())
+        || execution_invariant(input.solution).is_some()
+    {
+        return batch_internal();
+    }
+    if let Some(validator) = input.validator {
+        // A transferred validator has class `cancelled`: B4.
+        if let Some(pair) = batch_coverage(&validator.execution) {
+            return pair;
+        }
+        match validator.execution.class.as_ref() {
+            Some(RunClass::ExitedZero) => {}
+            Some(class) => {
+                let (failure, reason) = if validator.profile == JudgeProfile::Testlib {
+                    (JudgeFailClass::TestDataError, JudgeReason::ValidationFailed)
+                } else if matches!(class, RunClass::NonzeroExit { code: 1 }) {
+                    (JudgeFailClass::TestDataError, JudgeReason::InvalidInput)
+                } else if let Some(reason) = JudgeReason::from_class(class) {
+                    (JudgeFailClass::Crashed, reason)
+                } else {
+                    return batch_internal();
+                };
+                return batch_pair(
+                    judge_failure(failure, JudgeRole::Validator, reason),
+                    TestVerdict::CheckerFailed,
+                );
+            }
+            None => return batch_internal(),
+        }
+    }
+    let Some(checker) = input.checker else {
+        // B8: kind `compare` keeps §§2.4, 2.5 and 2.15 unchanged.
+        return if let Some(output) = input.output_file {
+            let (_, check, verdict) = file_test_outcome(
+                input.solution,
+                input.admission,
+                input.answer_present,
+                input.comparison,
+                output,
+            );
+            (check, verdict)
+        } else {
+            let check = check_outcome(
+                input.solution,
+                input.admission,
+                input.answer_present,
+                input.comparison,
+            );
+            let verdict = test_verdict(input.solution, &check);
+            (check, verdict)
+        };
+    };
+    if let Some(pair) = batch_coverage(input.solution) {
+        return pair;
+    }
+    let mut solution = input.solution.clone();
+    if let (Some(class), Some(output)) = (&solution.class, input.output_file) {
+        solution.class = Some(file_test_class(class, output));
+    }
+    let Some(class) = solution.class.as_ref() else {
+        return batch_internal();
+    };
+    if checker.execution.coverage
+        == (Coverage::Skipped {
+            reason: SkipReason::Cancelled,
+        })
+    {
+        return batch_pair(
+            CheckKind::NotAdmitted {
+                reason: CheckNotAdmitted::Cancelled,
+            },
+            TestVerdict::Cancelled,
+        );
+    }
+    if matches!(class, RunClass::ExitedZero)
+        && checker.execution.coverage
+            == (Coverage::Skipped {
+                reason: SkipReason::AdmissionClosed,
+            })
+    {
+        return batch_pair(
+            CheckKind::NotAdmitted {
+                reason: CheckNotAdmitted::RunNotEligible,
+            },
+            TestVerdict::NotRun {
+                reason: SkipReason::AdmissionClosed,
+            },
+        );
+    }
+    if checker.execution.coverage.is_cancelled()
+        || checker.execution.class == Some(RunClass::Cancelled)
+    {
+        return batch_pair(
+            judged(JudgedCheck::Unchecked {
+                reason: CheckingUnchecked::CheckingInterrupted,
+            }),
+            TestVerdict::Cancelled,
+        );
+    }
+    let collection = input
+        .output_file
+        .filter(|v| !matches!(v, OutputFile::Collected { .. }));
+    let ineligible = matches!(
+        checker.execution.coverage,
+        Coverage::Skipped {
+            reason: SkipReason::AdmissionClosed
+        } | Coverage::NotStarted { .. }
+    ) || matches!(
+        checker.execution.class,
+        Some(RunClass::Infrastructure { .. })
+    );
+    let not_eligible = checker.execution.coverage
+        == (Coverage::Skipped {
+            reason: SkipReason::NotEligible,
+        });
+    let mut pair = if let (true, Some(output)) = (not_eligible, collection) {
+        // B14a, or B16's diagnostic collection check.
+        let (_, check, verdict) = file_test_outcome(
+            &solution,
+            CheckAdmission::NoIntent,
+            false,
+            &Comparison::NotRun,
+            output,
+        );
+        (check, verdict)
+    } else if ineligible {
+        batch_pair(
+            CheckKind::NotAdmitted {
+                reason: CheckNotAdmitted::RunNotEligible,
+            },
+            TestVerdict::Infrastructure,
+        )
+    } else if checker.execution.coverage == Coverage::Started {
+        checker_outcome(checker, input.scoring)
+    } else {
+        return batch_internal();
+    };
+    if matches!(pair.1, TestVerdict::InternalError { .. }) {
+        return pair;
+    }
+    if class.diagnostic() {
+        pair.0.diagnostic = !matches!(pair.0.kind, CheckKind::NotAdmitted { .. });
+        pair.1 = match class {
+            RunClass::WallDeadline => TestVerdict::WallDeadline,
+            RunClass::OutputBudget { .. } => TestVerdict::OutputBudget,
+            RunClass::Signal { .. } => TestVerdict::Signal,
+            RunClass::NonzeroExit { .. } => TestVerdict::NonzeroExit,
+            _ => return batch_internal(),
+        };
+    }
+    pair
 }

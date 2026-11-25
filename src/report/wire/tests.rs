@@ -108,6 +108,9 @@ pub(super) fn passing() -> e::ReportData {
         }),
         verdict: Some(r::TestVerdict::Passed),
         output_file: None,
+        score: None,
+        validation: None,
+        judges: Vec::new(),
     };
     let counts = r::Counts {
         primary: r::Cov {
@@ -136,6 +139,8 @@ pub(super) fn passing() -> e::ReportData {
                 dir: "problems/a".into(),
             }),
             target: None,
+            score: None,
+            judge_fingerprint: None,
             fingerprints: None,
             fact: Some(Fact {
                 outcome: FactOutcome::Published,

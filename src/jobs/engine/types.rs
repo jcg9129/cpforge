@@ -231,6 +231,9 @@ pub struct TestReport {
     pub check: Option<report::CheckOutcome>,
     pub verdict: Option<report::TestVerdict>,
     pub output_file: Option<report::OutputFile>,
+    pub score: Option<report::Score>,
+    pub validation: Option<report::Validation>,
+    pub judges: Vec<report::Judge>,
 }
 
 #[derive(Clone, Debug)]

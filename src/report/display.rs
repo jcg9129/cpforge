@@ -143,6 +143,10 @@ pub enum LabelToken {
     Internal,
     NotRun,
     CompileError,
+    PresentationError,
+    Points,
+    SessionLimit,
+    Idle,
 }
 impl LabelToken {
     pub const fn wire_token(self) -> &'static str {
@@ -159,6 +163,10 @@ impl LabelToken {
             Self::Internal => "INTERNAL",
             Self::NotRun => "NOT RUN",
             Self::CompileError => "CE",
+            Self::PresentationError => "PE",
+            Self::Points => "SCORE",
+            Self::SessionLimit => "TLE",
+            Self::Idle => "IDLE",
         }
     }
 }
@@ -168,6 +176,7 @@ pub enum Qualifier {
     CleanupNotVerified,
     FirstDifference(Box<Diag>),
     NoAnswer,
+    PresentationError,
     InvalidAnswer,
     WallDeadline {
         deadline: Option<Duration>,
@@ -206,6 +215,7 @@ impl Qualifier {
         match self {
             Self::CleanupNotVerified => Some("cleanup not verified"),
             Self::NoAnswer => Some("no answer"),
+            Self::PresentationError => Some("presentation error"),
             Self::InvalidAnswer => Some("invalid answer"),
             Self::OutputMatched => Some("output matched"),
             _ => None,
@@ -217,6 +227,7 @@ impl Qualifier {
             Self::CleanupNotVerified => "cleanup_not_verified",
             Self::FirstDifference(_) => "first_difference",
             Self::NoAnswer => "no_answer",
+            Self::PresentationError => "presentation_error",
             Self::InvalidAnswer => "invalid_answer",
             Self::WallDeadline { .. } => "wall_deadline",
             Self::OutputBudget { .. } => "output_budget",
@@ -280,6 +291,10 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
             check,
         } => {
             let (token, invariant, reason) = match verdict {
+                TestVerdict::PresentationError => (LabelToken::PresentationError, None, None),
+                TestVerdict::Scored => (LabelToken::Points, None, None),
+                TestVerdict::SessionLimit => (LabelToken::SessionLimit, None, None),
+                TestVerdict::Idle => (LabelToken::Idle, None, None),
                 TestVerdict::Passed => (LabelToken::Ok, None, None),
                 TestVerdict::WrongAnswer => (LabelToken::WrongAnswer, None, None),
                 TestVerdict::Unchecked => (LabelToken::Unchecked, None, None),
@@ -409,6 +424,10 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
                 JobVerdict::WrongAnswer => Some(LabelToken::WrongAnswer),
                 JobVerdict::Unchecked => Some(LabelToken::Unchecked),
                 JobVerdict::NoTests => None,
+                JobVerdict::PresentationError => Some(LabelToken::PresentationError),
+                JobVerdict::Scored => Some(LabelToken::Points),
+                JobVerdict::SessionLimit => Some(LabelToken::SessionLimit),
+                JobVerdict::Idle => Some(LabelToken::Idle),
                 JobVerdict::Passed | JobVerdict::Succeeded => Some(LabelToken::Ok),
             },
             None,
@@ -428,6 +447,9 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
         if context.cleanup_unverified {
             qualifiers.push(Qualifier::CleanupNotVerified);
         }
+    }
+    if token == Some(LabelToken::PresentationError) {
+        qualifiers.push(Qualifier::PresentationError);
     }
     if token == Some(LabelToken::Unchecked) {
         qualifiers.push(Qualifier::NoAnswer);
@@ -531,6 +553,20 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
             .map(Qualifier::Measurement),
     );
     DisplayLabel { token, qualifiers }
+}
+/// A profile changes only the human label; raw verdicts remain unchanged.
+pub fn label_for_profile(
+    subject: LabelSubject<'_>,
+    context: &DisplayContext,
+    profile: super::DisplayProfile,
+) -> DisplayLabel {
+    let mut display = label(subject, context);
+    if profile == super::DisplayProfile::JudgeCf
+        && display.token == Some(LabelToken::PresentationError)
+    {
+        display.token = Some(LabelToken::WrongAnswer);
+    }
+    display
 }
 fn class_label(class: &RunClass) -> LabelToken {
     match class {

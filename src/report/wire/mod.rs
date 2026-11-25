@@ -13,6 +13,7 @@
 mod artifacts;
 mod events;
 mod io;
+mod judging;
 mod model;
 mod native;
 pub mod read;
@@ -105,6 +106,17 @@ pub fn report_reservation(
 }
 pub(crate) fn report_data_bound(v: &e::ReportData) -> Result<usize> {
     let io = v.details.target.as_ref().and_then(|v| v.io.as_ref());
+    for test in &v.tests {
+        if let Some(shape) = v.details.shape {
+            if test.validation.is_some() != shape.validator
+                || test.judges.len() != usize::from(shape.judges)
+            {
+                return Err(Error("judge evidence does not match planned shape"));
+            }
+        } else if test.validation.is_some() || !test.judges.is_empty() {
+            return Err(Error("judged report has no planned shape"));
+        }
+    }
     // A file-I/O report is bounded by the shape its plan reserved for, never
     // by a shape inferred afterwards (that could exceed the reservation).
     if io.is_some() && v.details.shape.is_none() {
@@ -139,6 +151,19 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         if test.output_file.is_some() != io.is_some_and(|io| io.output.is_some()) {
             return Err(Error("output-file evidence does not match target I/O"));
         }
+    }
+    // The written `target.check` (default `pass_fail` with a comparator)
+    // decides whether scores may appear (report §2.13).
+    let pass_fail = meta.target.as_ref().is_some_and(|target| {
+        target
+            .check
+            .as_ref()
+            .map_or(target.compare.is_some(), |check| {
+                check.scoring == crate::report::Scoring::PassFail
+            })
+    });
+    if pass_fail && (meta.score.is_some() || v.tests.iter().any(|test| test.score.is_some())) {
+        return Err(Error("pass_fail report has a score"));
     }
     if v.schema != 1 || v.document != "job_report" || v.outcome != "finished" {
         return Err(Error("expected finalized schema-1 job report"));
@@ -219,7 +244,11 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         (
             "fingerprints",
             opt(meta.fingerprints.as_ref(), |(source, tests)| {
-                obj([("source", hex(source)), ("tests", hex(tests))])
+                obj([
+                    ("source", hex(source)),
+                    ("tests", hex(tests)),
+                    ("judge", opt(meta.judge_fingerprint.as_ref(), |v| hex(v))),
+                ])
             }),
         ),
         (
@@ -230,23 +259,12 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
+        ("roles", Value::Array(vec![])),
         (
             "executions",
             checked_array(&v.executions, 10_000, run::execution)?,
         ),
-        (
-            "tests",
-            checked_array(&v.tests, 10_000, |v| {
-                let mut value = test(v)?;
-                if io.is_some() && v.output_file.is_none() {
-                    let Value::Object(fields) = &mut value else {
-                        unreachable!()
-                    };
-                    fields.push(("output_file", Value::Null));
-                }
-                Ok(value)
-            })?,
-        ),
+        ("tests", checked_array(&v.tests, 10_000, test)?),
         (
             "aggregates",
             checked_array(&v.aggregates, 10_000, aggregate)?,
@@ -260,6 +278,7 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
+        ("submission", Value::Null),
         (
             "hooks",
             Value::Array(
@@ -291,6 +310,7 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         ("events", obj([("dropped", u(v.events.dropped))])),
         ("timing", timing(&v.timing)?),
         ("refusal", Value::Null),
+        ("stress", Value::Null),
     ];
     if let Some(persist) = persist {
         fields.push(("persistence", persistence(persist)?));
@@ -347,6 +367,7 @@ fn refusal_value(v: &Refusal) -> Result<Value> {
         ("pre_delivery_exit", pre_exit(v.pre_delivery_exit)?),
         ("counts", counts(crate::report::Counts::default())),
         ("internal", Value::Null),
+        ("score", Value::Null),
     ]);
     document(
         "job_report",
@@ -381,11 +402,13 @@ fn refusal_value(v: &Refusal) -> Result<Value> {
             ("capture", Value::Null),
             ("fingerprints", Value::Null),
             ("build", Value::Null),
+            ("roles", Value::Array(vec![])),
             ("executions", Value::Array(vec![])),
             ("tests", Value::Array(vec![])),
             ("aggregates", Value::Array(vec![])),
             ("result", result),
             ("fact", Value::Null),
+            ("submission", Value::Null),
             ("hooks", Value::Array(vec![])),
             ("hooks_dropped", n(0)),
             (
@@ -419,6 +442,7 @@ fn refusal_value(v: &Refusal) -> Result<Value> {
                     ),
                 ]),
             ),
+            ("stress", Value::Null),
             ("persistence", persistence(&ReportPersistence::Refusal)?),
         ],
     )
@@ -486,5 +510,7 @@ pub fn encode_capture_manifest(
 mod bounds;
 #[cfg(test)]
 mod io_tests;
+#[cfg(test)]
+mod judging_tests;
 #[cfg(test)]
 mod tests;

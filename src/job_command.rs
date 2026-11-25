@@ -724,6 +724,7 @@ pub fn run_with_config(
                     kind,
                     JobVerdict::Cancelled,
                     refusal.cancellation,
+                    None,
                 )
             } else {
                 crate::jobs::engine::PreDeliveryExit {

@@ -10,6 +10,7 @@ pub mod derive;
 mod display;
 mod documents;
 mod file_io;
+mod judging;
 mod types;
 pub mod wire;
 
@@ -17,7 +18,10 @@ pub use derive::*;
 pub use display::*;
 pub use documents::*;
 pub use file_io::*;
+pub use judging::*;
 pub use types::*;
 
+#[cfg(test)]
+mod batch_tests;
 #[cfg(test)]
 mod tests;

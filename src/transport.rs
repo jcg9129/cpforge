@@ -337,6 +337,10 @@ pub fn delivered_status(
             delivery.as_ref().err().map(Error::class)
         },
         verdict: Some(report.data().result.verdict),
+        score_full: matches!(
+            report.data().details.score,
+            Some(crate::report::AggregateScore::Points { full: true, .. })
+        ),
         cancellation: report.data().result.cancellation.is_some(),
         machine_output: mode.requested(),
         delivery_failed: delivery

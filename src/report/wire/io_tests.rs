@@ -444,6 +444,7 @@ fn file_report() -> e::ReportData {
         profile: None,
         build_free: true,
         compare: Some(crate::config::Comparator::Tokens),
+        check: Some(crate::report::CheckConfig::default()),
         io: Some(config(Some("in.txt"), Some("out.txt"))),
         run_deadline: None,
         published_limits: None,
@@ -670,7 +671,7 @@ fn file_io_labels_keep_wa_and_diagnostic_class_labels() {
         (r::JobVerdict::Infrastructure, 10),
     ] {
         assert_eq!(
-            e::pre_delivery_exit(r::JobKind::Test, verdict, None).code,
+            e::pre_delivery_exit(r::JobKind::Test, verdict, None, None).code,
             exit
         );
     }

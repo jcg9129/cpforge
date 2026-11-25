@@ -56,7 +56,8 @@ impl TryFrom<supervisor::session::StartFailureKind> for NotStartedReason {
 tokens! {
     pub enum SkipReason {
         BuildNotSucceeded => "build_not_succeeded", AdmissionClosed => "admission_closed",
-        StopPolicy => "stop_policy", Cancelled => "cancelled", JobNotEligible => "job_not_eligible"
+        SubmitNotSucceeded => "submit_not_succeeded", InputNotValidated => "input_not_validated",
+        NotEligible => "not_eligible", StopPolicy => "stop_policy", Cancelled => "cancelled", JobNotEligible => "job_not_eligible"
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -486,6 +487,7 @@ impl From<&Diag> for ComparisonReason {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckKind {
+    Judged { outcome: Box<super::JudgedCheck> },
     NotAdmitted { reason: CheckNotAdmitted },
     Unchecked,
     Passed,
@@ -496,8 +498,14 @@ pub enum CheckKind {
     InternalError { invariant: Invariant },
 }
 impl CheckKind {
-    pub const fn wire_token(&self) -> &'static str {
+    pub fn wire_token(&self) -> &'static str {
         match self {
+            Self::Judged { outcome } => match outcome.as_ref() {
+                super::JudgedCheck::Rejected { .. } => "rejected",
+                super::JudgedCheck::Scored { .. } => "scored",
+                super::JudgedCheck::JudgeFailed { .. } => "judge_failed",
+                super::JudgedCheck::Unchecked { .. } => "unchecked",
+            },
             Self::NotAdmitted { .. } => "not_admitted",
             Self::Unchecked => "unchecked",
             Self::Passed => "passed",
@@ -574,6 +582,10 @@ impl Comparison {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestVerdict {
+    PresentationError,
+    Scored,
+    SessionLimit,
+    Idle,
     Passed,
     WrongAnswer,
     Unchecked,
@@ -590,6 +602,10 @@ pub enum TestVerdict {
 impl TestVerdict {
     pub const fn wire_token(&self) -> &'static str {
         match self {
+            Self::PresentationError => "presentation_error",
+            Self::Scored => "scored",
+            Self::SessionLimit => "session_limit",
+            Self::Idle => "idle",
             Self::Passed => "passed",
             Self::WrongAnswer => "wrong_answer",
             Self::Unchecked => "unchecked",
@@ -632,7 +648,8 @@ tokens! {
         InternalError => "internal_error", Infrastructure => "infrastructure", Cancelled => "cancelled",
         BuildFailed => "build_failed", WallDeadline => "wall_deadline", OutputBudget => "output_budget", Signal => "signal",
         NonzeroExit => "nonzero_exit", CheckerFailed => "checker_failed", WrongAnswer => "wrong_answer",
-        Unchecked => "unchecked", NoTests => "no_tests", Passed => "passed", Succeeded => "succeeded"
+        PresentationError => "presentation_error", Scored => "scored",
+        SessionLimit => "session_limit", Idle => "idle", Unchecked => "unchecked", NoTests => "no_tests", Passed => "passed", Succeeded => "succeeded"
     }
 }
 /// The caller supplies the first recorded internal failure, preserving its locus.
@@ -690,6 +707,10 @@ pub struct ByClass {
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ByVerdict {
+    pub presentation_error: u32,
+    pub scored: u32,
+    pub session_limit: u32,
+    pub idle: u32,
     pub passed: u32,
     pub wrong_answer: u32,
     pub unchecked: u32,

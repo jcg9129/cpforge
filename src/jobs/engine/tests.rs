@@ -1267,6 +1267,9 @@ fn orphan_skip_conditions_preserve_coverage_and_name_execution_locus() {
             job: JobKind::Cmd,
             depends_on_unsucceeded_build: false,
             earlier_retention_refusal: false,
+            submit_not_succeeded: false,
+            input_not_validated: false,
+            not_eligible: false,
             keep_going: true,
             earlier_primary_failed: false,
             intent_before_admission: false,
@@ -1278,6 +1281,7 @@ fn orphan_skip_conditions_preserve_coverage_and_name_execution_locus() {
     assert_eq!(counts.primary.skipped, 1);
     assert_eq!(counts.primary.invalid, 1);
     let result = report::job_verdict(&report::JobInput {
+        scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Cmd,
         build: None,
         primary: &[execution],
@@ -1813,7 +1817,10 @@ fn pre_delivery_status_uses_report_precedence_and_ignores_persistence() {
         (JobVerdict::Passed, 0),
         (JobVerdict::Cancelled, 6),
     ] {
-        assert_eq!(pre_delivery_exit(JobKind::Test, verdict, None).code, code);
+        assert_eq!(
+            pre_delivery_exit(JobKind::Test, verdict, None, None).code,
+            code
+        );
     }
     let intent = Cancellation {
         requested_at: Duration::ZERO,
@@ -1821,26 +1828,32 @@ fn pre_delivery_status_uses_report_precedence_and_ignores_persistence() {
         phase: CancelPhase::Closure,
     };
     assert_eq!(
-        pre_delivery_exit(JobKind::Test, JobVerdict::Infrastructure, Some(intent)).code,
+        pre_delivery_exit(
+            JobKind::Test,
+            JobVerdict::Infrastructure,
+            Some(intent),
+            None
+        )
+        .code,
         6
     );
     assert_eq!(
-        pre_delivery_exit(JobKind::Test, JobVerdict::InternalError, Some(intent)).code,
+        pre_delivery_exit(JobKind::Test, JobVerdict::InternalError, Some(intent), None).code,
         70
     );
     assert_eq!(
-        pre_delivery_exit(JobKind::Hook, JobVerdict::Infrastructure, None).code,
+        pre_delivery_exit(JobKind::Hook, JobVerdict::Infrastructure, None, None).code,
         0
     );
     assert_eq!(
-        pre_delivery_exit(JobKind::Hook, JobVerdict::Cancelled, None).code,
+        pre_delivery_exit(JobKind::Hook, JobVerdict::Cancelled, None, None).code,
         6
     );
     let console = Cancellation {
         source: CancelSource::Console,
         ..intent
     };
-    let status = pre_delivery_exit(JobKind::Test, JobVerdict::Passed, Some(console));
+    let status = pre_delivery_exit(JobKind::Test, JobVerdict::Passed, Some(console), None);
     assert_eq!(status.code, if cfg!(unix) { 130 } else { 6 });
     assert_eq!(
         status.reraise,

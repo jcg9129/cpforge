@@ -1,5 +1,9 @@
 //! Persisted reports need only the version prefix. Conformance readers also
 //! detect duplicate members and validate the supported file-I/O extensions.
+pub use super::judging::{
+    read_aggregate_score, read_check_config, read_judge, read_judge_result, read_judged_check,
+    read_validation,
+};
 use super::value::{Error, Result};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::collections::BTreeSet;
@@ -88,6 +92,7 @@ pub fn read_document_kind(bytes: &[u8]) -> Result<crate::report::DocumentKind> {
     .map_err(|_| Error("unknown document kind"))?;
     if kind == crate::report::DocumentKind::JobReport {
         validate_file_io_members(&value)?;
+        super::judging::validate_members(&value)?;
     }
     Ok(kind)
 }

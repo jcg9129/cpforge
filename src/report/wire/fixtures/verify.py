@@ -5,6 +5,7 @@ exercise the real encoders; this oracle can run without compiling the crate.
 """
 import base64
 import json
+import hashlib
 import re
 import unicodedata
 from pathlib import Path
@@ -16,6 +17,7 @@ U32 = 2**32 - 1
 I32 = -(2**31)
 HEX = "f" * 64
 TEXT = '"' * 129
+SCORE = "9" * 14 + "." + "9" * 9
 
 
 def encode(value):
@@ -84,7 +86,7 @@ def check():
 
 
 def test(class_value, check_value):
-    return dict([("id", "x" * 64), ("origin", TOKEN), ("answer", TOKEN), ("input_sha256", HEX), ("answer_sha256", HEX), ("executions", dict(first=U32, count=U32)), ("class", class_value), ("check", check_value), ("diagnostic", False), ("verdict", dict(kind="internal_error", invariant=TOKEN))])
+    return dict([("id", "x" * 64), ("origin", TOKEN), ("answer", TOKEN), ("input_sha256", HEX), ("answer_sha256", HEX), ("executions", dict(first=U32, count=U32)), ("class", class_value), ("check", check_value), ("diagnostic", False), ("verdict", dict(kind="internal_error", invariant=TOKEN)), ("score", None), ("validation", None), ("judges", []), ("session", None), ("output_file", None)])
 
 
 def aggregate():
@@ -119,9 +121,9 @@ def header(binary=False):
     compare = dict(kind="float")
     for key in ["abs", "rel", "rel_base", "combine", "ulps", "int_exact", "reserved_a", "reserved_b"]:
         compare[key] = dict(text="x" * 32, bits="f" * 16)
-    value["target"] = dict(name="x" * 64, language="x" * 64, profile="x" * 64, build_free=False, compare=compare, run_deadline=dict(us=U64, source=TOKEN), published_limits=dict(time_ms=U32, memory_bytes=U64), local_limits=[limit()] * 2)
+    value["target"] = dict(name="x" * 64, language="x" * 64, profile="x" * 64, build_free=False, compare=compare, check=dict(kind=TOKEN, answer=TOKEN, scoring=dict(kind=TOKEN, scale=SCORE, aggregation=TOKEN), display=TOKEN, interactive=None), io=None, run_deadline=dict(us=U64, source=TOKEN), published_limits=dict(time_ms=U32, memory_bytes=U64), local_limits=[limit()] * 2)
     value["capture"] = capture(binary)
-    value["fingerprints"] = dict(source=HEX, tests=HEX)
+    value["fingerprints"] = dict(source=HEX, tests=HEX, judge=HEX)
     value["build"] = build(binary)
     for key in ["executions", "tests", "aggregates"]:
         value[key] = []
@@ -134,6 +136,7 @@ def header(binary=False):
         return {key: fill(member) for key, member in value.items()} if isinstance(value, dict) else U32
     result["counts"] = fill(result["counts"])
     result["internal"] = dict(invariant=TOKEN, locus=dict(kind="test", test="x" * 64), message=TEXT)
+    result["score"] = dict(kind=TOKEN, aggregation=TOKEN, value=SCORE, max=SCORE, full=False)
     value["fact"] = dict(outcome=dict(kind="not_published", reason=TOKEN, message=TEXT), warnings=[TOKEN] * 2)
     value["hooks"] = [hook()] * 32
     value["hooks_dropped"] = U32
@@ -251,7 +254,7 @@ def verify_file_io():
         assert len(encode(warning["message"])) == 260
         assert len(encode(warning)) <= 351
     report = fixture("file_io_report.json")
-    assert list(report["target"]) == ["name", "language", "profile", "build_free", "compare", "io", "run_deadline", "published_limits", "local_limits"]
+    assert list(report["target"]) == ["name", "language", "profile", "build_free", "compare", "check", "io", "run_deadline", "published_limits", "local_limits"]
     file_io_config(report["target"]["io"])
     output_file(report["tests"][0]["output_file"])
     assert list(report["tests"][0])[-1] == "output_file"
@@ -276,9 +279,7 @@ def verify_file_io():
         print(f"file I/O {name}: {size} <= bound {bound}")
     for binary in [False, True]:
         head = header(binary)
-        fields = list(head["target"].items())
-        fields.insert(5, ("io", vectors["io"]))
-        head["target"] = dict(fields)
+        head["target"]["io"] = vectors["io"]
         actual = len(encode(head)) + 10_000 * sum(len(encode(v)) for v in [entry(binary), test_value, aggregate()]) + 3 * 9999
         bound = shaped_bound(10_000, 10_000, 10_000, output=True)
         assert actual <= bound == 127_491_072
@@ -289,6 +290,110 @@ def verify_file_io():
     assert 2 * shaped_bound(9383, 1000, 0, validator=True, judges=2, interactive=True) > 256 * 1024**2
 
 
+def score(value):
+    assert isinstance(value, str) and re.fullmatch(r"(0|[1-9][0-9]{0,13})(\.[0-9]{0,8}[1-9])?", value)
+    whole, _, fraction = value.partition(".")
+    return int(whole) * 10**9 + int((fraction + "0" * 9)[:9])
+
+
+def verify_judging():
+    def fixture(name):
+        return json.loads((ROOT / name).read_bytes(), object_pairs_hook=unique)
+    def summary(value, cap):
+        assert list(value) == ["head", "len", "truncated", "sha256"]
+        head = value["head"]
+        data = head["utf8"].encode() if "utf8" in head else base64.b64decode(head["bytes_b64"], validate=True)
+        assert len(data) <= cap and decimal(value["len"]) >= len(data)
+        assert value["truncated"] == (decimal(value["len"]) > len(data))
+        if not value["truncated"]:
+            assert value["sha256"] == hashlib.sha256(data).hexdigest()
+    configs = fixture("batch_check_configs.json")
+    assert [c["display"] for c in configs] == ["cpf", "judge_cf", "judge_cf"]
+    for config in configs:
+        assert list(config) == ["kind", "answer", "scoring", "display", "interactive"]
+        assert config["interactive"] is None
+    checks = fixture("batch_checks.json")
+    for check_value in checks:
+        members = dict(rejected=["fail", "role"], scored=["raw", "scale", "role"], judge_failed=["class", "role", "reason"], unchecked=["reason"])
+        assert list(check_value) == ["kind"] + members[check_value["kind"]]
+    assert checks[-2:] == [dict(kind="unchecked", reason=r) for r in ["checking_unverified", "checking_interrupted"]]
+    judges = fixture("batch_judges.json")
+    for judge in judges:
+        assert list(judge) == ["role", "execution", "profile", "result", "message", "stderr", "report"]
+        assert judge["role"] in ["checker", "validator", "interactor"]
+        assert judge["profile"] in ["simple", "testlib"]
+        if judge["message"] is not None:
+            summary(judge["message"], 4096)
+        if judge["stderr"] is not None:
+            summary(judge["stderr"], 1024)
+        result = judge["result"]
+        if result is not None:
+            members = dict(passed=[], rejected=["fail"], scored=["raw", "scale"], judge_failed=["class", "reason"], unverified=[], not_read=["reason"])
+            assert list(result) == ["kind"] + members[result["kind"]]
+            if result["kind"] == "scored":
+                assert score(result["raw"]) <= score(result["scale"])
+        report = judge["report"]
+        if report is not None:
+            assert list(report) == ["path", "bytes", "encoding"]
+            assert re.fullmatch(r"r[0-9]{5}/judge/report", report["path"])
+            assert decimal(report["bytes"]) <= 65537
+            assert report["encoding"] in ["utf_8", "windows_1251", None]
+        assert len(encode(judge)) <= 11264
+    validations = fixture("batch_validation.json")
+    assert [v["outcome"] for v in validations] == ["valid", "invalid", "validation_failed", "validator_failed", "not_run"]
+    for value in validations:
+        assert list(value) == ["execution", "profile", "outcome", "stderr"]
+        assert len(encode(value)) <= 2560
+    scores = fixture("batch_scores.json")
+    assert scores == [dict(kind="points", aggregation="sum", value="12.5", max="100", full=False), dict(kind="incomplete", aggregation="min", missing=1), dict(kind="no_tests")]
+    report = fixture("batch_scored_report.json")
+    assert report["result"]["score"] == scores[0]
+    assert report["tests"][0]["score"] == "12.5"
+    assert report["tests"][0]["judges"] == [judges[4]]
+    assert report["tests"][0]["check"] == dict(kind="scored", raw="12.5", scale="100", role="checker")
+    # Both caps are full simultaneously; quotes and backslashes force 2x escaping,
+    # NUL forces base64. Every other member takes its longest value.
+    classes = ["declared_fail", "protocol_unsupported", "report_invalid", "artefact_invalid", "crashed", "test_data_error"]
+    reasons = ["declared_fail", "exit_unsupported", "outcome_unsupported", "points_not_enabled", "outside_authority", "report_missing", "report_not_regular", "report_unreadable", "report_too_large", "report_undecodable", "report_malformed", "report_schema", "points_invalid", "disagreement", "tout_missing", "tout_not_regular", "tout_unreadable", "tout_too_large", "signal", "exit_code", "wall_deadline", "output_budget", "dialogue_output", "peer_allowance_expired", "invalid_input", "validation_failed"]
+    longest = lambda values: max(values, key=len)
+    vectors = fixture("batch_size_vectors.json")
+    assert len(vectors) == 6
+    for index, char in enumerate(['"', "\\", "\0"]):
+        def full_text(n):
+            data = char.encode() * n
+            head = dict(bytes_b64=base64.b64encode(data).decode()) if char == "\0" else dict(utf8=data.decode())
+            return dict(head=head, len=U64, truncated=True, sha256=HEX)
+        evidence = dict(role=longest(["checker", "validator", "interactor"]), execution=U32, profile=longest(["testlib", "simple"]), result=dict(kind="judge_failed", **{"class": longest(classes)}, reason=longest(reasons)), message=full_text(4096), stderr=full_text(1024), report=dict(path="r99999/judge/report", bytes="65536", encoding="windows_1251"))
+        validation = dict(execution=U32, profile="testlib", outcome=longest(["valid", "invalid", "validation_failed", "validator_failed", "not_run"]), stderr=full_text(1024))
+        assert [list(v) for v in vectors[2 * index:2 * index + 2]] == [list(evidence), list(validation)]
+        assert [evidence, validation] == vectors[2 * index:2 * index + 2]
+        assert len(encode(evidence)) <= 10928 and len(encode(validation)) <= 2321
+        test_value = test(signal(), check())
+        test_value.update(validation=validation, judges=[evidence])
+        assert len(encode(test_value)) <= 3072 + 2560 + 11264
+    assert fixture("judge_cf_display.json") == ["PE  presentation error", "WA  presentation error"]
+    print("batch judging: result/validation/score vectors; full 4 KiB message + 1 KiB diagnostic fit T")
+
+
+REPORT_MEMBERS = ["schema", "document", "platform", "outcome", "cpf_version", "command", "job", "workspace", "problem", "target", "capture", "fingerprints", "build", "roles", "executions", "tests", "aggregates", "result", "fact", "submission", "hooks", "hooks_dropped", "warnings", "warnings_dropped", "events", "timing", "refusal", "stress"]
+TEST_MEMBERS = ["id", "origin", "answer", "input_sha256", "answer_sha256", "executions", "class", "check", "diagnostic", "verdict", "score", "validation", "judges", "session", "output_file"]
+BY_VERDICT = ["passed", "wrong_answer", "unchecked", "checker_failed", "wall_deadline", "output_budget", "signal", "nonzero_exit", "cancelled", "infrastructure", "not_run", "internal_error", "presentation_error", "scored", "session_limit", "idle"]
+
+
+def job_report_members(report, path):
+    """Appendix A order with every always-present member (report §3.6)."""
+    members = list(report)
+    assert members in [REPORT_MEMBERS, REPORT_MEMBERS + ["persistence"]], path
+    if report["target"] is not None:
+        assert list(report["target"]) == ["name", "language", "profile", "build_free", "compare", "check", "io", "run_deadline", "published_limits", "local_limits"], path
+    if report["fingerprints"] is not None:
+        assert list(report["fingerprints"]) == ["source", "tests", "judge"], path
+    for value in report["tests"]:
+        assert list(value) == TEST_MEMBERS, path
+    assert list(report["result"])[-1] == "score", path
+    assert list(report["result"]["counts"]["by_verdict"]) == BY_VERDICT, path
+
+
 def verify():
     files = sorted(ROOT.glob("*.json"))
     for path in files:
@@ -297,6 +402,9 @@ def verify():
         assert encode(value) == raw, path
         if "schema" in value:
             assert raw.startswith(b'{"schema":1,"document":'), path
+        for report in [value, value.get("report") if isinstance(value, dict) else None]:
+            if isinstance(report, dict) and report.get("document") == "job_report":
+                job_report_members(report, path)
     print(f"{len(files)} golden fixtures: compact UTF-8, unique members, canonical order/prefix")
     for binary in [False, True]:
         refusal = json.loads((ROOT / "refusal.json").read_bytes())
@@ -304,7 +412,9 @@ def verify():
         for key in ["job", "workspace", "problem", "result", "warnings", "warnings_dropped", "events", "timing", "persistence"]:
             refusal[key] = head[key]
         refusal["refusal"] = dict([("class", TOKEN), ("error", dict(kind=TOKEN, message=TEXT, path=native(256, binary))), ("diagnostics", [diagnostic(binary)] * 64), ("diagnostics_dropped", U32)])
-        rows = [("Cause", cause(), 129, 129), ("class", cls(), 1122, 1122), ("non-infrastructure class", signal(), 169, 169), ("execution summary", execution(), 804, 804), ("stream", stream(), 608, 608), ("Measurement", measurement(), 346, 346), ("InstalledLimit", limit(), 360, 360), ("RunSummary", summary(), 6774, 7168), ("Ref", reference(), 451, 451), ("executions entry", entry(binary), 8851, 9216), ("tests entry with diagnostic", test(signal(), check()), 2868, 3072), ("tests entry infrastructure", test(cls(), dict(kind="passed")), 1723, 3072), ("aggregate", aggregate(), 224, 256), ("warning", warning(binary), 741, 768), ("hook", hook(), 244, 244), ("capture", capture(binary), 13311, 13311), ("build", build(binary), 6664, 6664), ("report header", head, 53645, 65536), ("Diagnostic", diagnostic(binary), 1237, 1237), ("refusal", refusal, 103966, 106496), ("run_finished event", dict(event="run_finished", seq=U64, run="r99999", summary=summary()), 6873, 7168), ("output_chunk event", dict(event="output_chunk", seq=U64, run="r99999", stream=TOKEN, bytes=dict(bytes_b64=base64.b64encode(b"\xff" * 4096).decode())), 5621, 7168)]
+        rows = [("Cause", cause(), 129, 129), ("class", cls(), 1122, 1122), ("non-infrastructure class", signal(), 169, 169), ("execution summary", execution(), 804, 804), ("stream", stream(), 608, 608), ("Measurement", measurement(), 346, 346), ("InstalledLimit", limit(), 360, 360), ("RunSummary", summary(), 6774, 7168), ("Ref", reference(), 451, 451), ("executions entry", entry(binary), 8851, 9216), ("tests entry with diagnostic", test(signal(), check()), 3002, 3072), ("tests entry infrastructure", test(cls(), dict(kind="passed")), 3002, 3072), ("aggregate", aggregate(), 224, 256), ("warning", warning(binary), 741, 768), ("hook", hook(), 244, 244), ("capture", capture(binary), 13311, 13311), ("build", build(binary), 6664, 6664), ("report header", head, 119638, 131072), ("Diagnostic", diagnostic(binary), 1237, 1237), ("refusal", refusal, 103966, 106496), ("run_finished event", dict(event="run_finished", seq=U64, run="r99999", summary=summary()), 6873, 7168), ("output_chunk event", dict(event="output_chunk", seq=U64, run="r99999", stream=TOKEN, bytes=dict(bytes_b64=base64.b64encode(b"\xff" * 4096).decode())), 5621, 7168)]
+        # Without roles the header also fits the unshaped reservation's 64 KiB term.
+        assert len(encode(head)) <= 65536
         for name, value, total, bound in rows:
             actual = len(encode(value))
             assert actual <= total and actual <= bound, (name, binary, actual, total, bound)
@@ -320,11 +430,12 @@ def verify():
                value["cwd_overflow_bytes"] is None for value in cwd)
     # Exact length of a complete serialization, counting all list commas.
     actual = len(encode(header())) + 10_000 * sum(len(encode(v)) for v in [entry(), test(signal(), check()), aggregate()]) + 3 * 9999
-    table = 53645 + 11946 * 10_000
+    table = 119638 + 12080 * 10_000
     bound = 65536 + 12288 * 10_000
     assert actual <= table <= bound
     print(f"10000 full entries: {actual} <= table {table} <= reservation {bound}")
     verify_file_io()
+    verify_judging()
 
 
 if __name__ == "__main__":

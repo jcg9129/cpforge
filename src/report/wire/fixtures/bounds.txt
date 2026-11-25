@@ -1,4 +1,4 @@
-22 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+30 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169
@@ -9,16 +9,16 @@ utf8 InstalledLimit: 333 <= table 360 <= bound 360
 utf8 RunSummary: 6141 <= table 6774 <= bound 7168
 utf8 Ref: 421 <= table 451 <= bound 451
 utf8 executions entry: 8089 <= table 8851 <= bound 9216
-utf8 tests entry with diagnostic: 2738 <= table 2868 <= bound 3072
-utf8 tests entry infrastructure: 1460 <= table 1723 <= bound 3072
+utf8 tests entry with diagnostic: 2815 <= table 3002 <= bound 3072
+utf8 tests entry infrastructure: 1537 <= table 3002 <= bound 3072
 utf8 aggregate: 224 <= table 224 <= bound 256
 utf8 warning: 716 <= table 741 <= bound 768
 utf8 hook: 226 <= table 244 <= bound 244
 utf8 capture: 13249 <= table 13311 <= bound 13311
 utf8 build: 6602 <= table 6664 <= bound 6664
-utf8 report header: 52190 <= table 53645 <= bound 65536
+utf8 report header: 52895 <= table 119638 <= bound 131072
 utf8 Diagnostic: 1236 <= table 1237 <= bound 1237
-utf8 refusal: 102919 <= table 103966 <= bound 106496
+utf8 refusal: 103241 <= table 103966 <= bound 106496
 utf8 run_finished event: 6220 <= table 6873 <= bound 7168
 utf8 output_chunk event: 5601 <= table 5621 <= bound 7168
 base64 Cause: 109 <= table 129 <= bound 129
@@ -31,22 +31,23 @@ base64 InstalledLimit: 333 <= table 360 <= bound 360
 base64 RunSummary: 6141 <= table 6774 <= bound 7168
 base64 Ref: 421 <= table 451 <= bound 451
 base64 executions entry: 7926 <= table 8851 <= bound 9216
-base64 tests entry with diagnostic: 2738 <= table 2868 <= bound 3072
-base64 tests entry infrastructure: 1460 <= table 1723 <= bound 3072
+base64 tests entry with diagnostic: 2815 <= table 3002 <= bound 3072
+base64 tests entry infrastructure: 1537 <= table 3002 <= bound 3072
 base64 aggregate: 224 <= table 224 <= bound 256
 base64 warning: 637 <= table 741 <= bound 768
 base64 hook: 226 <= table 244 <= bound 244
 base64 capture: 10721 <= table 13311 <= bound 13311
 base64 build: 5338 <= table 6664 <= bound 6664
-base64 report header: 45827 <= table 53645 <= bound 65536
+base64 report header: 46532 <= table 119638 <= bound 131072
 base64 Diagnostic: 1073 <= table 1237 <= bound 1237
-base64 refusal: 89753 <= table 103966 <= bound 106496
+base64 refusal: 90075 <= table 103966 <= bound 106496
 base64 run_finished event: 6220 <= table 6873 <= bound 7168
 base64 output_chunk event: 5601 <= table 5621 <= bound 7168
-10000 full entries: 110592187 <= table 119513645 <= reservation 122945536
+10000 full entries: 111362892 <= table 120919638 <= reservation 122945536
 file I/O target.io (member): 562 <= bound 562
 file I/O output_file (member): 169 <= bound 169
 file I/O test class (3 streams): 86 <= bound 204
-file I/O test entry with output file: 2907 <= bound 3264
-file I/O utf8 10000 full entries: 112282749 <= bound 127491072; reservation 254982144
-file I/O base64 10000 full entries: 110646386 <= bound 127491072; reservation 254982144
+file I/O test entry with output file: 2965 <= bound 3264
+file I/O utf8 10000 full entries: 112863444 <= bound 127491072; reservation 254982144
+file I/O base64 10000 full entries: 111227081 <= bound 127491072; reservation 254982144
+batch judging: result/validation/score vectors; full 4 KiB message + 1 KiB diagnostic fit T

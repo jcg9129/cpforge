@@ -29,6 +29,7 @@ pub struct Target {
     pub profile: Option<String>,
     pub build_free: bool,
     pub compare: Option<Comparator>,
+    pub check: Option<crate::report::CheckConfig>,
     pub io: Option<crate::report::FileIo>,
     pub run_deadline: Option<(u64, &'static str)>,
     pub published_limits: Option<(Option<u32>, Option<u64>)>,
@@ -127,6 +128,8 @@ pub struct ReportDetails {
     pub shape: Option<crate::report::wire::ReportShape>,
     pub problem: Option<Problem>,
     pub target: Option<Target>,
+    pub score: Option<crate::report::AggregateScore>,
+    pub judge_fingerprint: Option<[u8; 32]>,
     pub fingerprints: Option<([u8; 32], [u8; 32])>,
     pub fact: Option<Fact>,
     pub hooks: Vec<Hook>,
@@ -156,10 +159,15 @@ pub fn pre_delivery_exit(
     kind: crate::report::JobKind,
     verdict: crate::report::JobVerdict,
     cancellation: Option<super::Cancellation>,
+    score: Option<&crate::report::AggregateScore>,
 ) -> PreDeliveryExit {
     use crate::exit::{ExitCode, ExitInputs, exit_status};
     let status = exit_status(&ExitInputs {
         verdict: Some(verdict),
+        score_full: matches!(
+            score,
+            Some(crate::report::AggregateScore::Points { full: true, .. })
+        ),
         cancellation: cancellation.is_some(),
         switch_hook: kind == crate::report::JobKind::Hook,
         ..ExitInputs::default()

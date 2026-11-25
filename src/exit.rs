@@ -38,6 +38,7 @@ pub struct ExitInputs {
     pub delivery_failed: bool,
     pub cancellation: bool,
     pub switch_hook: bool,
+    pub score_full: bool,
 }
 
 /// First matching row of report §5.2. Signal termination is performed separately
@@ -73,8 +74,16 @@ pub fn exit_status(input: &ExitInputs) -> ExitCode {
                 Some(V::BuildFailed) => ExitCode::BuildFailed,
                 Some(V::CheckerFailed) => ExitCode::CheckerFailed,
                 Some(
-                    V::WallDeadline | V::OutputBudget | V::Signal | V::NonzeroExit | V::WrongAnswer,
+                    V::WallDeadline
+                    | V::OutputBudget
+                    | V::Signal
+                    | V::NonzeroExit
+                    | V::WrongAnswer
+                    | V::PresentationError
+                    | V::SessionLimit
+                    | V::Idle,
                 ) => ExitCode::Failed,
+                Some(V::Scored) if !input.score_full => ExitCode::Failed,
                 Some(V::Unchecked | V::NoTests) => ExitCode::NotVerified,
                 _ => ExitCode::Success,
             },
@@ -131,7 +140,8 @@ mod tests {
                     machine_output,
                     delivery_failed,
                     cancellation,
-                    switch_hook: false
+                    switch_hook: false,
+                    score_full: false,
                 }) as u8,
                 expected
             );
@@ -243,6 +253,7 @@ mod tests {
             crate::report::TestVerdict::WrongAnswer,
         ];
         let result = crate::report::job_verdict(&crate::report::JobInput {
+            scoring: crate::report::Scoring::PassFail,
             kind: crate::report::JobKind::Test,
             build: None,
             primary: &[],
