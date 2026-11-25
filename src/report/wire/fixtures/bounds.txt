@@ -1,4 +1,4 @@
-35 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+37 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169
@@ -52,3 +52,5 @@ file I/O utf8 10000 full entries: 112926471 <= bound 127491072; reservation 2549
 file I/O base64 10000 full entries: 111278258 <= bound 127491072; reservation 254982144
 batch judging: result/validation/score vectors; full 4 KiB message + 1 KiB diagnostic fit T
 roles: provenance, builds, capture lists, warnings, interactive configuration and run events fit their bounds
+judge fingerprint: 5 independent full byte/SHA-256 vectors
+judged summaries: checker, interactive, points, incomplete and validated-input suffix

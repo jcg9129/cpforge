@@ -26,4 +26,6 @@ pub use types::*;
 #[cfg(test)]
 mod batch_tests;
 #[cfg(test)]
+mod display_tests;
+#[cfg(test)]
 mod tests;

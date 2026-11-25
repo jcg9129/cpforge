@@ -406,3 +406,404 @@ fn golden_role_and_entry_vectors_change_hash_without_file_byte_changes() {
         assert_ne!(hash, original);
     }
 }
+
+fn judge_config() -> crate::report::CheckConfig {
+    crate::report::CheckConfig {
+        kind: crate::report::CheckMode::Checker,
+        ..Default::default()
+    }
+}
+fn judge_role(f: &Fixture) -> JudgeFingerprintRole {
+    let run = f
+        .target("entry = 'E'\n[config.run]\nargv = ['run', '{entry}']")
+        .run;
+    let mut build = run.clone();
+    if let StageCommand::Argv(argv) = &mut build.command {
+        argv[0].unexpanded = "cc".into();
+        argv[1].unexpanded = "{sources}".into();
+    }
+    JudgeFingerprintRole {
+        profile: crate::report::JudgeProfile::Testlib,
+        files: vec![
+            JudgeFingerprintFile {
+                path: "z".into(),
+                copied_bytes: vec![0, 255],
+            },
+            JudgeFingerprintFile {
+                path: "a".into(),
+                copied_bytes: b"X".to_vec(),
+            },
+        ],
+        origin: JudgeFingerprintOrigin::Built(Box::new(JudgeFingerprintBuilt {
+            sources: vec!["a".into()],
+            support_files: vec![],
+            assets: vec!["z".into()],
+            language: "python".into(),
+            entry: Some("E".into()),
+            build: Some(build),
+            run,
+        })),
+        deadline_us: Some(1_234_000),
+        stdout_cap: Some(10),
+        stderr_cap: None,
+        seed: crate::report::SeedMode::None,
+    }
+}
+fn judge_built(role: &mut JudgeFingerprintRole) -> &mut JudgeFingerprintBuilt {
+    let JudgeFingerprintOrigin::Built(built) = &mut role.origin else {
+        panic!("built role")
+    };
+    built
+}
+fn judge_bytes(
+    check: &crate::report::CheckConfig,
+    roles: &[Option<JudgeFingerprintRole>; 3],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    encode_judge(&mut bytes, check, roles).unwrap();
+    bytes
+}
+#[test]
+fn judge_independent_bytes_and_hash_vectors() {
+    use crate::report as r;
+    let f = Fixture::new();
+    let built = judge_role(&f);
+    let mut prebuilt = built.clone();
+    prebuilt.origin = JudgeFingerprintOrigin::Prebuilt {
+        program: "a".into(),
+        assets: vec!["z".into()],
+    };
+    prebuilt.profile = crate::report::JudgeProfile::Simple;
+    let mut shell_role = built.clone();
+    let shell = built_target(&f, "shell = { interpreter = ['sh', '-c'], script = 'echo {}', args = ['{entry}', 'x'] }\ncwd = { selector = 'run' }\nenv_remove = ['Z', 'A']\nenv = { X = 'v', OFF = false }").build.unwrap();
+    let b = judge_built(&mut shell_role);
+    b.build = Some(shell.clone());
+    b.run = shell;
+    shell_role.deadline_us = None;
+    shell_role.stdout_cap = None;
+    shell_role.stderr_cap = Some(12);
+    shell_role.seed = r::SeedMode::Argv;
+    let interactive = r::CheckConfig {
+        kind: r::CheckMode::Interactive,
+        answer: r::AnswerPolicy::None,
+        scoring: r::Scoring::Points {
+            scale: r::Score::parse("100").unwrap(),
+            aggregation: r::Aggregation::Min,
+        },
+        display: r::DisplayProfile::JudgeCf,
+        interactive: Some(r::InteractiveConfig {
+            checking: r::InteractiveChecking::InteractorChecker,
+            mode: r::InteractiveMode::Relay,
+            idle_us: Some(1_000_000),
+            early_reader_close: true,
+            interactor_allowance_us: 2_000_000,
+            peer_allowance_us: 3_000_000,
+            solution_seed: r::SeedMode::Env,
+            interactor_seed: r::SeedMode::Argv,
+        }),
+    };
+    let vectors: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../report/wire/fixtures/judge_fingerprints.json"
+    ))
+    .unwrap();
+    let cases = [
+        (judge_config(), [None, None, None]),
+        (judge_config(), [Some(built.clone()), None, None]),
+        (judge_config(), [Some(prebuilt.clone()), None, None]),
+        (
+            judge_config(),
+            [Some(prebuilt), Some(built.clone()), Some(built)],
+        ),
+        (interactive, [None, None, Some(shell_role)]),
+    ];
+    assert_eq!(cases.len(), vectors.as_array().unwrap().len());
+    for ((check, roles), vector) in cases.iter().zip(vectors.as_array().unwrap()) {
+        let bytes = judge_bytes(check, roles);
+        assert_eq!(bytes, from_hex(vector["input_hex"].as_str().unwrap()));
+        assert_eq!(
+            &Sha256::digest(&bytes)[..],
+            from_hex(vector["sha256"].as_str().unwrap())
+        );
+        let hash = judge_fingerprint(check, roles).unwrap();
+        if roles.iter().all(Option::is_none) {
+            assert_eq!(hash, None);
+        } else {
+            assert_eq!(hash.unwrap().as_slice(), &Sha256::digest(&bytes)[..]);
+        }
+    }
+}
+#[test]
+fn judge_role_presence_profiles_files_lists_and_overrides_are_covered() {
+    let f = Fixture::new();
+    let role = judge_role(&f);
+    let original = judge_fingerprint(&judge_config(), &[Some(role.clone()), None, None]).unwrap();
+    type Change = fn(&mut JudgeFingerprintRole);
+    let changes: &[Change] = &[
+        |r| r.profile = crate::report::JudgeProfile::Simple,
+        |r| r.files[0].path = "y".into(),
+        |r| r.files[0].copied_bytes[0] = 1,
+        |r| {
+            r.files.pop();
+        },
+        |r| judge_built(r).sources.push("b".into()),
+        |r| judge_built(r).sources.insert(0, "b".into()),
+        |r| {
+            let b = judge_built(r);
+            b.support_files.append(&mut b.sources);
+        },
+        |r| judge_built(r).support_files.push("b".into()),
+        |r| judge_built(r).assets.push("b".into()),
+        |r| judge_built(r).assets.insert(0, "b".into()),
+        |r| judge_built(r).language = "cpp".into(),
+        |r| judge_built(r).entry = None,
+        |r| judge_built(r).entry = Some("F".into()),
+        |r| judge_built(r).build = None,
+        |r| r.deadline_us = None,
+        |r| r.deadline_us = Some(1_234_001),
+        |r| r.stdout_cap = None,
+        |r| r.stdout_cap = Some(11),
+        |r| r.stderr_cap = Some(0),
+        |r| r.stderr_cap = Some(1),
+        |r| r.seed = crate::report::SeedMode::Env,
+        |r| r.seed = crate::report::SeedMode::Argv,
+        |r| {
+            r.origin = JudgeFingerprintOrigin::Prebuilt {
+                program: "a".into(),
+                assets: vec!["z".into()],
+            }
+        },
+    ];
+    for (index, change) in changes.iter().enumerate() {
+        let mut changed = role.clone();
+        change(&mut changed);
+        assert_ne!(
+            original,
+            judge_fingerprint(&judge_config(), &[Some(changed), None, None]).unwrap(),
+            "field {index}"
+        );
+    }
+    for slot in [1, 2] {
+        let mut roles = [None, None, None];
+        roles[slot] = Some(role.clone());
+        assert_ne!(
+            original,
+            judge_fingerprint(&judge_config(), &roles).unwrap()
+        );
+        roles[0] = Some(role.clone());
+        assert_ne!(
+            original,
+            judge_fingerprint(&judge_config(), &roles).unwrap()
+        );
+    }
+    let mut reordered = role.clone();
+    reordered.files.reverse();
+    assert_eq!(
+        original,
+        judge_fingerprint(&judge_config(), &[Some(reordered), None, None]).unwrap()
+    );
+    // Reordering any configured list is significant even with the same files.
+    for list_index in 0..3 {
+        let mut ordered = role.clone();
+        let b = judge_built(&mut ordered);
+        let list = match list_index {
+            0 => &mut b.sources,
+            1 => &mut b.support_files,
+            _ => &mut b.assets,
+        };
+        *list = vec!["first".into(), "second".into()];
+        let hash =
+            judge_fingerprint(&judge_config(), &[Some(ordered.clone()), None, None]).unwrap();
+        let b = judge_built(&mut ordered);
+        match list_index {
+            0 => b.sources.reverse(),
+            1 => b.support_files.reverse(),
+            _ => b.assets.reverse(),
+        }
+        assert_ne!(
+            hash,
+            judge_fingerprint(&judge_config(), &[Some(ordered), None, None]).unwrap()
+        );
+    }
+    let mut prebuilt = role;
+    prebuilt.origin = JudgeFingerprintOrigin::Prebuilt {
+        program: "a".into(),
+        assets: vec!["z".into(), "b".into()],
+    };
+    let original =
+        judge_fingerprint(&judge_config(), &[Some(prebuilt.clone()), None, None]).unwrap();
+    for program_change in [false, true] {
+        let mut changed = prebuilt.clone();
+        if let JudgeFingerprintOrigin::Prebuilt { program, assets } = &mut changed.origin {
+            if program_change {
+                *program = "b".into();
+            } else {
+                assets.reverse();
+            }
+        }
+        assert_ne!(
+            original,
+            judge_fingerprint(&judge_config(), &[Some(changed), None, None]).unwrap()
+        );
+    }
+}
+fn stage_text(stage: &StagePlan, value: &str) -> crate::config::Sourced<String> {
+    crate::config::Sourced {
+        value: value.into(),
+        origin: stage.cwd.origin.clone(),
+        provenance: stage.cwd.provenance.clone(),
+        overlay: stage.cwd.overlay.clone(),
+    }
+}
+
+#[test]
+fn judge_build_and_run_cover_all_source_stage_settings() {
+    let f = Fixture::new();
+    let role = judge_role(&f);
+    let original = judge_fingerprint(&judge_config(), &[Some(role.clone()), None, None]).unwrap();
+    type Change = fn(&mut StagePlan);
+    let changes: &[Change] = &[
+        |s| {
+            if let StageCommand::Argv(a) = &mut s.command {
+                a.reverse();
+            }
+        },
+        |s| {
+            if let StageCommand::Argv(a) = &mut s.command {
+                a[0].unexpanded = "changed".into();
+            }
+        },
+        |s| s.cwd.value = Cwd::Problem,
+        |s| s.environment.push(EnvEdit::Remove(stage_text(s, "A"))),
+        |s| s.environment.push(EnvEdit::Unset(stage_text(s, "A"))),
+        |s| {
+            s.environment.push(EnvEdit::Set {
+                name: stage_text(s, "A"),
+                value: stage_text(s, "v"),
+            })
+        },
+    ];
+    for build in [false, true] {
+        for change in changes {
+            let mut changed = role.clone();
+            let built = judge_built(&mut changed);
+            change(if build {
+                built.build.as_mut().unwrap()
+            } else {
+                &mut built.run
+            });
+            assert_ne!(
+                original,
+                judge_fingerprint(&judge_config(), &[Some(changed), None, None]).unwrap()
+            );
+        }
+        let shell = "shell = { interpreter = ['sh', '-c'], script = 'echo {}', args = ['{entry}', 'x'] }\ncwd = { selector = 'run' }\nenv_remove = ['Z', 'A']\nenv = { X = 'v', OFF = false }";
+        let mut baseline = role.clone();
+        let stage = built_target(&f, shell).build.unwrap();
+        let built = judge_built(&mut baseline);
+        *if build {
+            built.build.as_mut().unwrap()
+        } else {
+            &mut built.run
+        } = stage;
+        let original =
+            judge_fingerprint(&judge_config(), &[Some(baseline.clone()), None, None]).unwrap();
+        for settings in [
+            shell.replace("'sh'", "'bash'"),
+            shell.replace("'-c'", "'-e'"),
+            shell.replace("echo {}", "echo other"),
+            shell.replace("'x'", "'y'"),
+            shell.replace("'Z'", "'Y'"),
+            shell.replace("'v'", "'w'"),
+            shell.replace("false", "'set'"),
+            shell.replace("X =", "Y ="),
+        ] {
+            let mut changed = baseline.clone();
+            let built = judge_built(&mut changed);
+            *if build {
+                built.build.as_mut().unwrap()
+            } else {
+                &mut built.run
+            } = built_target(&f, &settings).build.unwrap();
+            assert_ne!(
+                original,
+                judge_fingerprint(&judge_config(), &[Some(changed), None, None]).unwrap()
+            );
+        }
+        let mut unchanged = baseline;
+        let built = judge_built(&mut unchanged);
+        let stage = if build {
+            built.build.as_mut().unwrap()
+        } else {
+            &mut built.run
+        };
+        stage.environment.reverse();
+        stage.deadline.milliseconds.value += 1;
+        stage.stdout.bytes.value += 1;
+        stage.stderr.bytes.value += 1;
+        assert_eq!(
+            original,
+            judge_fingerprint(&judge_config(), &[Some(unchanged), None, None]).unwrap()
+        );
+    }
+}
+#[test]
+fn judge_check_configuration_is_covered_except_display() {
+    use crate::report as r;
+    let f = Fixture::new();
+    let roles = [Some(judge_role(&f)), None, None];
+    let check = judge_config();
+    let hash = judge_fingerprint(&check, &roles).unwrap();
+    let mut changed = check.clone();
+    changed.display = r::DisplayProfile::JudgeCf;
+    assert_eq!(hash, judge_fingerprint(&changed, &roles).unwrap());
+    changed = check.clone();
+    changed.answer = r::AnswerPolicy::None;
+    assert_ne!(hash, judge_fingerprint(&changed, &roles).unwrap());
+    changed = check.clone();
+    changed.kind = r::CheckMode::Compare;
+    assert_ne!(hash, judge_fingerprint(&changed, &roles).unwrap());
+    let mut point_hashes = std::collections::BTreeSet::new();
+    for aggregation in [r::Aggregation::Sum, r::Aggregation::Min] {
+        for scale in ["1", "2"] {
+            changed = check.clone();
+            changed.scoring = r::Scoring::Points {
+                scale: r::Score::parse(scale).unwrap(),
+                aggregation,
+            };
+            assert_ne!(hash, judge_fingerprint(&changed, &roles).unwrap());
+            assert!(point_hashes.insert(judge_fingerprint(&changed, &roles).unwrap()));
+        }
+    }
+    let mut check = check;
+    check.kind = r::CheckMode::Interactive;
+    check.interactive = Some(r::InteractiveConfig {
+        checking: r::InteractiveChecking::Interactor,
+        mode: r::InteractiveMode::Relay,
+        idle_us: Some(10),
+        early_reader_close: false,
+        interactor_allowance_us: 20,
+        peer_allowance_us: 30,
+        solution_seed: r::SeedMode::None,
+        interactor_seed: r::SeedMode::None,
+    });
+    assert_ne!(hash, judge_fingerprint(&check, &roles).unwrap());
+    let hash = judge_fingerprint(&check, &roles).unwrap();
+    type Change = fn(&mut r::InteractiveConfig);
+    let changes: &[Change] = &[
+        |i| i.checking = r::InteractiveChecking::Checker,
+        |i| i.checking = r::InteractiveChecking::InteractorChecker,
+        |i| i.mode = r::InteractiveMode::Direct,
+        |i| i.idle_us = None,
+        |i| i.idle_us = Some(11),
+        |i| i.early_reader_close = true,
+        |i| i.interactor_allowance_us += 1,
+        |i| i.peer_allowance_us += 1,
+        |i| i.solution_seed = r::SeedMode::Env,
+        |i| i.interactor_seed = r::SeedMode::Argv,
+    ];
+    for change in changes {
+        let mut changed = check.clone();
+        change(changed.interactive.as_mut().unwrap());
+        assert_ne!(hash, judge_fingerprint(&changed, &roles).unwrap());
+    }
+}

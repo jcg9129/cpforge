@@ -754,6 +754,12 @@ pub struct DisplayContext {
     pub invariant: Option<Invariant>,
     pub measurements: Vec<supervisor::Measurement>,
     pub output_file: Option<(String, super::OutputFile)>,
+    pub judged: Option<Box<super::JudgedDisplayEvidence>>,
+    pub test_points: Option<(super::Score, super::Score)>,
+    pub job_score: Option<super::AggregateScore>,
+    pub peer_allowance_expired: bool,
+    pub session_deadline: Option<Duration>,
+    pub idle_interval: Option<Duration>,
 }
 
 impl PostBuild {

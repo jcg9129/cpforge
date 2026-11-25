@@ -343,3 +343,29 @@ fn judged_check_variants_encoder_vectors_and_round_trips() {
         assert_eq!(*original, read::read_judged_check(value).unwrap());
     }
 }
+
+#[test]
+fn supplied_judge_fingerprint_validates_wire_form_without_recomputing() {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/passing.json")).unwrap();
+    value["fingerprints"] =
+        serde_json::json!({"source": "0".repeat(64), "tests": "1".repeat(64), "judge": null});
+    for valid in [
+        serde_json::Value::Null,
+        serde_json::Value::String("a".repeat(64)),
+        serde_json::Value::String("0".repeat(64)),
+    ] {
+        value["fingerprints"]["judge"] = valid;
+        judging::validate_members(&value).unwrap();
+    }
+    for invalid in [
+        serde_json::json!("A".repeat(64)),
+        serde_json::json!("g".repeat(64)),
+        serde_json::json!("a".repeat(63)),
+        serde_json::json!("a".repeat(65)),
+        serde_json::json!(1),
+    ] {
+        value["fingerprints"]["judge"] = invalid;
+        assert!(judging::validate_members(&value).is_err());
+    }
+}

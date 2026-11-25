@@ -45,6 +45,18 @@ pub const EXECUTION_ALLOWANCE: usize = 9 * 1024;
 pub const REFUSAL_BOUND: usize = 104 * 1024;
 pub const EVENT_BOUND: usize = 7 * 1024;
 
+/// Configuration contribution to the judge fingerprint (config §9.1.3).
+/// Keep Appendix A order while excluding the presentation-only member.
+pub fn encode_judge_fingerprint_config(check: &crate::report::CheckConfig) -> Result<Vec<u8>> {
+    judging::config(check)?;
+    Ok(encode(&obj([
+        ("kind", judging::serialized(&check.kind)?),
+        ("answer", judging::serialized(&check.answer)?),
+        ("scoring", judging::serialized(&check.scoring)?),
+        ("interactive", judging::serialized(&check.interactive)?),
+    ])))
+}
+
 pub fn report_bound(planned: usize, tests: usize, aggregates: usize) -> Result<usize> {
     shaped_report_bound(planned, tests, aggregates, ReportShape::default())
 }

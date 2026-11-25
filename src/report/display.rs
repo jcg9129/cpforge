@@ -2,7 +2,11 @@
 //! Terminal line escaping and length limits belong to callers.
 
 use super::types::*;
-use super::{OutputFile, OutputFileType};
+use super::{
+    AggregateScore, Aggregation, CheckingUnchecked, InteractiveChecking, Judge, JudgeFailClass,
+    JudgeProfile, JudgeReason, JudgeResult, JudgeRole, JudgeText, JudgedCheck, OutputFile,
+    OutputFileType, RoleBuildCause, RoleBuildResult, RoleName, Score,
+};
 use crate::compare::Diag;
 use crate::supervisor::{LocalLimit, Measurement};
 use std::time::Duration;
@@ -114,6 +118,37 @@ pub fn render_label(display: &DisplayLabel) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
             Qualifier::CleanupNotVerified => "(cleanup not verified)".into(),
+            Qualifier::Judged(evidence) => evidence.render(),
+            Qualifier::TestPoints { raw, scale } => format!("{raw}/{scale}"),
+            Qualifier::JobScore(score) => match score {
+                AggregateScore::Points {
+                    value,
+                    max,
+                    aggregation,
+                    ..
+                } => {
+                    format!("{value}/{max} ({})", aggregation_text(*aggregation))
+                }
+                AggregateScore::Incomplete { missing, .. } => incomplete_score(*missing),
+                AggregateScore::NoTests => "no tests: nothing verified".into(),
+            },
+            Qualifier::RoleBuild { role, cause } => {
+                format!("{} build: {}", role.wire_token(), role_build_cause(cause))
+            }
+            Qualifier::PeerAllowanceExpired => "did not exit after the interactor finished".into(),
+            Qualifier::SessionDeadline(deadline) => deadline.map_or_else(
+                || "session deadline".into(),
+                |d| format!("session deadline {}s", d.as_secs_f64()),
+            ),
+            Qualifier::Idle(interval) => interval.map_or_else(
+                || "no successful forwarding observed".into(),
+                |d| {
+                    format!(
+                        "no successful forwarding observed for {} s",
+                        d.as_secs_f64()
+                    )
+                },
+            ),
             Qualifier::InstalledLimit(LocalLimit::AddressSpace { bytes }) => {
                 format!("local address-space limit {bytes} bytes")
             }
@@ -127,6 +162,145 @@ pub fn render_label(display: &DisplayLabel) -> String {
         parts.push(text);
     }
     parts.join("  ")
+}
+
+fn aggregation_text(aggregation: Aggregation) -> &'static str {
+    match aggregation {
+        Aggregation::Sum => "sum",
+        Aggregation::Min => "min",
+    }
+}
+fn incomplete_score(missing: u32) -> String {
+    format!("incomplete: {missing} tests without a score")
+}
+fn judge_role_text(role: JudgeRole) -> &'static str {
+    match role {
+        JudgeRole::Checker => "checker",
+        JudgeRole::Validator => "validator",
+        JudgeRole::Interactor => "interactor",
+    }
+}
+fn judge_reason_text(reason: JudgeReason) -> String {
+    // Enum serialization supplies the authoritative snake_case token.
+    serde_json::to_value(reason)
+        .expect("judge reason token")
+        .as_str()
+        .expect("judge reason string")
+        .replace('_', " ")
+}
+fn run_cause(class: &RunClass) -> String {
+    match class {
+        RunClass::Signal {
+            signal,
+            core_dumped,
+        } => format!(
+            "signal {signal}{}",
+            if *core_dumped { " (core dumped)" } else { "" }
+        ),
+        RunClass::NonzeroExit { code } => format!("exit code {code}"),
+        _ => class.wire_token().replace('_', " "),
+    }
+}
+fn role_build_cause(cause: &RoleBuildCause) -> String {
+    match cause {
+        RoleBuildCause::Run(class) => run_cause(class),
+        RoleBuildCause::MissingOutput { .. } => "missing output".into(),
+        RoleBuildCause::GeneratedProgramInvalid { .. } => "generated program invalid".into(),
+        RoleBuildCause::OutputTooLarge { bytes, cap } => {
+            format!("output too large: {bytes} bytes, cap {cap}")
+        }
+    }
+}
+
+/// Finalized deciding evidence, separate from the contestant's run class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JudgedDisplayEvidence {
+    Deciding {
+        role: JudgeRole,
+        message: Option<JudgeText>,
+    },
+    Failure {
+        role: JudgeRole,
+        class: JudgeFailClass,
+        reason: JudgeReason,
+        run_class: Option<RunClass>,
+    },
+    CheckingUnverified,
+    CheckingInterrupted,
+}
+impl JudgedDisplayEvidence {
+    pub fn from_judge(judge: &Judge, run_class: Option<RunClass>) -> Option<Self> {
+        match judge.result.as_ref()? {
+            JudgeResult::Passed | JudgeResult::Rejected { .. } | JudgeResult::Scored { .. } => {
+                Some(Self::Deciding {
+                    role: judge.role,
+                    message: if judge.profile == JudgeProfile::Simple {
+                        judge.stderr.clone()
+                    } else {
+                        judge.message.clone()
+                    },
+                })
+            }
+            JudgeResult::JudgeFailed { class, reason } => Some(Self::Failure {
+                role: judge.role,
+                class: *class,
+                reason: *reason,
+                run_class,
+            }),
+            JudgeResult::Unverified
+            | JudgeResult::NotRead {
+                reason: super::JudgeNotRead::CleanupIncomplete,
+            } => Some(Self::CheckingUnverified),
+            JudgeResult::NotRead { .. } => None,
+        }
+    }
+    fn render(&self) -> String {
+        match self {
+            Self::Deciding { role, message } => {
+                let mut text = judge_role_text(*role).to_owned();
+                if let Some(message) = message {
+                    // Match the shared line sanitization before quoting. The
+                    // progress sink applies the shared line-size cap afterward.
+                    let head: String = String::from_utf8_lossy(&message.head)
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect();
+                    text.push_str(&format!(": \"{head}\""));
+                }
+                text
+            }
+            Self::Failure {
+                role,
+                class,
+                reason,
+                run_class,
+            } => {
+                let role_name = judge_role_text(*role);
+                if *class == JudgeFailClass::TestDataError && *role == JudgeRole::Validator {
+                    return format!("{role_name}: {}", judge_reason_text(*reason));
+                }
+                if *class == JudgeFailClass::Crashed {
+                    return format!(
+                        "{role_name} crashed: {}",
+                        run_class
+                            .as_ref()
+                            .map_or_else(|| judge_reason_text(*reason), run_cause)
+                    );
+                }
+                let class = match class {
+                    JudgeFailClass::DeclaredFail => "declared fail",
+                    JudgeFailClass::ProtocolUnsupported => "protocol unsupported",
+                    JudgeFailClass::ReportInvalid => "report invalid",
+                    JudgeFailClass::ArtefactInvalid => "artefact invalid",
+                    JudgeFailClass::TestDataError => "test data error",
+                    JudgeFailClass::Crashed => unreachable!(),
+                };
+                format!("{role_name}: {class} ({})", judge_reason_text(*reason))
+            }
+            Self::CheckingUnverified => "cleanup not verified: report not read".into(),
+            Self::CheckingInterrupted => "checking interrupted".into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +382,19 @@ pub enum Qualifier {
     },
     OutputDiffers(Box<Diag>),
     Measurement(Measurement),
+    Judged(Box<JudgedDisplayEvidence>),
+    TestPoints {
+        raw: Score,
+        scale: Score,
+    },
+    JobScore(AggregateScore),
+    RoleBuild {
+        role: RoleName,
+        cause: Box<RoleBuildCause>,
+    },
+    PeerAllowanceExpired,
+    SessionDeadline(Option<Duration>),
+    Idle(Option<Duration>),
 }
 impl Qualifier {
     /// Fixed wording, without terminal escaping or formatting of evidence.
@@ -242,6 +429,13 @@ impl Qualifier {
             Self::OutputFile { .. } => "output_file",
             Self::OutputDiffers(_) => "output_differs",
             Self::Measurement(_) => "measurement",
+            Self::Judged(_) => "judged",
+            Self::TestPoints { .. } => "test_points",
+            Self::JobScore(_) => "job_score",
+            Self::RoleBuild { .. } => "role_build",
+            Self::PeerAllowanceExpired => "peer_allowance_expired",
+            Self::SessionDeadline(_) => "session_deadline",
+            Self::Idle(_) => "idle",
         }
     }
 }
@@ -260,6 +454,10 @@ pub enum LabelSubject<'a> {
         check: Option<&'a CheckOutcome>,
     },
     Build(&'a BuildResult),
+    RoleBuild {
+        role: RoleName,
+        result: &'a RoleBuildResult,
+    },
     Run(&'a ExecutionResult),
     Hook(&'a HookOutcome),
     Job(JobVerdict),
@@ -269,6 +467,7 @@ impl LabelSubject<'_> {
         match self {
             Self::Test { .. } => "test",
             Self::Build(_) => "build",
+            Self::RoleBuild { .. } => "role_build",
             Self::Run(_) => "run",
             Self::Hook(_) => "hook",
             Self::Job(_) => "job",
@@ -278,11 +477,15 @@ impl LabelSubject<'_> {
 /// Label tokens and typed qualifier fields only. A diagnostic match never
 /// replaces the run label with OK, and a diagnostic mismatch never becomes WA.
 pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabel {
-    let show_comparator = match subject {
-        LabelSubject::Test { verdict, .. } => matches!(verdict, TestVerdict::Passed),
-        LabelSubject::Job(JobVerdict::Passed) => true,
-        _ => false,
-    };
+    let show_comparator = context.judged.is_none()
+        && match subject {
+            LabelSubject::Test { verdict, check, .. } => {
+                matches!(verdict, TestVerdict::Passed)
+                    && !check.is_some_and(|check| matches!(check.kind, CheckKind::Judged { .. }))
+            }
+            LabelSubject::Job(JobVerdict::Passed) => true,
+            _ => false,
+        };
     let mut primary_cause = None;
     let (token, class, check, invariant, reason, cause) = match subject {
         LabelSubject::Test {
@@ -344,6 +547,7 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
                 None,
             ),
         },
+        LabelSubject::RoleBuild { role, result } => return role_build_label(role, result, context),
         LabelSubject::Run(execution) => {
             if let Some(invariant) = super::execution_invariant(execution) {
                 (
@@ -451,17 +655,90 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
     if token == Some(LabelToken::PresentationError) {
         qualifiers.push(Qualifier::PresentationError);
     }
-    if token == Some(LabelToken::Unchecked) {
+    let judged = context.judged.clone().or_else(|| {
+        check.and_then(|check| {
+            let CheckKind::Judged { outcome } = &check.kind else {
+                return None;
+            };
+            match outcome.as_ref() {
+                JudgedCheck::Rejected { role, .. } | JudgedCheck::Scored { role, .. } => {
+                    Some(Box::new(JudgedDisplayEvidence::Deciding {
+                        role: *role,
+                        message: None,
+                    }))
+                }
+                JudgedCheck::JudgeFailed {
+                    role,
+                    class,
+                    reason,
+                } => Some(Box::new(JudgedDisplayEvidence::Failure {
+                    role: *role,
+                    class: *class,
+                    reason: *reason,
+                    run_class: None,
+                })),
+                JudgedCheck::Unchecked {
+                    reason: CheckingUnchecked::CheckingUnverified,
+                } => Some(Box::new(JudgedDisplayEvidence::CheckingUnverified)),
+                JudgedCheck::Unchecked {
+                    reason: CheckingUnchecked::CheckingInterrupted,
+                } => Some(Box::new(JudgedDisplayEvidence::CheckingInterrupted)),
+            }
+        })
+    });
+    if token == Some(LabelToken::Unchecked) && judged.is_none() {
         qualifiers.push(Qualifier::NoAnswer);
     }
-    if token == Some(LabelToken::CheckerFailed) {
+    if token == Some(LabelToken::CheckerFailed) && judged.is_none() {
         qualifiers.push(Qualifier::InvalidAnswer);
     }
     if token == Some(LabelToken::TimeLimit) {
-        qualifiers.push(Qualifier::WallDeadline {
-            deadline: context.wall_deadline,
-            measured_wall: context.measured_wall,
+        qualifiers.push(if context.peer_allowance_expired {
+            Qualifier::PeerAllowanceExpired
+        } else {
+            Qualifier::WallDeadline {
+                deadline: context.wall_deadline,
+                measured_wall: context.measured_wall,
+            }
         });
+    }
+    if token == Some(LabelToken::SessionLimit) {
+        qualifiers.push(Qualifier::SessionDeadline(context.session_deadline));
+    }
+    if token == Some(LabelToken::Idle) {
+        qualifiers.push(Qualifier::Idle(context.idle_interval));
+    }
+    if matches!(
+        token,
+        Some(
+            LabelToken::Ok
+                | LabelToken::WrongAnswer
+                | LabelToken::PresentationError
+                | LabelToken::CheckerFailed
+                | LabelToken::Unchecked
+        )
+    ) {
+        if let Some(judged) = judged {
+            qualifiers.push(Qualifier::Judged(judged));
+        }
+    }
+    if matches!(subject, LabelSubject::Test { .. }) {
+        let points = context.test_points.or_else(|| {
+            check.and_then(|check| match &check.kind {
+                CheckKind::Judged { outcome } => match outcome.as_ref() {
+                    JudgedCheck::Scored { raw, scale, .. } => Some((*raw, *scale)),
+                    _ => None,
+                },
+                _ => None,
+            })
+        });
+        if let Some((raw, scale)) = points {
+            qualifiers.push(Qualifier::TestPoints { raw, scale });
+        }
+    } else if matches!(subject, LabelSubject::Job(_)) {
+        if let Some(score) = &context.job_score {
+            qualifiers.push(Qualifier::JobScore(score.clone()));
+        }
     }
     // Qualify only the chosen label: e.g. cancellation at check admission must
     // not accidentally acquire a runtime-error qualifier from the run class.
@@ -554,6 +831,39 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
     );
     DisplayLabel { token, qualifiers }
 }
+
+fn role_build_label(
+    role: RoleName,
+    result: &RoleBuildResult,
+    context: &DisplayContext,
+) -> DisplayLabel {
+    let result = match result {
+        RoleBuildResult::Failed { cause } => {
+            return DisplayLabel {
+                token: Some(LabelToken::CompileError),
+                qualifiers: vec![Qualifier::RoleBuild {
+                    role,
+                    cause: cause.clone(),
+                }],
+            };
+        }
+        RoleBuildResult::Skipped { reason } => {
+            return label(
+                LabelSubject::Hook(&HookOutcome::Skipped { reason: *reason }),
+                context,
+            );
+        }
+        RoleBuildResult::Succeeded => BuildResult::Succeeded,
+        RoleBuildResult::Cancelled => BuildResult::Cancelled,
+        RoleBuildResult::Infrastructure { causes } => BuildResult::Infrastructure {
+            causes: causes.clone(),
+        },
+        RoleBuildResult::InternalError { invariant } => BuildResult::InternalError {
+            invariant: *invariant,
+        },
+    };
+    label(LabelSubject::Build(&result), context)
+}
 /// A profile changes only the human label; raw verdicts remain unchanged.
 pub fn label_for_profile(
     subject: LabelSubject<'_>,
@@ -590,6 +900,25 @@ pub enum SummaryTemplate {
         count: u32,
     },
     NoTests,
+    Checker {
+        passed: u32,
+        selected: u32,
+        profile: JudgeProfile,
+    },
+    Interactive {
+        passed: u32,
+        selected: u32,
+        checking: InteractiveChecking,
+    },
+    Points {
+        value: Score,
+        max: Score,
+        aggregation: Aggregation,
+        selected: u32,
+    },
+    IncompleteScore {
+        missing: u32,
+    },
 }
 impl SummaryTemplate {
     pub const fn wire_token(&self) -> &'static str {
@@ -597,6 +926,10 @@ impl SummaryTemplate {
             Self::Passed { .. } => "passed",
             Self::Unchecked { .. } => "unchecked",
             Self::NoTests => "no_tests",
+            Self::Checker { .. } => "checker",
+            Self::Interactive { .. } => "interactive",
+            Self::Points { .. } => "points",
+            Self::IncompleteScore { .. } => "incomplete_score",
         }
     }
     pub fn render(&self) -> String {
@@ -608,6 +941,39 @@ impl SummaryTemplate {
             } => format!("{passed}/{selected} passed ({comparator} comparison)"),
             Self::Unchecked { count } => format!("{count} unchecked (no answer): not verified"),
             Self::NoTests => "no tests: nothing verified".into(),
+            Self::Checker {
+                passed,
+                selected,
+                profile,
+            } => format!(
+                "{passed}/{selected} passed ({} checker)",
+                match profile {
+                    JudgeProfile::Testlib => "testlib",
+                    JudgeProfile::Simple => "simple",
+                }
+            ),
+            Self::Interactive {
+                passed,
+                selected,
+                checking,
+            } => format!(
+                "{passed}/{selected} passed (interactive, checking {})",
+                match checking {
+                    InteractiveChecking::Interactor => "interactor",
+                    InteractiveChecking::Checker => "checker",
+                    InteractiveChecking::InteractorChecker => "interactor_checker",
+                }
+            ),
+            Self::Points {
+                value,
+                max,
+                aggregation,
+                selected,
+            } => format!(
+                "{value}/{max} points ({}) over {selected} tests",
+                aggregation_text(*aggregation)
+            ),
+            Self::IncompleteScore { missing } => incomplete_score(*missing),
         }
     }
 }
@@ -615,9 +981,14 @@ impl SummaryTemplate {
 pub struct Summary {
     pub template: SummaryTemplate,
     pub file_io: bool,
+    pub inputs_validated: bool,
     pub interrupted_after_completion: bool,
 }
 impl Summary {
+    pub fn with_validated_inputs(mut self) -> Self {
+        self.inputs_validated = true;
+        self
+    }
     pub fn with_file_io(mut self) -> Self {
         self.file_io = true;
         self
@@ -626,6 +997,9 @@ impl Summary {
         let mut text = self.template.render();
         if self.file_io {
             text.push_str(" (file I/O)");
+        }
+        if self.inputs_validated {
+            text.push_str(" (inputs validated)");
         }
         if self.interrupted_after_completion {
             text.push_str(" (interrupted after completion)");
@@ -639,6 +1013,7 @@ pub fn summary(template: SummaryTemplate, completed: bool, recorded_intent: bool
     Summary {
         template,
         file_io: false,
+        inputs_validated: false,
         interrupted_after_completion: completed && recorded_intent,
     }
 }

@@ -542,6 +542,85 @@ def verify():
     verify_file_io()
     verify_judging()
     verify_roles()
+    verify_judge_fingerprints()
+    verify_judged_summaries()
+
+
+def judge_fingerprint_vectors():
+    """Config §9.1.3, independently of the Rust encoder and SHA writer."""
+    def integer(v):
+        return v.to_bytes(8, "little")
+
+    def string(v):
+        v = v.encode() if isinstance(v, str) else v
+        return integer(len(v)) + v
+
+    def strings(v):
+        return integer(len(v)) + b"".join(map(string, v))
+
+    def stage(argv):
+        # argv tag, command, cwd=run, empty env_remove and env.
+        return b"\0" + strings(argv) + b"\0\0" + integer(0) * 2
+
+    def role(token, prebuilt, shell=False):
+        result = b"\1" + string(token) + string("simple" if prebuilt else "testlib")
+        result += bytes([int(prebuilt)]) + integer(2)
+        result += string("a") + string(b"X") + string("z") + string(b"\0\xff")
+        result += strings(["a"])
+        if not prebuilt:
+            result += strings([])
+        result += strings(["z"])
+        if not prebuilt:
+            result += string("python") + b"\1" + string("E")
+            if shell:
+                settings = b"\1" + strings(["sh", "-c"]) + string("echo {}") + strings(["{entry}", "x"])
+                settings += b"\0\0" + strings(["A", "Z"]) + integer(2)
+                settings += string("OFF") + b"\0" + string("X") + b"\1" + string("v")
+                result += b"\1" + settings * 2
+            else:
+                result += b"\1" + stage(["cc", "{sources}"]) + stage(["run", "{entry}"])
+        if shell:
+            return result + b"\0\0\1" + integer(12) + string("argv")
+        result += b"\1" + integer(1_234_000) + b"\1" + integer(10) + b"\0"
+        return result + string("none")
+
+    check = dict(kind="checker", answer="file", scoring=dict(kind="pass_fail"), interactive=None)
+    prefix = string("cpf-fp-judge-v1") + string(encode(check))
+    cases = [
+        ("absent", b"\0\0\0"),
+        ("built", role("checker", False) + b"\0\0"),
+        ("prebuilt", role("checker", True) + b"\0\0"),
+        ("all_roles", role("checker", True) + role("validator", False) + role("interactor", False)),
+    ]
+    inputs = [(name, prefix + data) for name, data in cases]
+    interactive = dict(kind="interactive", answer="none", scoring=dict(kind="points", scale="100", aggregation="min"),
+                       interactive=dict(checking="interactor_checker", mode="relay", idle_us="1000000", early_reader_close=True,
+                                        interactor_allowance_us="2000000", peer_allowance_us="3000000", solution_seed="env", interactor_seed="argv"))
+    data = string("cpf-fp-judge-v1") + string(encode(interactive)) + b"\0\0" + role("interactor", False, shell=True)
+    inputs.append(("interactive_shell", data))
+    return [dict(name=name, input_hex=data.hex(), sha256=hashlib.sha256(data).hexdigest()) for name, data in inputs]
+
+
+def verify_judge_fingerprints():
+    vectors = json.loads((ROOT / "judge_fingerprints.json").read_bytes())
+    assert vectors == judge_fingerprint_vectors()
+    print("judge fingerprint: 5 independent full byte/SHA-256 vectors")
+
+
+def judged_summary_vectors():
+    templates = [f"2/3 passed ({p} checker)" for p in ["simple", "testlib"]]
+    templates += [f"2/3 passed (interactive, checking {c})"
+                  for c in ["interactor", "checker", "interactor_checker"]]
+    templates += [f"12.5/100 points ({a}) over 3 tests" for a in ["sum", "min"]]
+    templates += ["incomplete: 2 tests without a score"]
+    return [t + " (inputs validated) (interrupted after completion)" for t in templates]
+
+
+def verify_judged_summaries():
+    vectors = json.loads((ROOT / "judged_summaries.json").read_bytes())
+    assert vectors == judged_summary_vectors()
+    assert all("accepted" not in v and "correct" not in v for v in vectors)
+    print("judged summaries: checker, interactive, points, incomplete and validated-input suffix")
 
 
 if __name__ == "__main__":

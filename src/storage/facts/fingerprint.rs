@@ -12,6 +12,9 @@ use crate::report::wire::native_bytes;
 use crate::storage::inputs::CapturedSourceCopy;
 use crate::tests_store::{FrozenAnswer, FrozenTest};
 
+mod judge;
+pub use judge::*;
+
 /// A logical problem-relative name and the file supplying its bytes. Status
 /// can use original paths; a job must use its captured copy paths.
 #[derive(Clone, Debug)]
