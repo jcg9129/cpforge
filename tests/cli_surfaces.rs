@@ -318,7 +318,11 @@ fn invalid_values_and_combinations_are_usage_errors() {
         let output = cpf(&args);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Usage:"), "{args:?}: {stderr}");
+        // Clap reports a bad value without the usage block; both are usage errors.
+        assert!(
+            stderr.contains("Usage:") || stderr.contains("invalid value"),
+            "{args:?}: {stderr}"
+        );
         assert!(!stderr.contains("not available yet"), "{args:?}: {stderr}");
     }
 }

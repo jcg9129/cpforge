@@ -646,9 +646,8 @@ impl Cli {
             Some(Command::Fetch(args)) if !args.only.is_empty() || args.all_in_section => {
                 let reference = args.reference.as_deref().unwrap_or("");
                 let (contest, cses) = fetch_selection(reference);
-                if args.all_in_section && !cses
-                    || !args.only.is_empty() && !(contest || cses && args.all_in_section)
-                {
+                let only_allowed = contest || (cses && args.all_in_section);
+                if (args.all_in_section && !cses) || (!args.only.is_empty() && !only_allowed) {
                     Some(
                         "--only requires a contest or section; --all-in-section requires a CSES task URL",
                     )
