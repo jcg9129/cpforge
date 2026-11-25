@@ -17,6 +17,7 @@ pub enum ExitCode {
     Partial = 9,
     Infrastructure = 10,
     Delivery = 11,
+    Site = 12,
     Internal = 70,
 }
 impl From<ExitCode> for std::process::ExitCode {
@@ -65,6 +66,7 @@ pub fn exit_status(input: &ExitInputs) -> ExitCode {
             Some(F::Config) => ExitCode::Config,
             Some(F::Workspace) => ExitCode::Workspace,
             Some(F::Partial) => ExitCode::Partial,
+            Some(F::Site) => ExitCode::Site,
             Some(F::Infrastructure) => ExitCode::Infrastructure,
             _ => match input.verdict {
                 Some(V::Infrastructure) => ExitCode::Infrastructure,
@@ -99,6 +101,7 @@ mod tests {
             (Some(F::Config), None, false, false, false, false, 7),
             (Some(F::Workspace), None, false, false, false, false, 8),
             (Some(F::Partial), None, false, false, false, false, 9),
+            (Some(F::Site), None, false, false, false, false, 12),
             (
                 None,
                 Some(V::Infrastructure),
@@ -140,6 +143,7 @@ mod tests {
             FailureClass::Config,
             FailureClass::Workspace,
             FailureClass::Partial,
+            FailureClass::Site,
             FailureClass::Cancelled,
         ] {
             assert_eq!(
@@ -254,5 +258,58 @@ mod tests {
             }),
             ExitCode::Infrastructure
         );
+    }
+
+    #[test]
+    fn site_is_twelve_and_precedes_every_ordinary_verdict() {
+        assert_eq!(ExitCode::Site as u8, 12);
+        assert_eq!(FailureClass::Site.token(), "site");
+        for verdict in [
+            JobVerdict::Infrastructure,
+            JobVerdict::BuildFailed,
+            JobVerdict::CheckerFailed,
+            JobVerdict::WrongAnswer,
+            JobVerdict::Unchecked,
+            JobVerdict::Passed,
+        ] {
+            assert_eq!(
+                exit_status(&ExitInputs {
+                    failure: Some(FailureClass::Site),
+                    verdict: Some(verdict),
+                    ..ExitInputs::default()
+                }),
+                ExitCode::Site
+            );
+        }
+        assert_eq!(
+            exit_status(&ExitInputs {
+                failure: Some(FailureClass::Site),
+                cancellation: true,
+                ..ExitInputs::default()
+            }),
+            ExitCode::Cancelled
+        );
+        assert_eq!(
+            exit_status(&ExitInputs {
+                failure: Some(FailureClass::Site),
+                verdict: Some(JobVerdict::InternalError),
+                ..ExitInputs::default()
+            }),
+            ExitCode::Internal
+        );
+        // Earlier non-job refusal rows retain their codes.
+        for (failure, code) in [
+            (FailureClass::Config, ExitCode::Config),
+            (FailureClass::Workspace, ExitCode::Workspace),
+            (FailureClass::Partial, ExitCode::Partial),
+        ] {
+            assert_eq!(
+                exit_status(&ExitInputs {
+                    failure: Some(failure),
+                    ..ExitInputs::default()
+                }),
+                code
+            );
+        }
     }
 }

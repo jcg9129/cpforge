@@ -113,12 +113,17 @@ pub use compose::{
 };
 pub use env::{env_name_fold, env_name_fold_os};
 pub use load::{DiscoveryError, DiscoveryOptions, Environment, LayerSource, discover, load, parse};
+pub use load::{ProblemTables, parse_problem_tables};
 pub use stages::{
     CapPolicy, ComposedStage, ComposedTarget, ContextRequirements, DeferredValue, Operation,
     PublishedLimit, Selection, StageHistory, StageKind, TargetSettings,
 };
 pub use syntax::{Placeholder, Token, tokenize};
 pub use validate::parse_deadline;
+pub use validate::surfaces::{
+    CHECK_DEFAULTS, INTERACTIVE_DEFAULTS, INTERACTOR_SEED_DEFAULTS, INTERACTOR_TEST_DEFAULTS,
+    ROLE_DEFAULTS, SCORING_DEFAULTS, STRESS_DEFAULTS, SUBMIT_STAGE_DEFAULTS, WORKFLOW_DEFAULTS,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
@@ -368,3 +373,6 @@ mod compose_tests;
 
 #[cfg(test)]
 mod check_tests;
+
+#[cfg(test)]
+mod surface_tests;

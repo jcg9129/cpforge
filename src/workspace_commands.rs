@@ -7,8 +7,7 @@ use crate::error::Error;
 use crate::exit::ExitCode;
 use crate::storage::{self, WorkspaceGuard, WorkspaceLock, prune};
 
-pub(crate) const IGNORE_PATTERNS: &str =
-    ".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n";
+pub(crate) const IGNORE_PATTERNS: &str = ".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n.cpforge/downloads/\n.cpforge/submit/\n.cpforge/archive/\n.cpforge/quarantine/\n# optional: .cpforge/facts/\n# optional: .cpforge/fetch/\n# optional: problems/*/stress/failures/\n";
 
 pub(crate) fn root() -> Result<PathBuf, Error> {
     let cwd = std::env::current_dir().map_err(|e| Error::Workspace(e.to_string()))?;

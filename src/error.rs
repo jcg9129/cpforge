@@ -2,12 +2,14 @@
 use crate::exit::{ExitCode, ExitInputs, exit_status};
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FailureClass {
     Usage,
     Config,
     Workspace,
     Partial,
+    Site,
     Infrastructure,
     Delivery,
     Cancelled,
@@ -20,6 +22,7 @@ impl FailureClass {
             Self::Config => "config",
             Self::Workspace => "workspace",
             Self::Partial => "partial",
+            Self::Site => "site",
             Self::Infrastructure => "infrastructure",
             Self::Delivery => "delivery",
             Self::Cancelled => "cancelled",
@@ -34,6 +37,7 @@ pub enum Error {
     Config(String),
     Workspace(String),
     Partial(String),
+    Site(String),
     Infrastructure(String),
     Delivery(String),
     Cancelled(String),
@@ -46,6 +50,7 @@ impl Error {
             Self::Config(_) => FailureClass::Config,
             Self::Workspace(_) => FailureClass::Workspace,
             Self::Partial(_) => FailureClass::Partial,
+            Self::Site(_) => FailureClass::Site,
             Self::Infrastructure(_) => FailureClass::Infrastructure,
             Self::Delivery(_) => FailureClass::Delivery,
             Self::Cancelled(_) => FailureClass::Cancelled,
@@ -73,6 +78,7 @@ impl fmt::Display for Error {
             Self::Config(message)
             | Self::Workspace(message)
             | Self::Partial(message)
+            | Self::Site(message)
             | Self::Infrastructure(message)
             | Self::Delivery(message)
             | Self::Cancelled(message)

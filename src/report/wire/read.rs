@@ -67,6 +67,27 @@ pub fn read_json(bytes: &[u8]) -> Result<serde_json::Value> {
         .map(|v| v.0)
         .map_err(|_| Error("invalid JSON, duplicate member or non-integer number"))
 }
+/// Validate the common schema-1 envelope only. Document-specific members must
+/// still be checked by their reader; pending document stubs have no such reader.
+pub fn read_document_kind(bytes: &[u8]) -> Result<crate::report::DocumentKind> {
+    let value = read_json(bytes)?;
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        || !matches!(
+            value.get("platform").and_then(serde_json::Value::as_str),
+            Some("unix" | "windows")
+        )
+    {
+        return Err(Error("expected schema-1 document envelope"));
+    }
+    serde_json::from_value(
+        value
+            .get("document")
+            .cloned()
+            .ok_or(Error("missing document kind"))?,
+    )
+    .map_err(|_| Error("unknown document kind"))
+}
+
 pub fn read_u64(value: &serde_json::Value) -> Result<u64> {
     let s = value
         .as_str()

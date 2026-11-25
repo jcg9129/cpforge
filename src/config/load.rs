@@ -158,6 +158,64 @@ pub fn parse(
     )
 }
 
+/// Raw, independently validated problem-record surfaces for later consumers.
+/// Gate-1 loaders intentionally keep their existing judging and I/O refusals.
+#[derive(Clone, Debug, Default)]
+pub struct ProblemTables {
+    pub check: Option<RawNode>,
+    pub stress: Option<RawNode>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Validate only the record-owned tables, without composing or enabling roles.
+/// `include_stress` is false for consumers to which stress does not apply.
+pub fn parse_problem_tables(
+    bytes: &[u8],
+    source: &LayerSource,
+    env: &Environment,
+    platform: Platform,
+    include_stress: bool,
+) -> ProblemTables {
+    let record =
+        storage::classify_user_record_spanned(bytes, 1, |document| decode(document, source));
+    let Record::Valid(mut root) = record else {
+        let layer = finish(
+            record,
+            source,
+            env,
+            platform,
+            std::str::from_utf8(bytes).ok(),
+        );
+        return ProblemTables {
+            diagnostics: layer.diagnostics,
+            ..ProblemTables::default()
+        };
+    };
+    let mut result = ProblemTables::default();
+    let mut validator = super::validate::Validator::new(env, platform, source.kind);
+    if let RawValue::Table(entries) = &mut root.value {
+        result.check = entries.remove("check");
+        if include_stress {
+            result.stress = entries.remove("stress");
+        }
+    }
+    if let Some(check) = &mut result.check {
+        validator.record_table(check, false);
+    }
+    if let Some(stress) = &mut result.stress {
+        validator.record_table(stress, true);
+    }
+    result.diagnostics = validator.diagnostics;
+    result.diagnostics.sort_by(|a, b| {
+        (&a.origin.key_path, a.origin.line, a.origin.col).cmp(&(
+            &b.origin.key_path,
+            b.origin.line,
+            b.origin.col,
+        ))
+    });
+    result
+}
+
 fn decode(document: &ImDocument<String>, source: &LayerSource) -> Result<RawNode, Box<Diagnostic>> {
     let text = document.raw();
     let root = table(

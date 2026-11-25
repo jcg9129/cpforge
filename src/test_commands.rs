@@ -33,6 +33,15 @@ pub(crate) fn run(
     command: TestCommand,
     machine: crate::cli::MachineArgs,
 ) -> Result<(), Error> {
+    if matches!(
+        &command,
+        TestCommand::Add {
+            from_stress: Some(_),
+            ..
+        }
+    ) {
+        return Err(crate::unavailable_command("test add --from-stress"));
+    }
     if machine.mode().requested() {
         return Err(clap::Error::raw(
             clap::error::ErrorKind::ArgumentConflict,
@@ -41,8 +50,9 @@ pub(crate) fn run(
         .into());
     }
     if let TestCommand::Add {
-        input,
+        input: Some(input),
         answer: Some(answer),
+        ..
     } = &command
     {
         if input == std::path::Path::new("-") && answer == std::path::Path::new("-") {
@@ -105,7 +115,12 @@ pub(crate) fn run(
     }
     // Capture both streams before creating or acquiring a workspace lock.
     // A failure drops any earlier capture and has published nothing.
-    let captures = if let TestCommand::Add { input, answer } = &command {
+    let captures = if let TestCommand::Add {
+        input: Some(input),
+        answer,
+        ..
+    } = &command
+    {
         let capture = |path: &std::path::Path| {
             CapturedFile::from_source(path).map_err(|error| {
                 Error::Workspace(format!("cannot capture {}: {error}", path.display()))

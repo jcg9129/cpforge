@@ -590,6 +590,8 @@ pub enum NodeKind {
     Stage,
     /// A language or profile `build`: also a stage; `false` is a reset.
     Build,
+    /// A submit stage: ordinary stage merging plus an atomic version probe.
+    Submit,
     /// An `env` map.
     Env,
     /// An `env` value; `false` is a tombstone.
@@ -608,7 +610,7 @@ impl NodeKind {
         matches!(self, Self::Atomic | Self::Cwd | Self::Artifacts)
     }
     fn stage(self) -> bool {
-        matches!(self, Self::Stage | Self::Build)
+        matches!(self, Self::Stage | Self::Build | Self::Submit)
     }
     fn child(self, key: &str) -> Self {
         match (self, key) {
@@ -620,13 +622,18 @@ impl NodeKind {
             (Self::Languages, _) => Self::Language,
             (Self::Language, "profiles") => Self::Profiles,
             (Self::Profiles, _) => Self::Profile,
+            (Self::Language, "submit") => Self::Submit,
+            (Self::Submit, "version") => Self::Atomic,
             (Self::Language | Self::Profile, "build") => Self::Build,
             (Self::Language | Self::Profile, "run") | (Self::Commands, _) => Self::Stage,
             (Self::Language, "artifacts") => Self::Artifacts,
             (Self::Language, "template") => Self::Atomic,
-            (Self::Stage | Self::Build, "env") => Self::Env,
-            (Self::Stage | Self::Build, "cwd") => Self::Cwd,
-            (Self::Stage | Self::Build, "argv" | "shell" | "limits" | "env_remove") => Self::Atomic,
+            (Self::Stage | Self::Build | Self::Submit, "env") => Self::Env,
+            (Self::Stage | Self::Build | Self::Submit, "cwd") => Self::Cwd,
+            (
+                Self::Stage | Self::Build | Self::Submit,
+                "argv" | "shell" | "limits" | "env_remove",
+            ) => Self::Atomic,
             (Self::Env, _) => Self::EnvValue,
             _ => Self::Other,
         }

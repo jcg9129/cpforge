@@ -376,10 +376,30 @@ fn clean_apply_removes_only_inactive_jobs_and_cache() {
 }
 
 #[test]
+fn gitignore_matches_storage_contract() {
+    let workspace = Workspace::new();
+    let before = workspace.snapshot();
+    let expected = concat!(
+        ".cpforge/runs/\n",
+        ".cpforge/cache/\n",
+        ".cpforge/staging/\n",
+        ".cpforge/downloads/\n",
+        ".cpforge/submit/\n",
+        ".cpforge/archive/\n",
+        ".cpforge/quarantine/\n",
+        "# optional: .cpforge/facts/\n",
+        "# optional: .cpforge/fetch/\n",
+        "# optional: problems/*/stress/failures/\n"
+    );
+    assert_eq!(workspace.ok(&["gitignore"]).stdout, expected.as_bytes());
+    assert_eq!(workspace.snapshot(), before);
+}
+
+#[test]
 fn gitignore_print_create_replace_append_and_refuse_bad_markers() {
     let workspace = Workspace::new();
     let patterns =
-        b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n";
+        b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n.cpforge/downloads/\n.cpforge/submit/\n.cpforge/archive/\n.cpforge/quarantine/\n# optional: .cpforge/facts/\n# optional: .cpforge/fetch/\n# optional: problems/*/stress/failures/\n";
     let before = workspace.snapshot();
     assert_eq!(workspace.ok(&["gitignore"]).stdout, patterns);
     assert_eq!(workspace.snapshot(), before);
@@ -1775,13 +1795,13 @@ mod record_command_crashes {
 
     #[cfg(windows)]
     fn crate_patterns() -> &'static [u8] {
-        b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n"
+        b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n.cpforge/downloads/\n.cpforge/submit/\n.cpforge/archive/\n.cpforge/quarantine/\n# optional: .cpforge/facts/\n# optional: .cpforge/fetch/\n# optional: problems/*/stress/failures/\n"
     }
 
     #[test]
     fn gitignore_crash_boundaries() {
         let patterns =
-            b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n# optional: .cpforge/facts/\n";
+            b".cpforge/runs/\n.cpforge/cache/\n.cpforge/staging/\n.cpforge/downloads/\n.cpforge/submit/\n.cpforge/archive/\n.cpforge/quarantine/\n# optional: .cpforge/facts/\n# optional: .cpforge/fetch/\n# optional: problems/*/stress/failures/\n";
         let block = [b"# >>> cpforge\n".as_slice(), patterns, b"# <<< cpforge\n"].concat();
         let prefix = b"# user rules\r\n\xffcache/\r\n# >>> cpforge\r\n";
         let suffix = b"# <<< cpforge\r\n!keep\r\nlast-without-newline";

@@ -1,3 +1,7 @@
+#[path = "surfaces.rs"]
+pub(super) mod surfaces;
+use surfaces::Surface;
+
 use std::collections::BTreeMap;
 
 use super::load::Environment;
@@ -27,6 +31,7 @@ enum Context {
     Retention,
     Workspace,
     Hooks,
+    Surface(Surface),
 }
 
 pub(super) struct Validator<'a> {
@@ -102,7 +107,9 @@ impl<'a> Validator<'a> {
             return;
         }
         match ctx {
-            Context::Stage { .. } => self.conflict(node, "argv", "shell"),
+            Context::Stage { .. } | Context::Surface(Surface::SubmitStage) => {
+                self.conflict(node, "argv", "shell")
+            }
             Context::Cwd => self.conflict(node, "path", "selector"),
             Context::Artifacts => {
                 self.conflict(node, "file", "dir");
@@ -135,7 +142,10 @@ impl<'a> Validator<'a> {
         }
         for (key, field) in t.iter_mut() {
             let site = matches!(ctx, Context::Language | Context::Profile)
-                || matches!(ctx, Context::Stage { overlays: true, .. });
+                || matches!(
+                    ctx,
+                    Context::Stage { overlays: true, .. } | Context::Surface(Surface::SubmitStage)
+                );
             if syntax::overlay(key)
                 && (site || (overlaid && !matches!(ctx, Context::Env | Context::Commands)))
             {
@@ -170,6 +180,9 @@ impl<'a> Validator<'a> {
         let missing_template_path = matches!(ctx, Context::Template) && !t.contains_key("path");
         if missing_io_names {
             self.error(node, "io requires at least one of input or output");
+        }
+        if let Context::Surface(surface) = ctx {
+            self.surface_table_rules(node, surface);
         }
         // Completeness of stages, shell, cwd and artifacts belongs to phase 2.
         // Template is not composed as a stage and its sole path is required.
@@ -213,6 +226,19 @@ impl<'a> Validator<'a> {
                     "retention" if !problem => self.table(n, Context::Retention, active, overlaid),
                     "workspace" if !problem => self.table(n, Context::Workspace, active, overlaid),
                     "hooks" if !problem => self.table(n, Context::Hooks, active, overlaid),
+                    "status" | "archive" | "submit" | "http" | "sites" if !problem => {
+                        let surface = match key {
+                            "status" => Surface::Status,
+                            "archive" => Surface::Archive,
+                            "submit" => Surface::Submit,
+                            "http" => Surface::Http,
+                            _ => Surface::Sites,
+                        };
+                        self.table(n, Context::Surface(surface), active, overlaid);
+                    }
+                    "status" | "archive" | "http" | "sites" if problem => {
+                        self.reject(n, "key is not allowed in the problem config layer")
+                    }
                     "schema" | "default_language" | "languages" | "commands" | "retention"
                     | "workspace" | "hooks"
                         if problem =>
@@ -248,6 +274,9 @@ impl<'a> Validator<'a> {
                     active,
                     overlaid,
                 ),
+                "submit" if matches!(ctx, Context::Language) => {
+                    self.table(n, Context::Surface(Surface::SubmitStage), active, overlaid)
+                }
                 "extensions" if matches!(ctx, Context::Language) => {
                     self.strings(n, StringRule::Extension, lexical, active)
                 }
@@ -351,6 +380,7 @@ impl<'a> Validator<'a> {
                 "ignore" => self.strings(n, StringRule::Ignore, lexical, active),
                 _ => self.unknown(n),
             },
+            Context::Surface(surface) => self.surface_field(key, n, surface, active, overlaid),
             Context::Hooks => match key {
                 "on_switch" | "after_test" => {
                     self.strings(n, StringRule::CommandName, lexical, active)

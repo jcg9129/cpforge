@@ -8,11 +8,13 @@
 
 pub mod derive;
 mod display;
+mod documents;
 mod types;
 pub mod wire;
 
 pub use derive::*;
 pub use display::*;
+pub use documents::*;
 pub use types::*;
 
 #[cfg(test)]

@@ -954,3 +954,42 @@ fn cwd_unmeasured_summary_notes_match_golden_and_validate_exclusivity() {
         include_bytes!("fixtures/cwd_unmeasured_summaries.json")
     );
 }
+
+#[test]
+fn site_error_wire_and_document_kind_envelope() {
+    let error = ErrorDocument {
+        platform: "unix",
+        command: "fetch".into(),
+        class: FailureClass::Site,
+        exit: 12,
+        error: DocumentError {
+            kind: "offline_miss",
+            message: "no cached page".into(),
+            path: None,
+        },
+        diagnostics: vec![],
+        diagnostics_dropped: 0,
+    };
+    let bytes = encode_error(&error).unwrap();
+    assert_eq!(
+        read::read_document_kind(&bytes).unwrap(),
+        r::DocumentKind::Error
+    );
+    let value = read::read_json(&bytes).unwrap();
+    assert_eq!(value["exit"], 12);
+    assert_eq!(
+        serde_json::from_value::<FailureClass>(value["class"].clone()).unwrap(),
+        FailureClass::Site
+    );
+    let mut job_refusal = refusal();
+    job_refusal.class = FailureClass::Site;
+    assert!(encode_refusal(&job_refusal).is_err());
+    for invalid in [
+        r#"{"schema":2,"document":"fetch","platform":"unix"}"#,
+        r#"{"schema":1,"document":"unknown","platform":"unix"}"#,
+        r#"{"schema":1,"document":"fetch","platform":"other"}"#,
+        r#"{"schema":1,"document":"fetch","document":"notes","platform":"unix"}"#,
+    ] {
+        assert!(read::read_document_kind(invalid.as_bytes()).is_err());
+    }
+}

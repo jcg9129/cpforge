@@ -42,12 +42,42 @@ use crate::{
 
 /// Run the parsed CLI.
 pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
+    cli.validate_surfaces()?;
     if cli.problem.is_some() && matches!(&cli.command, Some(Command::Switch { .. })) {
         return Err(clap::Error::raw(
             ErrorKind::ArgumentConflict,
             "--problem cannot be used with switch",
         )
         .into());
+    }
+    if let Some(command) = cli.command.as_ref() {
+        let unavailable = match command {
+            Command::Fetch(_) => Some("fetch"),
+            Command::Tag(_) => Some("tag"),
+            Command::Untag(_) => Some("untag"),
+            Command::Mark { .. } => Some("mark"),
+            Command::Notes { .. } => Some("notes"),
+            Command::Ls(_) => Some("ls"),
+            Command::Search(_) => Some("search"),
+            Command::Stress(args) => Some(if args.command.is_some() {
+                "stress ls"
+            } else {
+                "stress"
+            }),
+            Command::InteractorTest { .. } => Some("interactor-test"),
+            Command::SubmitPrep(_) => Some("submit-prep"),
+            Command::Archive(_) => Some("archive"),
+            Command::Quarantine { command } => Some(match command {
+                cli::QuarantineCommand::Ls => "quarantine ls",
+                cli::QuarantineCommand::Purge { .. } => "quarantine purge",
+            }),
+            Command::Restore { .. } => Some("restore"),
+            Command::Status { filters, .. } if !filters.is_empty() => Some("status"),
+            _ => None,
+        };
+        if let Some(name) = unavailable {
+            return Err(unavailable_command(name));
+        }
     }
     match cli.command {
         Some(Command::Config { command }) => {
@@ -121,6 +151,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             reference,
             all,
             json,
+            filters: _,
         }) => {
             if cli.problem.is_some() && (reference.is_some() || all) {
                 return Err(clap::Error::raw(
@@ -177,7 +208,18 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             .map(|()| exit::ExitCode::Success);
         }
         None => {}
+        // All unfinished surfaces return before any workspace/configuration I/O.
+        Some(_) => unreachable!("unfinished command dispatched above"),
     }
     let help = Cli::command().render_help().to_string();
     Err(clap::Error::raw(ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand, help).into())
+}
+
+/// Contract §9.9 R-U02: parsing succeeds, but no feature work may start.
+pub(crate) fn unavailable_command(name: &str) -> Error {
+    clap::Error::raw(
+        ErrorKind::InvalidValue,
+        format!("cpf {name}: not available yet"),
+    )
+    .into()
 }
