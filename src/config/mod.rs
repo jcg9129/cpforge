@@ -85,6 +85,7 @@ mod built_in;
 mod check;
 mod compose;
 mod env;
+mod judging;
 mod load;
 mod stages;
 pub(crate) mod syntax;
@@ -112,6 +113,7 @@ pub use compose::{
     Stage, UnknownInput, ValueSnapshot, compose,
 };
 pub use env::{env_name_fold, env_name_fold_os};
+pub use judging::*;
 pub use load::{DiscoveryError, DiscoveryOptions, Environment, LayerSource, discover, load, parse};
 pub use load::{ProblemTables, parse_problem_tables};
 pub use stages::{
@@ -229,6 +231,9 @@ pub struct RawLayer {
     pub platform: Platform,
     pub file: PathBuf,
     pub state: LayerState,
+    /// Record-owned judging declarations, read only from local problem.toml.
+    pub problem_check: Option<RawNode>,
+    pub problem_kind: Option<RawNode>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -376,3 +381,6 @@ mod check_tests;
 
 #[cfg(test)]
 mod surface_tests;
+
+#[cfg(test)]
+mod judging_tests;

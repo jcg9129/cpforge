@@ -89,6 +89,8 @@ pub struct TestEntry {
     pub answer: Answer,
     pub origin: Origin,
     pub enabled: bool,
+    /// Reserved execution-affecting declaration, preserved verbatim by edits.
+    pub check: Option<Location>,
     /// The catalog location of this entry, independent of its provenance.
     pub origin_location: Location,
 }
@@ -219,6 +221,7 @@ fn fields(table: &Table, file: &Path, source: Option<&str>) -> Result<Catalog, D
             answer,
             origin,
             enabled,
+            check: record.get("check").map(|_| at("check")),
             origin_location: at("id"),
         });
     }
@@ -796,6 +799,7 @@ impl TestStore {
                 },
                 origin,
                 enabled: true,
+                check: None,
                 origin_location: location(&self.catalog_path(), String::new(), None, None),
             });
         }
@@ -861,6 +865,7 @@ impl TestStore {
                 answer,
                 origin: Origin::Custom,
                 enabled: true,
+                check: None,
                 origin_location: location(&self.catalog_path(), String::new(), None, None),
             };
             for path in entry.paths() {

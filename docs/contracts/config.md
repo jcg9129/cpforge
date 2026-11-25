@@ -1126,7 +1126,9 @@ absent or `batch` is interactive; `[problem] kind = "interactive"` with a
 interactor"). A `[check]` on a problem of kind `answer`, `multi-file` or an
 unknown kind changes nothing: their refused operations stay refused.
 A per-test `check` key in a `tests.toml` entry (storage contract §8.1)
-is refused the same way for every selected entry that holds it.
+is refused the same way when a judged job (`cpf test`, `cpf
+interactor-test`, `cpf submit-prep` stage mode) selects an entry that
+holds it; other jobs leave it inert.
 A version that does not implement a part of §9.1 rejects its keys on
 presence (even with default values) for `build`, `run`, `test` and `cmd`
 with `needs_build` / `for_each_test`, as a configuration planning error

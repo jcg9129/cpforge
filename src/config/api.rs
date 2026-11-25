@@ -646,6 +646,12 @@ impl LoadedConfig {
         &self.merged
     }
 
+    /// Typed judging declarations after all phase-1/2 checks; grants no role execution.
+    pub fn judging(&self) -> Result<Option<&super::CheckConfig>, ConfigErrors> {
+        self.clean()?;
+        Ok(self.report.universe().check.as_ref())
+    }
+
     /// Inspect composed stages and derived defaults without an execution capability.
     pub fn universe(&self) -> &super::ComposedUniverse {
         self.report.universe()
@@ -842,6 +848,8 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
                 platform: request.platform,
                 file: origin.file.clone(),
                 state: LayerState::Invalid(origin.clone()),
+                problem_check: None,
+                problem_kind: None,
                 diagnostics: vec![Diagnostic {
                     severity: Severity::Error,
                     message: error.to_string(),

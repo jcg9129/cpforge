@@ -170,7 +170,7 @@ fn insert(parent: &mut EffectiveNode, child: EffectiveNode) {
 
 /// Row-1 defaults (execution contract §5.5). `raw_run` selects the raw
 /// `cpf run` caps: 64 MiB on both streams of the run stage.
-fn defaults(kind: StageKind, raw_run: bool) -> EffectiveNode {
+pub(super) fn defaults(kind: StageKind, raw_run: bool) -> EffectiveNode {
     let mut node = table("stage", NodeKind::Stage);
     let deadline = match kind {
         StageKind::Run => 10_000,

@@ -14,6 +14,7 @@ pub struct ComposedUniverse {
     /// Commands named by hooks, recomposed with hook defaults and restrictions.
     pub hooks: BTreeMap<String, ComposedStage>,
     pub selected: Option<ComposedTarget>,
+    pub check: Option<super::CheckConfig>,
 }
 
 /// Inspection is always available. The executable capability is issued only
@@ -107,13 +108,18 @@ impl ResolvedTarget {
     }
 }
 
-struct Validator<'a> {
-    merged: &'a MergedConfig,
-    diagnostics: Vec<Diagnostic>,
+pub(super) struct Validator<'a> {
+    pub(super) merged: &'a MergedConfig,
+    pub(super) diagnostics: Vec<Diagnostic>,
 }
 
 impl Validator<'_> {
-    fn error(&mut self, origin: Origin, message: impl Into<String>, other: Option<Origin>) {
+    pub(super) fn error(
+        &mut self,
+        origin: Origin,
+        message: impl Into<String>,
+        other: Option<Origin>,
+    ) {
         let d = Diagnostic {
             severity: Severity::Error,
             message: message.into(),
@@ -205,7 +211,7 @@ impl Validator<'_> {
         marked(self.merged, &fields(&stage.inputs, suffixes))
     }
 
-    fn stage(&mut self, stage: &ComposedStage) {
+    pub(super) fn stage(&mut self, stage: &ComposedStage) {
         let node = &stage.node;
         let command_blocked = self.blocked(stage, &[&["argv"], &["shell"]]);
         let argv = node.get("argv");
@@ -598,7 +604,10 @@ pub fn check(merged: &MergedConfig, selection: &Selection) -> CheckReport {
         merged,
         diagnostics: merged.diagnostics.clone(),
     };
-    let mut universe = ComposedUniverse::default();
+    let mut universe = ComposedUniverse {
+        check: super::judging::validate(&mut validator, selection),
+        ..ComposedUniverse::default()
+    };
     // Reject only a structurally valid declaration. Invalid descendants,
     // including unknown keys, already have phase-1 diagnostics.
     if let Some(io) = merged.at(&["config", "io"]) {

@@ -1183,6 +1183,8 @@ fn unreadable_input_suppresses_references_but_independent_errors_continue() {
         platform: Platform::Linux,
         file: "user.toml".into(),
         state: LayerState::Invalid(origin.clone()),
+        problem_check: None,
+        problem_kind: None,
         diagnostics: vec![Diagnostic {
             severity: Severity::Error,
             message: "cannot read configuration: permission denied".into(),
@@ -1488,6 +1490,8 @@ fn unreadable_problem_file_leaves_the_target_unresolved() {
         platform: Platform::Linux,
         file: "problem.toml".into(),
         state: LayerState::Invalid(origin.clone()),
+        problem_check: None,
+        problem_kind: None,
         diagnostics: vec![Diagnostic {
             severity: Severity::Error,
             message: "cannot read problem: permission denied".into(),

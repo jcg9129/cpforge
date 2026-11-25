@@ -1,4 +1,4 @@
-//! Raw schemas reserved for later consumers. No execution capability is granted.
+//! Raw schemas for record and layer surfaces. No execution capability is granted.
 use super::*;
 
 #[derive(Clone, Copy)]

@@ -107,3 +107,21 @@ fn locations_point_to_original_values_and_unknown_keys_are_allowed() {
     assert_eq!(error.location.key_path, "test[0].enabled");
     assert_eq!(error.location.line, Some(7));
 }
+
+#[test]
+fn reserved_check_accepts_any_value_and_records_its_location() {
+    for value in ["{ kind = 'checker' }", "'x'", "false", "42", "[]"] {
+        let text = format!("{}check = {value}\n", entry("one", "tests/one.in", None));
+        let Record::Valid(catalog) = classify(&text) else {
+            panic!("reserved key is not a catalog error")
+        };
+        let at = catalog.entries[0].check.as_ref().unwrap();
+        assert_eq!(at.key_path, "test[0].check");
+        assert_eq!(at.file, Path::new("tests.toml"));
+        assert!(at.line.is_some() && at.column.is_some());
+    }
+    let Record::Valid(catalog) = classify(&entry("one", "tests/one.in", None)) else {
+        panic!("valid")
+    };
+    assert!(catalog.entries[0].check.is_none());
+}

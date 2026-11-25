@@ -300,6 +300,8 @@ pub struct MergedConfig {
     pub platform: Platform,
     pub root: EffectiveNode,
     pub diagnostics: Vec<Diagnostic>,
+    /// Local problem metadata, used only for the effective-kind rules.
+    pub(super) problem_kind: Option<EffectiveNode>,
     /// Every marker, including those that apply to no effective node.
     pub markers: Vec<InvalidMarker>,
     pub unknown_inputs: Vec<UnknownInput>,
@@ -1291,6 +1293,7 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
     let mut markers = vec![];
     let mut unknown_inputs = vec![];
     let mut layer_files = BTreeMap::new();
+    let mut problem_kind = None;
     for layer in ordered {
         layer_files.insert(layer.file.clone(), layer.kind);
         assert_eq!(
@@ -1298,6 +1301,38 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
             "compose requires layers parsed for its platform"
         );
         diagnostics.extend(layer.diagnostics.clone());
+        if layer.problem_check.is_some() || layer.problem_kind.is_some() {
+            assert_eq!(
+                layer.kind,
+                LayerKind::Problem,
+                "judging comes only from local problem configuration"
+            );
+        }
+        if layer.kind == LayerKind::Problem && !matches!(layer.state, LayerState::Invalid(_)) {
+            let ctx = Context {
+                layer: layer.kind,
+                platform,
+                overlay: None,
+            };
+            let mut order = 0;
+            problem_kind = layer
+                .problem_kind
+                .as_ref()
+                .map(|raw| node_from_raw(raw, NodeKind::Other, ctx, "kind", 0));
+            if let Some(raw) = &layer.problem_check {
+                let path = vec!["check".into()];
+                collect_markers(raw, NodeKind::Other, ctx, &path, true, &mut markers);
+                if let Some(tree) =
+                    compose_node(raw, NodeKind::Other, ctx, &path, "check", &mut order)
+                {
+                    if let EffectiveValue::Table(root) = &mut merged.root.value {
+                        root.insert("check".into(), tree.root);
+                    }
+                    append_history(&mut merged.history, tree.history);
+                }
+            }
+            super::judging::defaults(&mut merged.root);
+        }
         match &layer.state {
             LayerState::Empty => {}
             LayerState::Invalid(origin) => unknown_inputs.push(UnknownInput {
@@ -1340,10 +1375,12 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
         }
     }
     annotate(&mut merged.root, &[], &merged.history, &markers);
+    super::judging::inherit_entries(&mut merged.root);
     MergedConfig {
         platform,
         root: merged.root,
         diagnostics,
+        problem_kind,
         markers,
         unknown_inputs,
         history: merged.history,

@@ -792,7 +792,8 @@ fn native_value(path: &[String]) -> bool {
     match parent {
         Some("env") => true,
         Some(
-            "sources" | "support_files" | "solution_files" | "env_remove" | "trusted_workspaces",
+            "sources" | "support_files" | "solution_files" | "assets" | "env_remove"
+            | "trusted_workspaces",
         ) => leaf.parse::<usize>().is_ok(),
         Some("required") if parents.iter().any(|p| p == "artifacts") => {
             leaf.parse::<usize>().is_ok()
@@ -800,7 +801,7 @@ fn native_value(path: &[String]) -> bool {
         Some("argv" | "interpreter") => leaf == "0",
         Some("cwd" | "template") => leaf == "path",
         Some("artifacts") => leaf == "file",
-        _ => false,
+        _ => leaf == "program" && parents.first().is_some_and(|p| p == "check"),
     }
 }
 

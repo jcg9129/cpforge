@@ -158,8 +158,8 @@ pub fn parse(
     )
 }
 
-/// Raw, independently validated problem-record surfaces for later consumers.
-/// Gate-1 loaders intentionally keep their existing judging and I/O refusals.
+/// Raw, independently validated problem-record surfaces.
+/// Judging composition and execution support are separate from this raw parser.
 #[derive(Clone, Debug, Default)]
 pub struct ProblemTables {
     pub check: Option<RawNode>,
@@ -176,6 +176,11 @@ pub fn parse_problem_tables(
     platform: Platform,
     include_stress: bool,
 ) -> ProblemTables {
+    assert_eq!(
+        source.kind,
+        LayerKind::Problem,
+        "judging comes only from local problem configuration"
+    );
     let record =
         storage::classify_user_record_spanned(bytes, 1, |document| decode(document, source));
     let Record::Valid(mut root) = record else {
@@ -265,6 +270,8 @@ fn finish(
         platform,
         file: source.file.clone(),
         state: LayerState::Empty,
+        problem_check: None,
+        problem_kind: None,
         diagnostics: vec![],
     };
     let mut diagnostic = Diagnostic {
@@ -300,6 +307,13 @@ fn finish(
                 let RawValue::Table(mut entries) = root.value else {
                     unreachable!()
                 };
+                result.problem_kind = entries.get("problem").and_then(|p| p.get("kind")).cloned();
+                result.problem_check = entries.remove("check");
+                if let Some(check) = &mut result.problem_check {
+                    let mut validator = super::validate::Validator::new(env, platform, source.kind);
+                    validator.record_table(check, false);
+                    result.diagnostics.extend(validator.diagnostics);
+                }
                 let Some(config) = entries.remove("config") else {
                     return result;
                 };
@@ -314,7 +328,15 @@ fn finish(
                     &b.origin.key_path,
                 ))
             });
-            result.diagnostics = validator.diagnostics;
+            result.diagnostics.extend(validator.diagnostics);
+            // `[check]` and `[config]` diagnostics are reported in document order.
+            result.diagnostics.sort_by(|a, b| {
+                (a.origin.line, a.origin.col, &a.origin.key_path).cmp(&(
+                    b.origin.line,
+                    b.origin.col,
+                    &b.origin.key_path,
+                ))
+            });
             result.state = LayerState::Loaded(root);
             return result;
         }

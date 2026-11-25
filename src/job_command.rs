@@ -286,29 +286,28 @@ impl JobCommand for TestRunCommand {
         let catalog = TestStore::new(selected.dir.clone())
             .catalog()
             .map_err(Error::Workspace)?;
-        if self.cases.is_empty() {
-            return Ok(catalog
+        let entries = if self.cases.is_empty() {
+            catalog
                 .entries
-                .into_iter()
+                .iter()
                 .filter(|e| e.enabled)
-                .map(|e| e.id)
-                .collect());
-        }
-        self.cases
-            .iter()
-            .map(|id| {
+                .collect::<Vec<_>>()
+        } else {
+            let find = |id: &String| {
                 catalog
                     .entries
                     .iter()
                     .find(|entry| entry.id.as_str() == id)
-                    .map(|entry| entry.id.clone())
                     .ok_or_else(|| {
                         Error::Workspace(format!(
                             "unknown registered test id {id:?}; register candidates with cpf test register first"
                         ))
                     })
-            })
-            .collect()
+            };
+            self.cases.iter().map(find).collect::<Result<Vec<_>, _>>()?
+        };
+        refuse_test_overrides(entries.iter().copied())?;
+        Ok(entries.into_iter().map(|entry| entry.id.clone()).collect())
     }
     fn request(&self, target: &TargetPlan) -> JobRequest {
         JobRequest::Test {
@@ -922,10 +921,20 @@ fn plan_invocation(
             refusal.diagnostics = diagnostics(&e.diagnostics);
             Error::Config(e.to_string())
         })?;
-    // Report §5.2 gives configuration failures precedence over infrastructure.
-    // Validate phases 1–2 before refusing an unsupported execution platform,
-    // but never probe tools, read tests or admit a job there.
+    // A reserved per-test declaration selected by a judged job (`cpf test`;
+    // storage §8.1) is an early configuration refusal, also on unsupported
+    // platforms. Other catalog/selection failures keep their existing
+    // precedence: Windows does not enter phase 3 or open test data.
     if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        if named.is_none() && command.kind() == JobKind::Test {
+            if let Err(Error::Config(message)) = command.select_tests(
+                selected.as_ref().expect("selection"),
+                &config,
+                target.as_ref().expect("target"),
+            ) {
+                return Err(Error::Config(message));
+            }
+        }
         return Err(Error::Infrastructure(
             "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
         ));
@@ -970,6 +979,13 @@ fn plan_invocation(
         return Err(Error::Config(
             "planned runs exceed the 10 000 execution cap".into(),
         ));
+    }
+    if command.kind() == JobKind::Test {
+        if let Some(check) = config.judging().map_err(|e| Error::Config(e.to_string()))? {
+            check
+                .validate_test_count(tests.len())
+                .map_err(|e| Error::Config(e.into()))?;
+        }
     }
     let baseline = Baseline::capture();
     let retention = config
@@ -1028,6 +1044,27 @@ fn plan_invocation(
         tests,
         baseline,
     })
+}
+
+fn refuse_test_overrides<'a>(
+    entries: impl IntoIterator<Item = &'a crate::tests_store::TestEntry>,
+) -> Result<(), Error> {
+    let errors = entries
+        .into_iter()
+        .filter_map(|entry| {
+            entry.check.as_ref().map(|location| {
+                format!(
+                    "{location}: test {:?}: check: unsupported in this version",
+                    entry.id.as_str()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(errors.join("\n")))
+    }
 }
 
 fn planned_command_runs(
@@ -1201,9 +1238,8 @@ fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
             .map(|v| v.as_str().ok_or("problem.kind must be a string"))
             .transpose()?
             .unwrap_or("batch");
-        // design-checkers §10 scopes judging to [check]; role specs (§1,
-        // §2.3), answers (§3) and scores (§4) must never fall back to comparison,
-        // even with a default or incomplete value. Unknown metadata stays inert.
+        // Parsed roles remain non-executable until their judging engines land.
+        // Presence gates prevent any fallback to the built-in comparator.
         let unsupported_check = document.get("check").and_then(|check| {
             if !check.is_table_like() {
                 return Some("check");
@@ -1219,8 +1255,7 @@ fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
                 ("validator", "check.validator"),
                 ("interactor", "check.interactor"),
                 ("interactive", "check.interactive"),
-                ("answer", "check.answer"),
-                ("scoring", "check.scoring"),
+                ("interactor_test", "check.interactor_test"),
             ]
             .into_iter()
             .find_map(|(key, path)| check.get(key).map(|_| path))

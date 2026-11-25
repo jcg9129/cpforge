@@ -86,6 +86,21 @@ impl Fixture {
         assert!(!self.path(".cpforge/runs").exists());
     }
 
+    fn inspectable(&self) {
+        for args in [
+            vec!["--problem", "A", "config", "show", "--json"],
+            vec!["--problem", "A", "config", "check"],
+        ] {
+            let output = self.run(&args);
+            assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        }
+        let output = self.run(&["--problem", "A", "config", "show", "--origin"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("check.kind"), "{text}");
+        assert!(text.contains("problem.toml"), "{text}");
+    }
+
     fn refuses(&self, key: &str) {
         let sequence = fs::read(self.path(".cpforge/job-seq")).unwrap();
         let original = fs::read(self.path("problems/A/problem.toml")).unwrap();
@@ -162,46 +177,81 @@ fn document(output: &Output) -> Value {
 #[test]
 fn checker_kind_refuses_before_admission() {
     let fixture = Fixture::new();
-    for kind in ["checker", "interactive", "future-kind"] {
-        fixture.problem(&format!("[check]\nkind = '{kind}'\n"));
-        fixture.refuses("check.kind");
-    }
-    // The existing problem-kind gate applies on all planning platforms too.
-    for kind in ["checker", "interactive", "multi-file", "answer", "unknown"] {
-        fixture.write(
-            "problems/A/problem.toml",
-            &format!(
-                "schema = 1\n[problem]\nid = 'local:A'\nkind = '{kind}'\n\
-                 [config]\nlanguage = 'python'\n\
-                 [config.run]\nargv = ['sh', '-c', 'printf ok']\n"
-            ),
-        );
+    fixture.problem(
+        "[check]\nkind = 'checker'\nchecker = { program = 'checker', profile = 'simple' }\n",
+    );
+    fixture.inspectable();
+    fixture.refuses("check.kind");
+    for kind in ["checker", "multi-file", "answer", "unknown"] {
+        fixture.write("problems/A/problem.toml", &format!(
+            "schema = 1\n[problem]\nid = 'local:A'\nkind = '{kind}'\n[config]\nlanguage = 'python'\n"
+        ));
         fixture.refuses("problem kind");
     }
+    // An interactive problem kind without `[check] kind = "interactive"`: a
+    // phase-2 error for `cpf test` (config §9), the kind refusal otherwise.
+    fixture.write(
+        "problems/A/problem.toml",
+        "schema = 1\n[problem]\nid = 'local:A'\nkind = 'interactive'\n[config]\nlanguage = 'python'\n",
+    );
+    let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+    let output = fixture.run(&["--problem", "A", "test", "--json"]);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("interactive problem needs"),
+        "{output:?}"
+    );
+    fixture.no_admission(&sequence);
+    for args in [
+        vec!["--problem", "A", "build", "--json"],
+        vec!["--problem", "A", "run"],
+        vec!["--problem", "A", "cmd", "building", "--json"],
+        vec!["--problem", "A", "cmd", "testing", "--json"],
+    ] {
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(7), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("problem kind"), "{stderr}");
+        assert!(stderr.contains("unsupported in this version"), "{stderr}");
+        fixture.no_admission(&sequence);
+    }
+    // Interactive declarations are inspectable while their execution stays gated.
+    fixture.problem("[check]\nkind = 'interactive'\n[check.interactive]\nchecking = 'interactor'\ninteractor = { program = 'interactor', profile = 'testlib' }\n");
+    fixture.inspectable();
+    fixture.refuses("check.kind");
+    let document = fs::read_to_string(fixture.path("problems/A/problem.toml")).unwrap();
+    fixture.write(
+        "problems/A/problem.toml",
+        &document.replace("[problem]", "[problem]\nkind = 'interactive'"),
+    );
+    fixture.refuses("problem kind");
 }
 
 #[test]
 fn checker_spec_refuses_before_admission() {
     let fixture = Fixture::new();
-    for declaration in [
-        "[check]\nchecker = { sources = ['checker.cpp'], language = 'cpp', profile = 'testlib' }\n",
-        "[check]\nkind = 'compare'\nchecker = { path = 'checker' }\n",
-        "[check.checker]\n",
-        "check = { checker = false }\n",
-    ] {
-        fixture.problem(declaration);
-        fixture.refuses("check.checker");
+    for profile in ["simple", "testlib"] {
+        for spec in [
+            format!(
+                "sources = ['checker.cpp'], support_files = ['testlib.h'], assets = ['data/dict'], language = 'cpp', entry = 'checker', profile = '{profile}', deadline_s = '2s', stdout_cap = '1MiB', stderr_cap = 1024"
+            ),
+            format!("program = 'bin/checker', profile = '{profile}'"),
+        ] {
+            fixture.problem(&format!(
+                "[check]\nkind = 'checker'\nchecker = {{ {spec} }}\n"
+            ));
+            fixture.inspectable();
+            fixture.refuses("check.kind");
+        }
     }
 }
 
 #[test]
 fn validator_spec_refuses_before_admission() {
     let fixture = Fixture::new();
-    for declaration in [
-        "[check]\nvalidator = { sources = ['validator.cpp'], language = 'cpp', profile = 'testlib-validator' }\n",
-        "[check.validator]\n",
-    ] {
-        fixture.problem(declaration);
+    for profile in ["simple", "testlib"] {
+        fixture.problem(&format!("[check]\nvalidator = {{ sources = ['validator.cpp'], language = 'cpp', profile = '{profile}' }}\n"));
+        fixture.inspectable();
         fixture.refuses("check.validator");
     }
 }
@@ -209,22 +259,15 @@ fn validator_spec_refuses_before_admission() {
 #[test]
 fn interactor_settings_refuse_before_admission() {
     let fixture = Fixture::new();
-    fixture.problem("[check]\ninteractor = { path = 'interactor' }\n");
-    fixture.refuses("check.interactor");
-    for field in [
-        "",
-        "interactor = { sources = ['interactor.cpp'], language = 'cpp', profile = 'testlib', seed = 'env' }\n",
-        "checking = 'interactor'\n",
-        "checking = 'checker'\n",
-        "checking = 'interactor+checker'\n",
-        "mode = 'direct'\n",
-        "idle_s = 1\n",
-        "early_reader_close = false\n",
-        "interactor_allowance_s = 1.0\n",
-        "peer_allowance_s = 1.0\n",
-    ] {
-        fixture.problem(&format!("[check.interactive]\n{field}"));
-        fixture.refuses("check.interactive");
+    for checking in ["interactor", "checker", "interactor+checker"] {
+        let checker = if checking == "interactor" {
+            ""
+        } else {
+            "checker = { program = 'checker', profile = 'simple' }\n"
+        };
+        fixture.problem(&format!("[check]\nkind = 'interactive'\n{checker}answer = 'none'\n[check.interactive]\nchecking = '{checking}'\ninteractor = {{ program = 'interactor', profile = 'testlib', seed = 'env' }}\nmode = 'direct'\nidle_s = 0\nearly_reader_close = false\ninteractor_allowance_s = 1.0\npeer_allowance_s = 1.0\nsolution_seed = 'env'\n[check.interactor_test]\ngood = [{{ sources = ['ok.cpp'], language = 'cpp' }}]\nbad = []\n"));
+        fixture.inspectable();
+        fixture.refuses("check.kind");
     }
 }
 
@@ -232,8 +275,9 @@ fn interactor_settings_refuse_before_admission() {
 fn answer_policy_refuses_before_admission() {
     let fixture = Fixture::new();
     for answer in ["none", "file"] {
-        fixture.problem(&format!("[check]\nanswer = '{answer}'\n"));
-        fixture.refuses("check.answer");
+        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'simple' }}\nanswer = '{answer}'\n"));
+        fixture.inspectable();
+        fixture.refuses("check.kind");
     }
 }
 
@@ -244,17 +288,58 @@ fn scoring_policy_refuses_before_admission() {
         "'pass_fail'",
         "{ points = true, scale = 100, aggregation = 'sum' }",
         "{ points = true, scale = 100, aggregation = 'min' }",
-        "{}",
     ] {
-        fixture.problem(&format!("[check]\nscoring = {scoring}\n"));
-        fixture.refuses("check.scoring");
+        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'simple' }}\nscoring = {scoring}\ndisplay = 'judge-cf'\n"));
+        fixture.inspectable();
+        fixture.refuses("check.kind");
+    }
+}
+
+#[test]
+fn invalid_judging_is_a_schema_error_for_inspection_and_execution() {
+    let fixture = Fixture::new();
+    for (declaration, key) in [
+        ("[check]\nkind = 'future-kind'\n", "check.kind"),
+        (
+            "[check]\nchecker = { program = 'checker', profile = 'simple' }\n",
+            "check.checker",
+        ),
+        (
+            "[check]\nkind = 'checker'\nchecker = { path = 'checker' }\n",
+            "check.checker.path",
+        ),
+        ("[check]\ninteractor = {}\n", "check.interactor"),
+        ("[check]\nnotes = 'x'\n", "check.notes"),
+        ("[check]\nanswer = 'none'\n", "check.answer"),
+        ("[check]\nscoring = {}\n", "check.scoring"),
+        (
+            "[check.interactive]\nmode = 'direct'\n",
+            "check.interactive",
+        ),
+    ] {
+        fixture.problem(declaration);
+        let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+        for args in [
+            vec!["--problem", "A", "config", "show", "--json"],
+            vec!["--problem", "A", "test", "--json"],
+        ] {
+            let output = fixture.run(&args);
+            assert_eq!(output.status.code(), Some(7), "{args:?}: {output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(key),
+                "{output:?}"
+            );
+            fixture.no_admission(&sequence);
+        }
     }
 }
 
 #[test]
 fn inspection_and_commands_without_dependencies_remain_available() {
     let fixture = Fixture::new();
-    fixture.problem("[check]\nkind = 'checker'\nchecker = { path = 'checker' }\n");
+    fixture.problem(
+        "[check]\nkind = 'checker'\nchecker = { program = 'checker', profile = 'simple' }\n",
+    );
     let original = fs::read(fixture.path("problems/A/problem.toml")).unwrap();
     let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
     for args in [
@@ -293,8 +378,7 @@ fn inspection_and_commands_without_dependencies_remain_available() {
 fn non_execution_keys_do_not_change_jobs() {
     for declaration in [
         "[metadata]\nnotes = 'preserved'\n",
-        "[check]\nnotes = 'preserved'\n",
-        "[check]\nkind = 'compare'\nnotes = 'preserved'\n",
+        "[check]\nkind = 'compare'\nanswer = 'file'\nscoring = 'pass_fail'\ndisplay = 'judge-cf'\n",
         "[check]\n",
     ] {
         let fixture = Fixture::new();
@@ -325,4 +409,115 @@ fn non_execution_keys_do_not_change_jobs() {
             original
         );
     }
+}
+
+#[test]
+fn per_test_check_refuses_only_selected_entries_before_admission() {
+    for value in ["{ kind = 'checker' }", "'x'", "false", "42"] {
+        let fixture = Fixture::new();
+        fixture.write("cpforge.toml", "schema = 1\n[commands.testing]\nfor_each_test = true\nargv = ['sh', '-c', 'printf ok']\n");
+        let catalog = format!(
+            "schema = 1\n[[test]]\nid = 'a'\ninput = 'tests/a.in'\nanswer = 'tests/a.ans'\norigin = 'custom'\nenabled = true\ncheck = {value} # keep this declaration\n\n[[test]]\nid = 'b'\ninput = 'tests/b.in'\nanswer = 'tests/b.ans'\norigin = 'custom'\nenabled = true\n"
+        );
+        fixture.write("problems/A/tests.toml", &catalog);
+        fixture.write("problems/A/tests/b.in", "input\n");
+        fixture.write("problems/A/tests/b.ans", "ok\n");
+        let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+        for args in [
+            vec!["--problem", "A", "test", "--json"],
+            vec!["--problem", "A", "test", "--case", "a", "--json"],
+        ] {
+            let output = fixture.run(&args);
+            assert_eq!(output.status.code(), Some(7), "{args:?}: {output:?}");
+            let message = String::from_utf8_lossy(&output.stderr);
+            assert!(message.contains("unsupported in this version"), "{message}");
+            assert!(message.contains("tests.toml"), "{message}");
+            assert!(message.contains("test[0].check"), "{message}");
+            fixture.no_admission(&sequence);
+        }
+        let expected = if cfg!(any(target_os = "linux", target_os = "macos")) {
+            0
+        } else {
+            10
+        };
+        // Storage §8.1 refuses the reserved key for judged jobs only; a
+        // command run over the tests does not judge and leaves it inert.
+        let output = fixture.run(&["--problem", "A", "cmd", "testing", "--json"]);
+        assert_eq!(output.status.code(), Some(expected), "{output:?}");
+        let output = fixture.run(&["--problem", "A", "test", "ls"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(fixture.path("problems/A/tests.toml")).unwrap(),
+            catalog
+        );
+        let output = fixture.run(&["--problem", "A", "test", "disable", "a"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let edited = fs::read_to_string(fixture.path("problems/A/tests.toml")).unwrap();
+        assert!(
+            edited.contains(&format!("check = {value} # keep this declaration")),
+            "{edited}"
+        );
+        for args in [
+            vec!["--problem", "A", "test", "--case", "b", "--json"],
+            vec!["--problem", "A", "test", "--json"],
+            vec!["--problem", "A", "cmd", "testing", "--json"],
+        ] {
+            let output = fixture.run(&args);
+            assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
+        }
+        // Explicit selection of a disabled entry still selects its reserved key.
+        let output = fixture.run(&["--problem", "A", "test", "--case", "a", "--json"]);
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported in this version"));
+    }
+}
+
+#[test]
+fn inspection_exposes_judging_values_and_each_origin() {
+    let fixture = Fixture::new();
+    fixture.problem("[check]\nkind = 'checker'\nchecker = { sources = ['c.py'], language = 'python', profile = 'simple', assets = ['data/dict'] }\nvalidator = { program = 'v', profile = 'testlib' }\nanswer = 'none'\nscoring = { points = true, scale = 100 }\ndisplay = 'judge-cf'\n");
+    let output = fixture.run(&["--problem", "A", "config", "show", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["config"]["check"]["kind"], "checker");
+    assert_eq!(doc["config"]["check"]["answer"], "none");
+    assert_eq!(doc["config"]["check"]["scoring"]["scale"], "100");
+    assert_eq!(doc["config"]["check"]["scoring"]["aggregation"], "sum");
+    assert_eq!(
+        doc["config"]["check"]["checker"]["sources"][0]["utf8"],
+        "c.py"
+    );
+    assert_eq!(
+        doc["config"]["check"]["checker"]["assets"][0]["utf8"],
+        "data/dict"
+    );
+    assert_eq!(doc["config"]["check"]["validator"]["program"]["utf8"], "v");
+    for path in [
+        vec!["check", "kind"],
+        vec!["check", "checker", "sources", "0"],
+        vec!["check", "checker", "assets", "0"],
+        vec!["check", "validator", "program"],
+    ] {
+        let origin = doc["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|origin| origin["path"] == serde_json::json!(path))
+            .unwrap();
+        assert_eq!(origin["origin"]["kind"], "file");
+        assert!(
+            origin["origin"]["path"]["utf8"]
+                .as_str()
+                .unwrap()
+                .ends_with("problem.toml")
+        );
+        assert!(origin["origin"]["line"].is_number() && origin["origin"]["col"].is_number());
+    }
+    let origin = doc["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|origin| origin["path"] == serde_json::json!(["check", "scoring", "aggregation"]))
+        .unwrap();
+    assert_eq!(origin["origin"]["kind"], "built_in");
 }

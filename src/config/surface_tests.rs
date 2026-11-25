@@ -184,6 +184,28 @@ fn every_record_key_accepts_its_type_and_rejects_another_type() {
                         .iter()
                         .all(|d| !d.message.contains("unknown"))
                 );
+                if key.starts_with("check.") {
+                    let document = format!(
+                        "[problem]\nid = 'local:p'\n[{}]\n{} = {value}",
+                        key.rsplit_once('.').unwrap().0,
+                        key.rsplit_once('.').unwrap().1
+                    );
+                    let layer = parse(
+                        document.as_bytes(),
+                        &source(LayerKind::Problem, platform),
+                        &Environment::default(),
+                        platform,
+                    );
+                    assert_eq!(
+                        layer.diagnostics, parsed.diagnostics,
+                        "loader integration: {key}"
+                    );
+                    for diagnostic in &layer.diagnostics {
+                        assert!(
+                            diagnostic.origin.line.is_some() && diagnostic.origin.col.is_some()
+                        );
+                    }
+                }
             }
         }
         for role in [

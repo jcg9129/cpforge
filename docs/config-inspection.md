@@ -17,6 +17,16 @@ read-only selection resolver and takes precedence over the current directory.
 when resolvable, the selected problem under `target`. `--origin` adds supplying
 locations, overlays and ordered provenance events, including deleted and ignored
 values. Placeholders and fresh working directories remain marked deferred.
+The selected problem's `[check]` appears under `check`, with judging defaults
+and provenance for role paths and array elements. Built roles name `sources`,
+`language` and a judging `profile` (`simple` or `testlib`); prebuilt roles use
+`program`. Answer policies, scoring, display and interactive declarations are
+validated during inspection. Checker and validator execution, and interactive
+judging, still refuse before admission with "unsupported in this version".
+Tests selected by `cpf test` that hold a reserved per-test `check` key also
+refuse before admission; unselected entries, and commands run over the tests,
+leave the key inert.
+
 Only configured environment entries and removals appear, including tombstones;
 the process's inherited environment is never included.
 
