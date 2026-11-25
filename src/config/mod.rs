@@ -232,8 +232,8 @@ pub struct RawLayer {
     pub file: PathBuf,
     pub state: LayerState,
     /// Record-owned judging declarations, read only from local problem.toml.
-    pub problem_check: Option<RawNode>,
-    pub problem_kind: Option<RawNode>,
+    pub problem_check: Option<Box<RawNode>>,
+    pub problem_kind: Option<Box<RawNode>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 

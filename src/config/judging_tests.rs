@@ -42,7 +42,8 @@ fn checked(text: &str, platform: Platform) -> CheckConfig {
     report
         .universe()
         .check
-        .clone()
+        .as_deref()
+        .cloned()
         .expect("typed judging config")
 }
 fn platforms() -> [Platform; 3] {
@@ -558,7 +559,17 @@ fn phase_one_boundaries_unknown_keys_and_exclusive_role_forms() {
             ),
             platform,
         );
-        assert_eq!(config.checker.unwrap().deadline_ms.unwrap().value, 1);
+        assert_eq!(
+            config
+                .checker
+                .as_ref()
+                .unwrap()
+                .deadline_ms
+                .as_ref()
+                .unwrap()
+                .value,
+            1
+        );
         for (field, value) in [
             ("idle_s", "-1"),
             ("idle_s", "'0.0004s'"),

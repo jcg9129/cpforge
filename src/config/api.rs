@@ -649,7 +649,7 @@ impl LoadedConfig {
     /// Typed judging declarations after all phase-1/2 checks; grants no role execution.
     pub fn judging(&self) -> Result<Option<&super::CheckConfig>, ConfigErrors> {
         self.clean()?;
-        Ok(self.report.universe().check.as_ref())
+        Ok(self.report.universe().check.as_deref())
     }
 
     /// Inspect composed stages and derived defaults without an execution capability.

@@ -301,7 +301,7 @@ pub struct MergedConfig {
     pub root: EffectiveNode,
     pub diagnostics: Vec<Diagnostic>,
     /// Local problem metadata, used only for the effective-kind rules.
-    pub(super) problem_kind: Option<EffectiveNode>,
+    pub(super) problem_kind: Option<Box<EffectiveNode>>,
     /// Every marker, including those that apply to no effective node.
     pub markers: Vec<InvalidMarker>,
     pub unknown_inputs: Vec<UnknownInput>,
@@ -1318,7 +1318,7 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
             problem_kind = layer
                 .problem_kind
                 .as_ref()
-                .map(|raw| node_from_raw(raw, NodeKind::Other, ctx, "kind", 0));
+                .map(|raw| Box::new(node_from_raw(raw, NodeKind::Other, ctx, "kind", 0)));
             if let Some(raw) = &layer.problem_check {
                 let path = vec!["check".into()];
                 collect_markers(raw, NodeKind::Other, ctx, &path, true, &mut markers);

@@ -85,8 +85,8 @@ pub struct InteractorTest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckConfig {
     pub kind: Sourced<CheckMode>,
-    pub checker: Option<RoleSpec>,
-    pub validator: Option<RoleSpec>,
+    pub checker: Option<Box<RoleSpec>>,
+    pub validator: Option<Box<RoleSpec>>,
     pub answer: Sourced<AnswerPolicy>,
     pub scoring: Sourced<ScoringConfig>,
     pub display: Sourced<DisplayProfile>,
@@ -566,8 +566,10 @@ fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<Ro
     })
 }
 
-pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<CheckConfig> {
-    let n = v.merged.at(&["check"])?.clone();
+/// Boxed: the typed declaration is held by every report and plan that carries a universe.
+pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<Box<CheckConfig>> {
+    let merged = v.merged;
+    let n = merged.at(&["check"])?;
     let before = v.diagnostics.len();
     let kind = n
         .get("kind")
@@ -586,7 +588,7 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
     };
     if let Some(needed) = needs_checker {
         if needed {
-            required(v, &n, "checker");
+            required(v, n, "checker");
         } else if let Some(checker) = n.get("checker") {
             error(
                 v,
@@ -598,7 +600,7 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
     }
     if let Some(kind) = kind {
         if kind == "interactive" {
-            required(v, &n, "interactive");
+            required(v, n, "interactive");
         } else {
             for key in ["interactive", "interactor_test"] {
                 if let Some(field) = n.get(key) {
@@ -638,7 +640,7 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
             required(v, scoring, key);
         }
     }
-    let problem_kind = v.merged.problem_kind.as_ref();
+    let problem_kind = merged.problem_kind.as_deref();
     if selection.operation == Operation::Test
         && problem_kind.and_then(EffectiveNode::string) == Some("interactive")
         && kind.is_some_and(|k| k != "interactive")
@@ -662,8 +664,14 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
             );
         }
     }
-    let checker = n.get("checker").and_then(|r| role(v, r, false));
-    let validator = n.get("validator").and_then(|r| role(v, r, false));
+    let checker = n
+        .get("checker")
+        .and_then(|r| role(v, r, false))
+        .map(Box::new);
+    let validator = n
+        .get("validator")
+        .and_then(|r| role(v, r, false))
+        .map(Box::new);
     let interactive = interactive.and_then(|i| {
         for key in ["interactor", "checking"] {
             required(v, i, key);
@@ -729,7 +737,7 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
             bad: solutions("bad"),
         }
     });
-    if before != v.diagnostics.len() || !clean(&n) {
+    if before != v.diagnostics.len() || !clean(n) {
         return None;
     }
     // No declaration may be lost when an unknown upstream layer prevents role resolution.
@@ -739,10 +747,10 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
     {
         return None;
     }
-    let scoring = leaf(&n, "scoring");
-    Some(CheckConfig {
+    let scoring = leaf(n, "scoring");
+    Some(Box::new(CheckConfig {
         kind: sourced(
-            leaf(&n, "kind"),
+            leaf(n, "kind"),
             match kind? {
                 "checker" => CheckMode::Checker,
                 "interactive" => CheckMode::Interactive,
@@ -752,8 +760,8 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
         checker,
         validator,
         answer: sourced(
-            leaf(&n, "answer"),
-            if leaf(&n, "answer").string() == Some("none") {
+            leaf(n, "answer"),
+            if leaf(n, "answer").string() == Some("none") {
                 AnswerPolicy::None
             } else {
                 AnswerPolicy::File
@@ -778,8 +786,8 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
             },
         ),
         display: sourced(
-            leaf(&n, "display"),
-            if leaf(&n, "display").string() == Some("judge-cf") {
+            leaf(n, "display"),
+            if leaf(n, "display").string() == Some("judge-cf") {
                 DisplayProfile::JudgeCf
             } else {
                 DisplayProfile::Cpf
@@ -787,5 +795,5 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<C
         ),
         interactive,
         interactor_test,
-    })
+    }))
 }

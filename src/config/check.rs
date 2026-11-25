@@ -14,7 +14,7 @@ pub struct ComposedUniverse {
     /// Commands named by hooks, recomposed with hook defaults and restrictions.
     pub hooks: BTreeMap<String, ComposedStage>,
     pub selected: Option<ComposedTarget>,
-    pub check: Option<super::CheckConfig>,
+    pub check: Option<Box<super::CheckConfig>>,
 }
 
 /// Inspection is always available. The executable capability is issued only

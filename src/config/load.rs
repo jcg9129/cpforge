@@ -307,8 +307,12 @@ fn finish(
                 let RawValue::Table(mut entries) = root.value else {
                     unreachable!()
                 };
-                result.problem_kind = entries.get("problem").and_then(|p| p.get("kind")).cloned();
-                result.problem_check = entries.remove("check");
+                result.problem_kind = entries
+                    .get("problem")
+                    .and_then(|p| p.get("kind"))
+                    .cloned()
+                    .map(Box::new);
+                result.problem_check = entries.remove("check").map(Box::new);
                 if let Some(check) = &mut result.problem_check {
                     let mut validator = super::validate::Validator::new(env, platform, source.kind);
                     validator.record_table(check, false);
