@@ -690,9 +690,10 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
             return Err(Error("invalid retention detail"));
         }
         // Only judge roles have a profile, so only they have header evidence.
-        WarningKind::TestlibHeader { role, .. }
-            if matches!(role, r::RoleName::Generator | r::RoleName::Brute) =>
-        {
+        WarningKind::TestlibHeader {
+            role: r::RoleName::Generator | r::RoleName::Brute,
+            ..
+        } => {
             return Err(Error("testlib_header warning needs a judge role"));
         }
         _ => {}
