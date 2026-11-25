@@ -121,10 +121,12 @@ def header(binary=False):
     compare = dict(kind="float")
     for key in ["abs", "rel", "rel_base", "combine", "ulps", "int_exact", "reserved_a", "reserved_b"]:
         compare[key] = dict(text="x" * 32, bits="f" * 16)
-    value["target"] = dict(name="x" * 64, language="x" * 64, profile="x" * 64, build_free=False, compare=compare, check=dict(kind=TOKEN, answer=TOKEN, scoring=dict(kind=TOKEN, scale=SCORE, aggregation=TOKEN), display=TOKEN, interactive=None), io=None, run_deadline=dict(us=U64, source=TOKEN), published_limits=dict(time_ms=U32, memory_bytes=U64), local_limits=[limit()] * 2)
+    value["target"] = dict(name="x" * 64, language="x" * 64, profile="x" * 64, build_free=False, compare=compare, check=dict(kind=TOKEN, answer=TOKEN, scoring=dict(kind=TOKEN, scale=SCORE, aggregation=TOKEN), display=TOKEN, interactive=dict(checking=TOKEN, mode=TOKEN, idle_us=U64, early_reader_close=False, interactor_allowance_us=U64, peer_allowance_us=U64, solution_seed=TOKEN, interactor_seed=TOKEN)), io=None, run_deadline=dict(us=U64, source=TOKEN), published_limits=dict(time_ms=U32, memory_bytes=U64), local_limits=[limit()] * 2)
     value["capture"] = capture(binary)
     value["fingerprints"] = dict(source=HEX, tests=HEX, judge=HEX)
     value["build"] = build(binary)
+    role = json.loads((ROOT / "role_size_vectors.json").read_bytes())[2 if binary else 0]
+    value["roles"] = [dict(role, role=name) for name in ["checker", "validator", "interactor"]]
     for key in ["executions", "tests", "aggregates"]:
         value[key] = []
     result = value["result"]
@@ -380,6 +382,109 @@ TEST_MEMBERS = ["id", "origin", "answer", "input_sha256", "answer_sha256", "exec
 BY_VERDICT = ["passed", "wrong_answer", "unchecked", "checker_failed", "wall_deadline", "output_budget", "signal", "nonzero_exit", "cancelled", "infrastructure", "not_run", "internal_error", "presentation_error", "scored", "session_limit", "idle"]
 
 
+def verify_roles():
+    def fixture(name):
+        return json.loads((ROOT / name).read_bytes(), object_pairs_hook=unique)
+    def preview(v):
+        assert list(v) == ["head", "len", "truncated", "sha256"]
+        assert list(v["head"]) in [["utf8"], ["bytes_b64"]]
+        if "utf8" in v["head"]:
+            data = v["head"]["utf8"].encode()
+            assert not any(ord(c) < 32 or ord(c) == 127 for c in v["head"]["utf8"])
+        else:
+            data = base64.b64decode(v["head"]["bytes_b64"], validate=True)
+            assert base64.b64encode(data).decode() == v["head"]["bytes_b64"]
+        assert len(data) <= 128 and decimal(v["len"]) >= len(data)
+        assert v["truncated"] == (decimal(v["len"]) > len(data))
+        assert re.fullmatch("[0-9a-f]{64}", v["sha256"])
+        if not v["truncated"]:
+            assert hashlib.sha256(data).hexdigest() == v["sha256"]
+    def role(v):
+        assert list(v) == ["role", "profile", "origin", "build", "capture", "provenance"]
+        assert v["role"] in ["checker", "validator", "interactor", "generator", "brute"]
+        assert (v["profile"] is not None) == (v["role"] not in ["generator", "brute"])
+        origin = v["origin"]
+        assert list(origin) == (["kind", "language", "entry"] if origin["kind"] == "built" else ["kind", "program"])
+        for key in ["entry", "program"]:
+            if origin.get(key) is not None:
+                preview(origin[key])
+        c = v["capture"]
+        assert list(c) == ["check", "sources", "sources_dropped", "support_files", "support_files_dropped", "counts", "bytes", "lists_sha256", "content_sha256"]
+        assert c["check"] in [dict(kind="checked"), dict(kind="unchecked", reasons=["shell_stage"])]
+        for key in ["sources", "support_files"]:
+            assert len(c[key]) <= 16 and c["counts"][key] == len(c[key]) + c[key + "_dropped"]
+            for value in c[key]:
+                preview(value)
+        decimal(c["bytes"])
+        for key in ["lists_sha256", "content_sha256"]:
+            assert re.fullmatch("[0-9a-f]{64}", c[key])
+        p = v["provenance"]
+        if origin["kind"] == "prebuilt":
+            assert p == dict(kind="declared") and v["build"] is None
+        else:
+            assert list(p) == ["kind", "header"] and p["kind"] == "built"
+            h = p["header"]
+            if h["kind"] == "candidate":
+                assert list(h) == ["kind", "path", "sha256", "pinned"]
+                preview(h["path"])
+                assert type(h["pinned"]) is bool and re.fullmatch("[0-9a-f]{64}", h["sha256"])
+            elif h["kind"] == "not_identified":
+                assert list(h) == ["kind", "reason"] and h["reason"] in ["none", "ambiguous", "not_beside_sources", "angle_include"]
+            else:
+                assert h == dict(kind="not_applicable")
+            assert (h["kind"] != "not_applicable") == (v["profile"] == "testlib")
+        build_value = v["build"]
+        if build_value is not None:
+            assert list(build_value) == ["execution", "build_id", "output_root", "result", "artifacts", "artifacts_dropped"]
+            assert build_value["output_root"] == "builds/" + build_value["build_id"]
+            for a in build_value["artifacts"]:
+                preview(a)
+            if build_value["result"]["kind"] == "failed":
+                assert build_value["artifacts"] == [] and build_value["artifacts_dropped"] == 0
+                for name in build_value["result"]["cause"].get("names", []):
+                    preview(name)
+            assert len(encode(build_value)) <= 6664
+        assert len(encode(v)) <= 21454
+    provenance = fixture("role_provenance.json")
+    assert [v["provenance"]["header"].get("reason", v["provenance"]["header"].get("pinned")) for v in provenance] == [True, False, "ambiguous", "not_beside_sources", "none", "angle_include"]
+    vectors = fixture("role_size_vectors.json")
+    for v in provenance + vectors:
+        role(v)
+    for v, char in zip(vectors, ['"', "\\", "\0"]):
+        head = v["capture"]["sources"][0]["head"]
+        data = head["utf8"].encode() if "utf8" in head else base64.b64decode(head["bytes_b64"])
+        assert data == char.encode() * 128 and len(v["capture"]["sources"]) == 16
+        assert len(v["capture"]["support_files"]) == 16
+    warnings = fixture("judging_warnings.json")
+    assert [v["detail"] for v in warnings] == ["staged_copy_kept", "transcript_kept", "not_identified", "not_pinned", "declared"]
+    for v in warnings:
+        assert list(v) == (["kind", "run", "detail", "message"] if v["kind"] == "judge_scratch" else ["kind", "role", "detail", "message"])
+        assert len(encode(v["message"])) == 260 and len(encode(v)) <= 768
+    configs = fixture("interactive_configs.json")
+    assert len(configs) == 6
+    for config in configs:
+        assert list(config) == ["kind", "answer", "scoring", "display", "interactive"] and config["kind"] == "interactive"
+        i = config["interactive"]
+        assert list(i) == ["checking", "mode", "idle_us", "early_reader_close", "interactor_allowance_us", "peer_allowance_us", "solution_seed", "interactor_seed"]
+        assert i["checking"] in ["interactor", "checker", "interactor_checker"] and i["mode"] in ["relay", "direct"]
+        for key in ["idle_us", "interactor_allowance_us", "peer_allowance_us"]:
+            if i[key] is not None:
+                decimal(i[key])
+        assert i["solution_seed"] == "env" and i["interactor_seed"] == "argv"
+        assert len(encode(config)) <= 630
+    events = fixture("judging_run_events.json")
+    assert [e["stage"] for e in events] == ["build", "checker", "validator", "interactor"]
+    for event in events:
+        assert list(event) == ["event", "seq", "run", "execution", "stage", "role", "digest"]
+        assert event["event"] == "run_started" and re.fullmatch("r[0-9]{5}", event["run"])
+        decimal(event["seq"])
+        assert re.fullmatch("[0-9a-f]{64}", event["digest"]) and len(encode(event)) < 400
+        # A role build has stage build; each judge role has its own stage.
+        expected = dict(role_build="build").get(event["role"]["kind"], event["role"]["kind"])
+        assert event["stage"] == expected
+    print("roles: provenance, builds, capture lists, warnings, interactive configuration and run events fit their bounds")
+
+
 def job_report_members(report, path):
     """Appendix A order with every always-present member (report §3.6)."""
     members = list(report)
@@ -413,8 +518,8 @@ def verify():
             refusal[key] = head[key]
         refusal["refusal"] = dict([("class", TOKEN), ("error", dict(kind=TOKEN, message=TEXT, path=native(256, binary))), ("diagnostics", [diagnostic(binary)] * 64), ("diagnostics_dropped", U32)])
         rows = [("Cause", cause(), 129, 129), ("class", cls(), 1122, 1122), ("non-infrastructure class", signal(), 169, 169), ("execution summary", execution(), 804, 804), ("stream", stream(), 608, 608), ("Measurement", measurement(), 346, 346), ("InstalledLimit", limit(), 360, 360), ("RunSummary", summary(), 6774, 7168), ("Ref", reference(), 451, 451), ("executions entry", entry(binary), 8851, 9216), ("tests entry with diagnostic", test(signal(), check()), 3002, 3072), ("tests entry infrastructure", test(cls(), dict(kind="passed")), 3002, 3072), ("aggregate", aggregate(), 224, 256), ("warning", warning(binary), 741, 768), ("hook", hook(), 244, 244), ("capture", capture(binary), 13311, 13311), ("build", build(binary), 6664, 6664), ("report header", head, 119638, 131072), ("Diagnostic", diagnostic(binary), 1237, 1237), ("refusal", refusal, 103966, 106496), ("run_finished event", dict(event="run_finished", seq=U64, run="r99999", summary=summary()), 6873, 7168), ("output_chunk event", dict(event="output_chunk", seq=U64, run="r99999", stream=TOKEN, bytes=dict(bytes_b64=base64.b64encode(b"\xff" * 4096).decode())), 5621, 7168)]
-        # Without roles the header also fits the unshaped reservation's 64 KiB term.
-        assert len(encode(head)) <= 65536
+        # Every shape uses the same header allowance.
+        assert len(encode(head)) <= 131072
         for name, value, total, bound in rows:
             actual = len(encode(value))
             assert actual <= total and actual <= bound, (name, binary, actual, total, bound)
@@ -431,11 +536,12 @@ def verify():
     # Exact length of a complete serialization, counting all list commas.
     actual = len(encode(header())) + 10_000 * sum(len(encode(v)) for v in [entry(), test(signal(), check()), aggregate()]) + 3 * 9999
     table = 119638 + 12080 * 10_000
-    bound = 65536 + 12288 * 10_000
+    bound = shaped_bound(10_000, 10_000, 10_000)
     assert actual <= table <= bound
     print(f"10000 full entries: {actual} <= table {table} <= reservation {bound}")
     verify_file_io()
     verify_judging()
+    verify_roles()
 
 
 if __name__ == "__main__":

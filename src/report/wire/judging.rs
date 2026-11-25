@@ -11,8 +11,8 @@ pub(super) fn config(v: &r::CheckConfig) -> Result<Value> {
     if v.kind == r::CheckMode::Compare && v.scoring != r::Scoring::PassFail {
         return Err(Error("comparison cannot use points scoring"));
     }
-    if v.interactive.is_some() {
-        return Err(Error("batch check has interactive config"));
+    if (v.kind == r::CheckMode::Interactive) != v.interactive.is_some() {
+        return Err(Error("interactive config does not match check kind"));
     }
     r::test_score(v.scoring, &r::TestVerdict::Passed, None)
         .map_err(|_| Error("invalid scoring scale"))?;
@@ -124,7 +124,7 @@ fn optional<T>(v: &Json, f: impl FnOnce(&Json) -> Result<T>) -> Result<Option<T>
         f(v).map(Some)
     }
 }
-fn read_text(v: &Json, cap: usize, utf8: bool) -> Result<r::JudgeText> {
+pub(super) fn read_text(v: &Json, cap: usize, utf8: bool) -> Result<r::JudgeText> {
     let native = member(v, "head")?;
     // One canonical `ns` form (report §§3.3, 3.5).
     let head = match (native.get("utf8"), native.get("bytes_b64")) {
@@ -174,7 +174,23 @@ fn read_text(v: &Json, cap: usize, utf8: bool) -> Result<r::JudgeText> {
     Ok(result)
 }
 pub fn read_check_config(v: &Json) -> Result<r::CheckConfig> {
-    member(v, "interactive")?;
+    for key in ["kind", "answer", "scoring", "display", "interactive"] {
+        member(v, key)?;
+    }
+    if let Some(interactive) = v.get("interactive").filter(|v| !v.is_null()) {
+        for key in [
+            "checking",
+            "mode",
+            "idle_us",
+            "early_reader_close",
+            "interactor_allowance_us",
+            "peer_allowance_us",
+            "solution_seed",
+            "interactor_seed",
+        ] {
+            member(interactive, key)?;
+        }
+    }
     let result = parsed(v)?;
     config(&result)?;
     Ok(result)
@@ -242,6 +258,36 @@ pub fn read_aggregate_score(v: &Json) -> Result<r::AggregateScore> {
 pub(super) fn validate_members(v: &Json) -> Result<()> {
     for key in ["roles", "submission", "stress"] {
         member(v, key)?;
+    }
+    let stress = member(v, "command")?.as_str() == Some("stress");
+    super::roles::read_roles(member(v, "roles")?, stress)?;
+    for execution in member(v, "executions")?
+        .as_array()
+        .ok_or(Error("expected executions"))?
+    {
+        super::run::stage_role(
+            super::read::read_stage(member(execution, "stage")?)?,
+            &super::read::read_execution_role(member(execution, "role")?)?,
+        )?;
+    }
+    for warning in member(v, "warnings")?
+        .as_array()
+        .ok_or(Error("expected warnings"))?
+    {
+        if matches!(
+            warning.get("kind").and_then(Json::as_str),
+            Some("judge_scratch" | "testlib_header")
+        ) {
+            super::roles::read_judge_warning(warning)?;
+        }
+    }
+    if let Some(fingerprints) = v.get("fingerprints").filter(|v| !v.is_null()) {
+        for key in ["source", "tests", "judge"] {
+            let value = member(fingerprints, key)?;
+            if key != "judge" || !value.is_null() {
+                super::roles::read_hash(value)?;
+            }
+        }
     }
     let result = member(v, "result")?;
     let score = optional(member(result, "score")?, read_aggregate_score)?;

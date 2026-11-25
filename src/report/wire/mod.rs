@@ -17,6 +17,7 @@ mod judging;
 mod model;
 mod native;
 pub mod read;
+mod roles;
 mod run;
 mod schema;
 mod status;
@@ -39,16 +40,13 @@ use crate::jobs::engine as e;
 use schema::*;
 use value::*;
 
-pub const REPORT_HEADER_BOUND: usize = 64 * 1024;
-pub const EXECUTION_ALLOWANCE: usize = 12 * 1024;
+pub const REPORT_HEADER_BOUND: usize = 128 * 1024;
+pub const EXECUTION_ALLOWANCE: usize = 9 * 1024;
 pub const REFUSAL_BOUND: usize = 104 * 1024;
 pub const EVENT_BOUND: usize = 7 * 1024;
 
-pub fn report_bound(planned: usize) -> Result<usize> {
-    if planned > 10_000 {
-        return Err(Error("too many planned executions"));
-    }
-    Ok(REPORT_HEADER_BOUND + EXECUTION_ALLOWANCE * planned)
+pub fn report_bound(planned: usize, tests: usize, aggregates: usize) -> Result<usize> {
+    shaped_report_bound(planned, tests, aggregates, ReportShape::default())
 }
 
 /// The per-test shape of §3.7.2, fixed by the plan, including skipped tests.
@@ -84,10 +82,13 @@ pub fn shaped_report_bound(
     {
         return Err(Error("report population exceeds plan cap"));
     }
-    Ok(128 * 1024 + 9 * 1024 * planned + shape.test_bound()? * tests + 256 * aggregates)
+    Ok(REPORT_HEADER_BOUND
+        + EXECUTION_ALLOWANCE * planned
+        + shape.test_bound()? * tests
+        + 256 * aggregates)
 }
 /// Exactly the report plus replacement temporary, before the first admission.
-/// None retains the established compare-only reservation byte for byte.
+/// None is the comparison-only shape, with the same population terms.
 pub fn report_reservation(
     planned: usize,
     tests: usize,
@@ -96,7 +97,7 @@ pub fn report_reservation(
 ) -> Result<u64> {
     let bound = match shape {
         Some(shape) => shaped_report_bound(planned, tests, aggregates, shape)?,
-        None => report_bound(planned)?,
+        None => report_bound(planned, tests, aggregates)?,
     };
     let bytes = 2 * bound as u64;
     if bytes > 256 * 1024 * 1024 {
@@ -132,7 +133,7 @@ pub(crate) fn report_data_bound(v: &e::ReportData) -> Result<usize> {
         Some(shape) => {
             shaped_report_bound(v.executions.len(), v.tests.len(), v.aggregates.len(), shape)
         }
-        None => report_bound(v.executions.len()),
+        None => report_bound(v.executions.len(), v.tests.len(), v.aggregates.len()),
     }
 }
 fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Result<Value> {
@@ -259,7 +260,7 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
-        ("roles", Value::Array(vec![])),
+        ("roles", roles::roles(&meta.roles, false)?),
         (
             "executions",
             checked_array(&v.executions, 10_000, run::execution)?,
@@ -482,7 +483,12 @@ pub fn encode_capture_manifest(
     sources: &[std::path::PathBuf],
     support_files: &[std::path::PathBuf],
     lists_sha256: &[u8; 32],
+    roles: &[crate::report::CaptureRole],
 ) -> Result<Vec<u8>> {
+    // The report's `roles` order (§4.1), one entry per role.
+    if roles.windows(2).any(|pair| pair[0].role >= pair[1].role) {
+        return Err(Error("capture roles out of order or duplicated"));
+    }
     Ok(encode(&document(
         "capture_manifest",
         platform,
@@ -502,6 +508,20 @@ pub fn encode_capture_manifest(
                 }),
             ),
             ("lists_sha256", hex(lists_sha256)),
+            (
+                "roles",
+                checked_array(roles, 5, |v| -> Result<Value> {
+                    Ok(obj([
+                        ("role", s(v.role.wire_token())),
+                        (
+                            "files",
+                            array(&v.files, |v| {
+                                native::ns(&native::native_bytes(v.as_os_str()))
+                            }),
+                        ),
+                    ]))
+                })?,
+            ),
         ],
     )?))
 }
@@ -512,5 +532,7 @@ mod bounds;
 mod io_tests;
 #[cfg(test)]
 mod judging_tests;
+#[cfg(test)]
+mod roles_tests;
 #[cfg(test)]
 mod tests;

@@ -363,6 +363,7 @@ pub fn prepare_job<'probe>(
         &lists[0],
         &lists[1],
         &capture_report.lists_sha256,
+        &[],
     )
     .map_err(|error| {
         ReadyError::Storage(StorageError::io(

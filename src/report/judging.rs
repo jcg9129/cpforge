@@ -301,7 +301,57 @@ impl JudgeReason {
     }
 }
 
-tokens!(CheckMode { Compare, Checker });
+tokens!(CheckMode {
+    Compare,
+    Checker,
+    Interactive
+});
+tokens!(InteractiveChecking {
+    Interactor,
+    Checker,
+    InteractorChecker
+});
+tokens!(InteractiveMode { Relay, Direct });
+tokens!(SeedMode { None, Env, Argv });
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractiveConfig {
+    pub checking: InteractiveChecking,
+    pub mode: InteractiveMode,
+    #[serde(with = "optional_duration")]
+    pub idle_us: Option<u64>,
+    pub early_reader_close: bool,
+    #[serde(with = "duration")]
+    pub interactor_allowance_us: u64,
+    #[serde(with = "duration")]
+    pub peer_allowance_us: u64,
+    pub solution_seed: SeedMode,
+    pub interactor_seed: SeedMode,
+}
+mod duration {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let v = String::deserialize(d)?;
+        super::super::wire::read::read_u64(&serde_json::Value::String(v))
+            .map_err(serde::de::Error::custom)
+    }
+}
+mod optional_duration {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &Option<u64>, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&v.map(|v| v.to_string()), s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|v| -> Result<u64, D::Error> {
+                super::super::wire::read::read_u64(&serde_json::Value::String(v))
+                    .map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
+}
 tokens!(AnswerPolicy { File, None });
 tokens!(DisplayProfile { Cpf, JudgeCf });
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,8 +360,7 @@ pub struct CheckConfig {
     pub answer: AnswerPolicy,
     pub scoring: Scoring,
     pub display: DisplayProfile,
-    /// Batch checks always serialize this member as null.
-    pub interactive: Option<()>,
+    pub interactive: Option<InteractiveConfig>,
 }
 impl Default for CheckConfig {
     fn default() -> Self {

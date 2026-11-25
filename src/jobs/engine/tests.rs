@@ -1524,7 +1524,7 @@ fn disk_persistence_publishes_frozen_bytes_and_terminal_only_after_report() {
     let encoded = wire::encode_job_finished(&terminal).unwrap();
     assert!(!wire::read::read_json(&encoded).unwrap()["report"].is_null());
     let reservation = budget
-        .reserve(2 * wire::report_bound(1).unwrap() as u64)
+        .reserve(2 * wire::report_bound(1, 1, 0).unwrap() as u64)
         .unwrap();
     let repeated =
         runtime(persistence.publish_report(Arc::new(report.data().clone()), Some(reservation)));
@@ -2683,11 +2683,9 @@ fn progress_drop_finality_across_e_s_d_matches_saved_stdout_and_events() {
 #[test]
 fn ten_thousand_execution_flood_keeps_ten_ordered_test_aggregates() {
     let f = Fixture::new();
-    // The report reservation for 10 000 planned executions is
-    // 2 x (64 KiB + 12 KiB x 10 000) = 234.5 MiB (report contract §3.7), so
-    // the fixture's usual 256 MiB job budget cannot also admit one target run
-    // (64 MiB stdout + 1 MiB stderr + 1 MiB metadata): the first run would be
-    // `retention_budget`, an infrastructure class. Use the 1 GiB default.
+    // The report reservation is 2 x (128 KiB + 9 KiB x 10 000 + 3 KiB x 10
+    // + 256 x 10) = 184 648 704 bytes (report contract §3.7). The 1 GiB
+    // budget keeps this ordering test independent of run admission margins.
     let ready = ready_with_budget(&f, "python", 10, &Tools, 1 << 30);
     let mut iterations = Vec::new();
     for test in ready.manifest.entries() {

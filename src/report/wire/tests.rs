@@ -132,6 +132,7 @@ pub(super) fn passing() -> e::ReportData {
     e::ReportData {
         details: e::ReportDetails {
             shape: None,
+            roles: Vec::new(),
             problem: Some(Problem {
                 identity: "local:a".into(),
                 name: "a".into(),
@@ -618,6 +619,7 @@ fn spec_record_manifest_and_global_config_mapping() {
         &["a/é".into()],
         &[],
         &[0; 32],
+        &[],
     )
     .unwrap();
     let value = read::read_json(&encoded).unwrap();
@@ -701,7 +703,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
         },
     };
     assert!(encode_event(&event).is_err());
-    assert!(report_bound(10_001).is_err());
+    assert!(report_bound(10_001, 0, 0).is_err());
     assert!(value::code(-2_147_483_649).is_err());
     assert!(value::code(4_294_967_296).is_err());
     for error in [

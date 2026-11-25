@@ -454,6 +454,23 @@ fn max_header(binary: bool) -> Value {
         ]),
     );
     replace(&mut value, "build", max_build(binary));
+    let roles: Vec<_> = [
+        crate::report::RoleName::Checker,
+        crate::report::RoleName::Validator,
+        crate::report::RoleName::Interactor,
+    ]
+    .into_iter()
+    .map(|name| {
+        let mut role = super::roles_tests::maximal_role(if binary { 0xff } else { b'"' });
+        role.role = name;
+        role
+    })
+    .collect();
+    replace(
+        &mut value,
+        "roles",
+        super::roles::roles(&roles, false).unwrap(),
+    );
     replace(&mut value, "executions", Value::Array(vec![]));
     replace(&mut value, "tests", Value::Array(vec![]));
     replace(&mut value, "aggregates", Value::Array(vec![]));
@@ -537,7 +554,7 @@ fn max_header(binary: bool) -> Value {
 fn max_score() -> Value {
     s(format!("{}.{}", "9".repeat(14), "9".repeat(9)))
 }
-/// A batch `CheckConfig`; the interactive member is still `null` here.
+/// All interactive fields are present, including optional idle evidence.
 fn max_check_config() -> Value {
     obj([
         ("kind", tok()),
@@ -551,7 +568,19 @@ fn max_check_config() -> Value {
             ]),
         ),
         ("display", tok()),
-        ("interactive", Value::Null),
+        (
+            "interactive",
+            obj([
+                ("checking", tok()),
+                ("mode", tok()),
+                ("idle_us", u(u64::MAX)),
+                ("early_reader_close", b(false)),
+                ("interactor_allowance_us", u(u64::MAX)),
+                ("peer_allowance_us", u(u64::MAX)),
+                ("solution_seed", tok()),
+                ("interactor_seed", tok()),
+            ]),
+        ),
     ])
 }
 fn max_counts() -> Value {
@@ -617,8 +646,7 @@ fn every_arithmetic_row_in_both_native_forms() {
         row("capture", &max_capture(binary), 13311, 13311);
         row("build", &max_build(binary), 6664, 6664);
         row("report header", &max_header(binary), 119638, 128 * 1024);
-        // Without `roles[]` the header also fits the unshaped (compare-only)
-        // reservation's header term.
+        // Every shape uses the same header allowance.
         assert!(encode(&max_header(binary)).len() <= REPORT_HEADER_BOUND);
         row("Diagnostic", &max_diagnostic(binary), 1237, 1237);
         let mut refusal = super::refusal_value(&tests::refusal()).unwrap();
@@ -695,7 +723,7 @@ fn ten_thousand_full_structural_entries_fit_reserved_report() {
     let Value::Object(fields) = header else {
         unreachable!()
     };
-    let bound = report_bound(10_000).unwrap();
+    let bound = report_bound(10_000, 10_000, 10_000).unwrap();
     let mut bytes = Vec::with_capacity(ENVELOPE.len() + bound + 1);
     bytes.extend_from_slice(ENVELOPE);
     let start = bytes.len();

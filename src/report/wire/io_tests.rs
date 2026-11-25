@@ -599,7 +599,7 @@ fn shape_formula_and_reservation_caps_match_contract_vectors() {
     for planned in [0, 1, 10_000] {
         assert_eq!(
             report_reservation(planned, 0, 0, None).unwrap(),
-            2 * (65536 + 12288 * planned) as u64
+            2 * (131072 + 9216 * planned) as u64
         );
     }
 }

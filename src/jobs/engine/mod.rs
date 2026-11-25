@@ -393,10 +393,12 @@ impl<'probe> Engine<'probe> {
     }
 
     fn validate_report_reservation(&self) -> Result<(), PlanError> {
+        let (tests, aggregates) =
+            report_populations(self.kind, &self.plan, self.ready.manifest.entries().len());
         report::wire::report_reservation(
             self.plan.len() + self.after_test.len(),
-            self.ready.manifest.entries().len(),
-            0,
+            tests,
+            aggregates,
             self.report_shape,
         )
         .map(|_| ())
@@ -536,10 +538,12 @@ impl<'probe> Engine<'probe> {
         let mut admission_closed = false;
         let mut stopped = false;
         // Reserve report + replacement temporary before admitting any run.
+        let (planned_tests, planned_aggregates) =
+            report_populations(kind, &plan, ready.manifest.entries().len());
         let report_reservation = report::wire::report_reservation(
             plan.len() + after_test.len(),
-            ready.manifest.entries().len(),
-            0,
+            planned_tests,
+            planned_aggregates,
             report_shape,
         )
         .ok()
@@ -1738,6 +1742,38 @@ async fn caught<T>(future: impl Future<Output = T>) -> Result<T, ()> {
     )
     .await
 }
+/// Count the entries the plan can serialize, including skipped commands. A
+/// `cmd` job opens a `tests[]` entry for each run of consecutive commands
+/// on the same test (see `run`), so runs are counted, not distinct ids.
+fn report_populations(kind: JobKind, plan: &[PlannedExecution], selected: usize) -> (usize, usize) {
+    let tests = match kind {
+        JobKind::Test => selected,
+        JobKind::Cmd => {
+            let mut previous = None;
+            let mut runs = 0;
+            for id in plan
+                .iter()
+                .filter_map(|v| v.test.as_ref().map(|v| v.id.as_str()))
+            {
+                if previous != Some(id) {
+                    runs += 1;
+                    previous = Some(id);
+                }
+            }
+            runs
+        }
+        _ => 0,
+    };
+    let aggregates = plan
+        .iter()
+        .filter_map(|v| match &v.role {
+            Role::Command { test, .. } => Some(test),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    (tests, aggregates)
+}
 fn aggregate(executions: &[ExecutionReport]) -> Vec<Aggregate> {
     let mut groups: Vec<(Aggregate, Vec<Duration>)> = Vec::new();
     for execution in executions {
@@ -1814,6 +1850,7 @@ fn report_details(
     let target = ready.target.as_ref().filter(|_| capture);
     ReportDetails {
         shape: None,
+        roles: Vec::new(),
         problem: ready
             .problem
             .as_ref()

@@ -1,4 +1,4 @@
-30 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+35 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169
@@ -16,7 +16,7 @@ utf8 warning: 716 <= table 741 <= bound 768
 utf8 hook: 226 <= table 244 <= bound 244
 utf8 capture: 13249 <= table 13311 <= bound 13311
 utf8 build: 6602 <= table 6664 <= bound 6664
-utf8 report header: 52895 <= table 119638 <= bound 131072
+utf8 report header: 115922 <= table 119638 <= bound 131072
 utf8 Diagnostic: 1236 <= table 1237 <= bound 1237
 utf8 refusal: 103241 <= table 103966 <= bound 106496
 utf8 run_finished event: 6220 <= table 6873 <= bound 7168
@@ -38,16 +38,17 @@ base64 warning: 637 <= table 741 <= bound 768
 base64 hook: 226 <= table 244 <= bound 244
 base64 capture: 10721 <= table 13311 <= bound 13311
 base64 build: 5338 <= table 6664 <= bound 6664
-base64 report header: 46532 <= table 119638 <= bound 131072
+base64 report header: 97709 <= table 119638 <= bound 131072
 base64 Diagnostic: 1073 <= table 1237 <= bound 1237
 base64 refusal: 90075 <= table 103966 <= bound 106496
 base64 run_finished event: 6220 <= table 6873 <= bound 7168
 base64 output_chunk event: 5601 <= table 5621 <= bound 7168
-10000 full entries: 111362892 <= table 120919638 <= reservation 122945536
+10000 full entries: 111425919 <= table 120919638 <= reservation 125571072
 file I/O target.io (member): 562 <= bound 562
 file I/O output_file (member): 169 <= bound 169
 file I/O test class (3 streams): 86 <= bound 204
 file I/O test entry with output file: 2965 <= bound 3264
-file I/O utf8 10000 full entries: 112863444 <= bound 127491072; reservation 254982144
-file I/O base64 10000 full entries: 111227081 <= bound 127491072; reservation 254982144
+file I/O utf8 10000 full entries: 112926471 <= bound 127491072; reservation 254982144
+file I/O base64 10000 full entries: 111278258 <= bound 127491072; reservation 254982144
 batch judging: result/validation/score vectors; full 4 KiB message + 1 KiB diagnostic fit T
+roles: provenance, builds, capture lists, warnings, interactive configuration and run events fit their bounds

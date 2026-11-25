@@ -516,6 +516,12 @@ pub(super) fn reference(v: &e::ArtifactRef) -> Result<Value> {
 pub(super) fn role(v: &e::Role) -> Result<Value> {
     Ok(match v {
         e::Role::Build => kind("build"),
+        e::Role::RoleBuild { role } => {
+            obj([("kind", s("role_build")), ("role", s(role.wire_token()))])
+        }
+        e::Role::Checker { test } => obj([("kind", s("checker")), ("test", ident(test)?)]),
+        e::Role::Validator { test } => obj([("kind", s("validator")), ("test", ident(test)?)]),
+        e::Role::Interactor { test } => obj([("kind", s("interactor")), ("test", ident(test)?)]),
         e::Role::Raw => kind("raw"),
         e::Role::Test { test } => obj([("kind", s("test")), ("test", ident(test)?)]),
         e::Role::Command { test, iteration } => obj([
@@ -536,12 +542,35 @@ pub(super) fn role(v: &e::Role) -> Result<Value> {
         ]),
     })
 }
+/// §4.5: a role build has stage `build`, and each judge role has the stage of
+/// the same name (and only that role).
+pub(super) fn stage_role(stage: e::Stage, role: &e::Role) -> Result<()> {
+    let expected = match role {
+        e::Role::RoleBuild { .. } => Some(e::Stage::Build),
+        e::Role::Checker { .. } => Some(e::Stage::Checker),
+        e::Role::Validator { .. } => Some(e::Stage::Validator),
+        e::Role::Interactor { .. } => Some(e::Stage::Interactor),
+        _ => None,
+    };
+    let judge_stage = matches!(
+        stage,
+        e::Stage::Checker | e::Stage::Validator | e::Stage::Interactor
+    );
+    match expected {
+        Some(expected) if expected != stage => Err(Error("execution stage does not match role")),
+        None if judge_stage => Err(Error("execution stage does not match role")),
+        _ => Ok(()),
+    }
+}
 pub(super) fn stage(v: e::Stage) -> Value {
     s(match v {
         e::Stage::Build => "build",
         e::Stage::Run => "run",
         e::Stage::Command => "command",
         e::Stage::Hook => "hook",
+        e::Stage::Checker => "checker",
+        e::Stage::Validator => "validator",
+        e::Stage::Interactor => "interactor",
     })
 }
 pub(super) fn execution(v: &e::ExecutionReport) -> Result<Value> {
@@ -566,6 +595,7 @@ pub(super) fn execution(v: &e::ExecutionReport) -> Result<Value> {
         Some(v) => summary(v)?,
         None => Value::Null,
     };
+    stage_role(v.plan.stage, &v.plan.role)?;
     let value = obj([
         ("index", n(v.plan.index)),
         ("stage", stage(v.plan.stage)),

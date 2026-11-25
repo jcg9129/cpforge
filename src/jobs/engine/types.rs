@@ -31,11 +31,26 @@ pub enum Stage {
     Run,
     Command,
     Hook,
+    Checker,
+    Validator,
+    Interactor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
     Build,
+    RoleBuild {
+        role: crate::report::RoleName,
+    },
+    Checker {
+        test: String,
+    },
+    Validator {
+        test: String,
+    },
+    Interactor {
+        test: String,
+    },
     Test {
         test: String,
     },

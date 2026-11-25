@@ -11,6 +11,7 @@ mod display;
 mod documents;
 mod file_io;
 mod judging;
+mod roles;
 mod types;
 pub mod wire;
 
@@ -19,6 +20,7 @@ pub use display::*;
 pub use documents::*;
 pub use file_io::*;
 pub use judging::*;
+pub use roles::*;
 pub use types::*;
 
 #[cfg(test)]

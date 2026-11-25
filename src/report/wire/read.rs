@@ -4,6 +4,7 @@ pub use super::judging::{
     read_aggregate_score, read_check_config, read_judge, read_judge_result, read_judged_check,
     read_validation,
 };
+pub use super::roles::{read_judge_warning, read_role, read_roles};
 use super::value::{Error, Result};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::collections::BTreeSet;
@@ -373,6 +374,73 @@ pub fn read_u32(value: &serde_json::Value) -> Result<u32> {
         .as_u64()
         .and_then(|v| v.try_into().ok())
         .ok_or(Error("invalid u32"))
+}
+
+pub fn read_stage(v: &serde_json::Value) -> Result<crate::jobs::engine::Stage> {
+    use crate::jobs::engine::Stage as S;
+    match string(v)? {
+        "build" => Ok(S::Build),
+        "run" => Ok(S::Run),
+        "command" => Ok(S::Command),
+        "hook" => Ok(S::Hook),
+        "checker" => Ok(S::Checker),
+        "validator" => Ok(S::Validator),
+        "interactor" => Ok(S::Interactor),
+        _ => Err(Error("unknown execution stage")),
+    }
+}
+pub fn read_execution_role(v: &serde_json::Value) -> Result<crate::jobs::engine::Role> {
+    use crate::jobs::engine::Role as R;
+    let id = |key| -> Result<String> {
+        let s = string(member(v, key)?)?;
+        super::value::ident(s)?;
+        Ok(s.into())
+    };
+    let role = match string(member(v, "kind")?)? {
+        "build" => R::Build,
+        "raw" => R::Raw,
+        "test" => R::Test { test: id("test")? },
+        "role_build" => R::RoleBuild {
+            role: enumeration(member(v, "role")?)?,
+        },
+        "checker" => R::Checker { test: id("test")? },
+        "validator" => R::Validator { test: id("test")? },
+        "interactor" => R::Interactor { test: id("test")? },
+        "command" => R::Command {
+            test: if member(v, "test")?.is_null() {
+                None
+            } else {
+                Some(id("test")?)
+            },
+            iteration: read_u32(member(v, "iteration")?)?,
+        },
+        "hook" => R::Hook {
+            name: id("name")?,
+            trigger: string(member(v, "trigger")?)?.into(),
+        },
+        _ => return Err(Error("unknown execution role")),
+    };
+    super::run::role(&role)?;
+    Ok(role)
+}
+/// Run-start fields are shared by solution, judge and session runs (§A.4).
+pub fn validate_run_started(bytes: &[u8]) -> Result<()> {
+    if bytes.len() > super::EVENT_BOUND {
+        return Err(Error("event exceeds bound"));
+    }
+    let v = read_json(bytes)?;
+    if string(member(&v, "event")?)? != "run_started" {
+        return Err(Error("expected run_started"));
+    }
+    read_u64(member(&v, "seq")?)?;
+    super::schema::run_id(string(member(&v, "run")?)?)?;
+    read_u32(member(&v, "execution")?)?;
+    super::run::stage_role(
+        read_stage(member(&v, "stage")?)?,
+        &read_execution_role(member(&v, "role")?)?,
+    )?;
+    super::roles::read_hash(member(&v, "digest")?)?;
+    Ok(())
 }
 
 /// Classifies the canonical report prefix without reading beyond 32 bytes.

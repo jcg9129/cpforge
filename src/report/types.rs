@@ -19,6 +19,12 @@ macro_rules! tokens {
                 match self { $(Self::$variant => $token),+ }
             }
         }
+        impl TryFrom<&str> for $name {
+            type Error = ();
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                match value { $($token => Ok(Self::$variant),)+ _ => Err(()) }
+            }
+        }
     };
 }
 

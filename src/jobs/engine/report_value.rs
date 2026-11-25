@@ -66,6 +66,14 @@ pub struct Hook {
 }
 #[derive(Clone, Debug)]
 pub enum WarningKind {
+    JudgeScratch {
+        run: String,
+        detail: crate::report::JudgeScratchDetail,
+    },
+    TestlibHeader {
+        role: crate::report::RoleName,
+        detail: crate::report::TestlibHeaderDetail,
+    },
     IoScratch {
         run: String,
         detail: crate::report::IoScratchDetail,
@@ -123,9 +131,9 @@ pub struct PreDeliveryExit {
 }
 #[derive(Clone, Debug)]
 pub struct ReportDetails {
-    /// The planned shape the report reservation used; None keeps the legacy
-    /// compare-only bound and is invalid with file-I/O evidence.
+    /// The planned shape; None means comparison without file-I/O evidence.
     pub shape: Option<crate::report::wire::ReportShape>,
+    pub roles: Vec<crate::report::RoleReport>,
     pub problem: Option<Problem>,
     pub target: Option<Target>,
     pub score: Option<crate::report::AggregateScore>,

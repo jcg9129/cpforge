@@ -43,8 +43,8 @@ pub fn encode_event(v: &e::Event) -> Result<Vec<u8>> {
             stage: v_stage,
             role: v_role,
             digest,
-        } => (
-            "run_started",
+        } => ("run_started", {
+            stage_role(*v_stage, v_role)?;
             vec![
                 ("run", run_id(run.as_str())?),
                 ("execution", n(*execution)),
@@ -56,8 +56,8 @@ pub fn encode_event(v: &e::Event) -> Result<Vec<u8>> {
                         .as_ref()
                         .ok_or(Error("run_started needs spec digest"))?),
                 ),
-            ],
-        ),
+            ]
+        }),
         e::EventPayload::OutputChunk { run, stream, bytes } => {
             if bytes.len() > 4096 {
                 return Err(Error("output chunk exceeds bound"));

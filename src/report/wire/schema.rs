@@ -689,9 +689,29 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
         {
             return Err(Error("invalid retention detail"));
         }
+        // Only judge roles have a profile, so only they have header evidence.
+        WarningKind::TestlibHeader { role, .. }
+            if matches!(role, r::RoleName::Generator | r::RoleName::Brute) =>
+        {
+            return Err(Error("testlib_header warning needs a judge role"));
+        }
         _ => {}
     }
     let (kind, mut fields) = match &v.kind {
+        WarningKind::JudgeScratch { run, detail } => (
+            "judge_scratch",
+            vec![
+                ("run", run_id(run)?),
+                ("detail", super::judging::serialized(detail)?),
+            ],
+        ),
+        WarningKind::TestlibHeader { role, detail } => (
+            "testlib_header",
+            vec![
+                ("role", s(role.wire_token())),
+                ("detail", super::judging::serialized(detail)?),
+            ],
+        ),
         WarningKind::IoScratch { run, detail } => (
             "io_scratch",
             vec![("run", run_id(run)?), ("detail", s(detail.wire_token()))],

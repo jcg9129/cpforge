@@ -78,6 +78,9 @@ impl ExecutionSpec {
                 super::Stage::Run => b"run",
                 super::Stage::Command => b"command",
                 super::Stage::Hook => b"hook",
+                super::Stage::Checker => b"checker",
+                super::Stage::Validator => b"validator",
+                super::Stage::Interactor => b"interactor",
             },
         );
         native(&mut hash, spec.program.as_os_str());
