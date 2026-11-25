@@ -60,7 +60,8 @@ pub(super) async fn finish(
             // Keep the lease (and its retained-byte accounting) with the actual
             // walker, including after timeout, cancellation or future drop.
             let guard = crate::storage::WorkspaceGuard::leased(&owner);
-            // Checked before each walk only: a completed result is reported.
+            // Checked only at walk boundaries; a started walk runs to its end
+            // and a completed result is reported if anyone still waits.
             let check = || {
                 if worker_cancel.is_cancelled() {
                     Err(RunNote::CwdUnmeasuredCancelled)
@@ -93,7 +94,8 @@ pub(super) async fn finish(
             if measured.bytes <= limit {
                 return Ok(None);
             }
-            // Never start deleting once the waiter may have given up.
+            // Do not start a clear after the deadline or cancellation. A clear
+            // that has started, or work whose waiter was dropped, completes.
             check()?;
             #[cfg(not(feature = "storage-test-hooks"))]
             let cleared =

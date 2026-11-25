@@ -2149,8 +2149,14 @@ It never touches anything else.
   cancellation stops waiting promptly and adds
   `cwd_unmeasured{reason: cancelled}`. A result that has already arrived wins
   over cancellation and the deadline. The worker checks cancellation and the
-  deadline before measuring and again before clearing, so it never starts
-  deleting after the wait may have ended. A job has at most one such worker:
+  deadline only at walk boundaries (before measuring and before clearing);
+  a walk already started is not interrupted. Work that outlives its waiter
+  (deadline, cancellation or a dropped waiting future, which does not cancel
+  it) is transferred and may still complete, including a clear that deletes
+  `cwd/` after the run's summary was recorded without `CwdOverflow`. When
+  cancellation is already set as the step starts, the step is skipped (reason
+  `cancelled`), so a cancelled job may keep an over-cap `cwd/`; ordinary
+  retention accounts for it. A job has at most one such worker:
   while an earlier one is still running (transferred), the step is not
   started and records reason `timeout`. Worker credit or creation failure
   is `io`. These notes never change a class or verdict, and

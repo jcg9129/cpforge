@@ -3,6 +3,7 @@ use crate::exec::ResolvedCommand;
 use crate::report::{RunClass, RunNote};
 use crate::storage::job::{ProbeOutcome, probe};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
 
 fn allowance() -> Duration {
@@ -248,6 +249,248 @@ fn cancellation_interrupts_stalled_clearing() {
     });
 }
 
+/// The summary with every observation fixed to the golden run_finished
+/// values, keeping what the cwd step decides: class, notes and overflow.
+fn fixed(summary: &RunSummary) -> RunSummary {
+    use crate::supervisor as p;
+    let now = Instant::now();
+    RunSummary {
+        observation: SummaryEvidence::default(),
+        class: summary.class.clone(),
+        record: Arc::new(ExecutionRecord::Started(Box::new(p::RootOutcome {
+            milestones: None,
+            kill_attempts: 0,
+            stdout: None,
+            stderr: None,
+            status: p::Termination::Exited { code: 0 },
+            stop_trigger: None,
+            enforced_at: None,
+            termination: p::TerminationEvidence {
+                requested_at: None,
+                method: None,
+                cleanup: p::Cleanup::Confirmed,
+            },
+            violations: vec![],
+            measurements: vec![],
+            limits: vec![],
+            timing: p::RootTiming {
+                setup: Duration::from_micros(1),
+                create_end: now,
+                exit_observed: Some(now),
+                observer: p::ObserverKind::Polling,
+                wall: Some(Duration::from_micros(2)),
+                method: p::WallMethod::Observed,
+                grace: Duration::from_millis(50),
+            },
+            notes: vec![],
+            errors: vec![],
+        }))),
+        deadline: Duration::from_micros(3),
+        notes: summary.notes.clone(),
+        cwd_overflow_bytes: summary.cwd_overflow_bytes,
+    }
+}
+
+/// Legacy expected bytes: the golden summary, which predates this step, and
+/// its overflow form as the synchronous step produced it.
+fn legacy(overflow: bool) -> Vec<u8> {
+    let event: &[u8] = include_bytes!("../../report/wire/fixtures/run_finished.json");
+    let key = b"\"summary\":";
+    let start = event.windows(key.len()).position(|w| w == key).unwrap() + key.len();
+    let summary = &event[start..event.len() - 1];
+    let healthy: &[u8] = br#""notes":[],"notes_dropped":0,"cwd_overflow_bytes":null}"#;
+    assert!(summary.ends_with(healthy));
+    if !overflow {
+        return summary.to_vec();
+    }
+    let mut bytes = summary[..summary.len() - healthy.len()].to_vec();
+    bytes.extend_from_slice(
+        br#""notes":["cwd_overflow"],"notes_dropped":0,"cwd_overflow_bytes":"9"}"#,
+    );
+    bytes
+}
+
+/// A job-owned tree of 9 bytes outside any engine run.
+fn tree(engine: &Engine<'static>) -> PathBuf {
+    let tree = engine.ready.dir.join("r00000/cwd");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("large"), b"123456789").unwrap();
+    tree
+}
+
+fn never_walks() -> Option<Observation> {
+    Some(Observation(Arc::new(|point: Point| {
+        assert!(
+            !matches!(point, Point::BeforeCwdMeasure(_) | Point::BeforeCwdClear(_)),
+            "walker started"
+        );
+    })))
+}
+
+#[test]
+fn credit_refusal_is_io_and_releases_the_walker_flag() {
+    isolated("credit_refusal_is_io_and_releases_the_walker_flag", || {
+        run_test(move || async move {
+            let f = Fixture::new();
+            let engine = engine(&f, 1, 4);
+            let tree = tree(&engine);
+            let walking = Arc::new(AtomicBool::new(false));
+            let bounds = supervisor::global_bounds().unwrap();
+            let mut held = Vec::new();
+            while let Some(credit) = bounds.thread_credits.try_reserve(1) {
+                held.push(credit);
+            }
+            let result = super::super::cwd::finish(
+                engine.ready.owner.clone(),
+                tree.clone(),
+                4,
+                CancelToken::new(),
+                &walking,
+                never_walks(),
+                0,
+            )
+            .await;
+            assert_eq!(result, Err(RunNote::CwdUnmeasuredIo));
+            assert!(!walking.load(Ordering::Acquire), "walker flag leaked");
+            assert!(tree.join("large").is_file());
+            drop(held);
+            // The next attempt is admitted and walks normally.
+            let result = super::super::cwd::finish(
+                engine.ready.owner.clone(),
+                tree.clone(),
+                4,
+                CancelToken::new(),
+                &walking,
+                None,
+                0,
+            )
+            .await;
+            assert_eq!(result, Ok(Some(9)));
+            assert!(!tree.exists());
+            assert!(!walking.load(Ordering::Acquire));
+            idle().await;
+        });
+    });
+}
+
+#[test]
+fn cancellation_before_the_step_skips_it_and_keeps_the_tree() {
+    isolated(
+        "cancellation_before_the_step_skips_it_and_keeps_the_tree",
+        || {
+            run_test(move || async move {
+                let f = Fixture::new();
+                let engine = engine(&f, 1, 4);
+                let tree = tree(&engine);
+                let walking = Arc::new(AtomicBool::new(false));
+                let cancel = CancelToken::new();
+                cancel.cancel();
+                let credits = supervisor::debug_counters().credits_in_use;
+                let result = super::super::cwd::finish(
+                    engine.ready.owner.clone(),
+                    tree.clone(),
+                    4,
+                    cancel,
+                    &walking,
+                    never_walks(),
+                    0,
+                )
+                .await;
+                assert_eq!(result, Err(RunNote::CwdUnmeasuredCancelled));
+                // No worker was credited; an over-cap tree is kept.
+                assert_eq!(supervisor::debug_counters().credits_in_use, credits);
+                assert!(!walking.load(Ordering::Acquire));
+                assert_eq!(fs::read(tree.join("large")).unwrap(), b"123456789");
+                idle().await;
+            });
+        },
+    );
+}
+
+#[test]
+fn dropped_wait_transfers_a_clearing_walker_that_finishes_its_clear() {
+    isolated(
+        "dropped_wait_transfers_a_clearing_walker_that_finishes_its_clear",
+        || {
+            run_test(move || async move {
+                let f = Fixture::new();
+                let engine = engine(&f, 1, 4);
+                let tree = tree(&engine);
+                let directory = engine.ready.dir.clone();
+                let budget = engine.ready.budget.clone();
+                let owner = engine.ready.owner.clone();
+                drop(engine);
+                let entered = CancelToken::new();
+                let worker_entered = entered.clone();
+                let (release, receiver) = mpsc::channel();
+                let release = Release(release);
+                let receiver = Mutex::new(receiver);
+                // Pause after the pre-clear check passed: the clear itself
+                // runs later, independent of the deadline.
+                let observation = Observation(Arc::new(move |point: Point| {
+                    if point == Point::BeforeCwdClear(0) {
+                        worker_entered.cancel();
+                        receiver
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("cwd pause was not released");
+                    }
+                }));
+                let walking = Arc::new(AtomicBool::new(false));
+                let cancel = CancelToken::new();
+                let mut future = Box::pin(super::super::cwd::finish(
+                    owner,
+                    tree.clone(),
+                    4,
+                    cancel.clone(),
+                    &walking,
+                    Some(observation),
+                    0,
+                ));
+                tokio::time::timeout(allowance(), async {
+                    tokio::select! {
+                        _ = entered.cancelled() => {},
+                        _ = future.as_mut() => panic!("walk finished before the pause"),
+                    }
+                })
+                .await
+                .expect("walker did not reach the clear");
+                // Dropping the waiter neither cancels nor joins the walker.
+                drop(future);
+                assert!(!cancel.is_cancelled());
+                tokio::time::timeout(allowance(), async {
+                    loop {
+                        let counters = supervisor::debug_counters();
+                        if counters.service_pending == 1 && counters.credits_in_use == 2 {
+                            assert_eq!(counters.slots_in_use, 0);
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("dropped walker was not transferred with its credit");
+                assert!(walking.load(Ordering::Acquire));
+                assert!(matches!(probe(&directory), ProbeOutcome::Held));
+                assert!(
+                    budget.usage().retained > 0,
+                    "lease accounting released early"
+                );
+                assert!(tree.join("large").is_file());
+                drop(release);
+                idle().await;
+                // The transferred walker completed its clear after the waiter
+                // returned, then released the flag, lease and accounting.
+                assert!(!tree.exists());
+                assert!(!walking.load(Ordering::Acquire));
+                assert!(matches!(probe(&directory), ProbeOutcome::Acquired(_)));
+                assert_eq!(budget.usage().retained, 0);
+            });
+        },
+    );
+}
+
 #[test]
 fn healthy_measurement_and_overflow_preserve_report_fields() {
     isolated(
@@ -268,6 +511,12 @@ fn healthy_measurement_and_overflow_preserve_report_fields() {
                     assert_eq!(report.data().result.verdict, JobVerdict::Succeeded);
                     let summary = report.data().executions[0].summary.as_ref().unwrap();
                     assert_eq!(summary.class, RunClass::ExitedZero);
+                    // With observations fixed, the step's contribution encodes
+                    // exactly as the schema 1 document did before this step.
+                    assert_eq!(
+                        crate::report::wire::encode_run_summary(&fixed(summary)).unwrap(),
+                        legacy(limit == 4)
+                    );
                     if limit == 9 {
                         assert_eq!(summary.notes, Vec::<RunNote>::new());
                         assert_eq!(summary.cwd_overflow_bytes, None);

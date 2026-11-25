@@ -296,12 +296,66 @@ mod unix {
         })
         .map_err(|_| RunNote::CwdUnmeasuredIo)?;
         let _worker = TransferOnDrop(Some(worker));
-        // A result that has already arrived wins over cancellation and the
-        // deadline; otherwise either stops waiting without joining the thread.
+        wait_post_run(receiver, cancel, deadline).await
+    }
+
+    /// A result that has already arrived wins over cancellation and the
+    /// deadline; otherwise either stops waiting without joining the thread.
+    async fn wait_post_run<T>(
+        receiver: oneshot::Receiver<Result<T, crate::report::RunNote>>,
+        cancel: &CancelToken,
+        deadline: tokio::time::Instant,
+    ) -> Result<T, crate::report::RunNote> {
+        use crate::report::RunNote;
         tokio::select! { biased;
             result = receiver => result.map_err(|_| RunNote::CwdUnmeasuredIo)?,
             _ = cancel.cancelled() => Err(RunNote::CwdUnmeasuredCancelled),
             _ = tokio::time::sleep_until(deadline) => Err(RunNote::CwdUnmeasuredTimeout),
+        }
+    }
+
+    #[cfg(test)]
+    mod post_run_tests {
+        use super::*;
+        use crate::report::RunNote;
+
+        #[test]
+        fn delivered_result_wins_over_cancellation_and_deadline() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cancelled = CancelToken::new();
+                cancelled.cancel();
+                // Already expired: every arm is ready on the first poll.
+                let expired = tokio::time::Instant::now();
+                for delivered in [Ok(7u8), Err(RunNote::CwdUnmeasuredIo)] {
+                    let (reply, receiver) = oneshot::channel();
+                    reply.send(delivered).unwrap();
+                    assert_eq!(
+                        wait_post_run(receiver, &cancelled, expired).await,
+                        delivered
+                    );
+                }
+                let (_reply, receiver) = oneshot::channel::<Result<u8, RunNote>>();
+                assert_eq!(
+                    wait_post_run(receiver, &cancelled, expired).await,
+                    Err(RunNote::CwdUnmeasuredCancelled)
+                );
+                let (_reply, receiver) = oneshot::channel::<Result<u8, RunNote>>();
+                assert_eq!(
+                    wait_post_run(receiver, &CancelToken::new(), expired).await,
+                    Err(RunNote::CwdUnmeasuredTimeout)
+                );
+                // A worker that ends without replying is an I/O outcome.
+                let (reply, receiver) = oneshot::channel::<Result<u8, RunNote>>();
+                drop(reply);
+                assert_eq!(
+                    wait_post_run(receiver, &CancelToken::new(), expired).await,
+                    Err(RunNote::CwdUnmeasuredIo)
+                );
+            });
         }
     }
 
