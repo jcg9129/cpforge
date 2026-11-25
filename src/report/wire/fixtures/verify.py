@@ -5,6 +5,8 @@ exercise the real encoders; this oracle can run without compiling the crate.
 """
 import base64
 import json
+import re
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -144,6 +146,149 @@ def header(binary=False):
     return value
 
 
+def decimal(value):
+    assert isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value)
+    assert int(value) <= 2**64 - 1
+    return int(value)
+
+
+def i32(value):
+    assert type(value) is int and -(2**31) <= value < 2**31
+
+
+def portable_name(name):
+    assert isinstance(name, str) and 1 <= len(name.encode()) <= 255
+    assert name not in [".", ".."] and not name.endswith((".", " "))
+    assert not any(c in '/\\:<>"|?*' or ord(c) < 32 or ord(c) == 127 for c in name)
+    assert not name[:5].lower() == ".cpf-"
+    stem = name.split(".")[0].rstrip(" ").upper()
+    assert stem not in {"CON", "PRN", "AUX", "NUL"}
+    assert name.upper() not in {"CONIN$", "CONOUT$"}
+    assert not (stem[:3] in {"COM", "LPT"} and stem[3:] in set("123456789¹²³"))
+
+
+def file_io_config(value):
+    assert list(value) == ["input", "output", "stdin"]
+    assert value["input"] is not None or value["output"] is not None
+    for name in [value["input"], value["output"]]:
+        if name is not None:
+            portable_name(name)
+    assert value["stdin"] == ("null_device" if value["input"] is not None else "test_input")
+    if value["input"] is not None and value["output"] is not None:
+        def key(name):
+            return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
+        assert key(value["input"]) != key(value["output"])
+
+
+REJECTIONS = dict(missing="output_missing", misnamed="output_misnamed",
+                  not_regular="output_not_regular", unreadable="output_unreadable",
+                  too_large="output_too_large", too_many_entries="output_dir_too_large")
+
+
+def output_file(value):
+    kind = value["kind"]
+    members = {
+        "collected": ["bytes", "sha256", "path"], "not_regular": ["type"],
+        "unreadable": ["os_error"], "too_large": ["bytes", "budget"],
+        "not_collected": ["reason", "os_error"], "missing": [], "misnamed": [],
+        "too_many_entries": [], "not_attempted": [],
+    }
+    assert kind in members and list(value) == ["kind"] + members[kind]
+    if kind == "collected":
+        decimal(value["bytes"])
+        assert re.fullmatch("[0-9a-f]{64}", value["sha256"])
+        assert re.fullmatch(r"r[0-9]{5}/out/output", value["path"])
+    elif kind == "not_regular":
+        assert value["type"] in ["link", "directory", "other"]
+    elif kind == "unreadable":
+        i32(value["os_error"])
+    elif kind == "too_large":
+        assert decimal(value["bytes"]) > decimal(value["budget"])
+    elif kind == "not_collected":
+        assert value["reason"] in ["io", "timeout", "unstable"]
+        if value["os_error"] is not None:
+            assert value["reason"] == "io"
+            i32(value["os_error"])
+
+
+def budget_streams(value, is_test):
+    assert list(value) == ["kind", "stream", "streams"] and value["kind"] == "output_budget"
+    streams = value["streams"]
+    order = ["stdout", "stderr"] + (["output_file"] if is_test else [])
+    assert streams and streams == [s for s in order if s in streams]
+    assert value["stream"] == streams[0]
+
+
+def shaped_bound(planned, tests, aggregates, validator=False, judges=0, interactive=False, output=False):
+    assert 0 <= planned <= 10_000 and 0 <= tests <= planned and 0 <= aggregates <= planned
+    assert 0 <= judges <= 2 and not (interactive and output)
+    if validator or judges or interactive:
+        assert tests <= 1000
+    per_test = 3072 + validator * 2560 + judges * 11264 + interactive * 19456 + output * 192
+    return 131072 + planned * 9216 + per_test * tests + aggregates * 256
+
+
+def verify_file_io():
+    def fixture(name):
+        return json.loads((ROOT / name).read_bytes(), object_pairs_hook=unique)
+    configs = fixture("file_io_configs.json")
+    for config in configs:
+        file_io_config(config)
+    outputs = fixture("file_io_variants.json")
+    for output in outputs:
+        output_file(output)
+        assert len(encode(output)) + 15 <= 169
+    checks = fixture("file_io_checks.json")
+    for check_value in checks:
+        assert list(check_value) == ["kind", "reason"] and check_value["kind"] == "output_rejected"
+        assert check_value["reason"] in REJECTIONS.values()
+    assert {v["reason"] for v in checks} == set(REJECTIONS.values())
+    warnings = fixture("file_io_warnings.json")
+    for warning in warnings:
+        assert list(warning) == ["kind", "run", "detail", "message"]
+        assert warning["kind"] == "io_scratch" and re.fullmatch(r"r[0-9]{5}", warning["run"])
+        assert warning["detail"] in ["staged_input_kept", "output_kept", "partial_copy_kept", "not_measured"]
+        assert len(encode(warning["message"])) == 260
+        assert len(encode(warning)) <= 351
+    report = fixture("file_io_report.json")
+    assert list(report["target"]) == ["name", "language", "profile", "build_free", "compare", "io", "run_deadline", "published_limits", "local_limits"]
+    file_io_config(report["target"]["io"])
+    output_file(report["tests"][0]["output_file"])
+    assert list(report["tests"][0])[-1] == "output_file"
+    for execution in report["executions"]:
+        assert execution["summary"]["class"] == {"kind": "exited_zero"}
+    assert len(encode(report)) <= shaped_bound(1, 1, 0, output=True)
+    vectors = fixture("file_io_size_vectors.json")
+    assert vectors["io"] == configs[2]
+    test_value = test(signal(), check())
+    test_value["check"]["diag"] = dict(reserved='"' * 1016 + "x")
+    assert len(encode(test_value["check"]["diag"])) == 2048
+    test_value["output_file"] = outputs[0]
+    assert vectors["test"] == test_value
+    budget_streams(vectors["class"], True)
+    assert vectors["class"]["streams"] == ["stdout", "stderr", "output_file"]
+    for name, value, bound in [("target.io (member)", vectors["io"], 562),
+                               ("output_file (member)", outputs[0], 169),
+                               ("test class (3 streams)", vectors["class"], 204),
+                               ("test entry with output file", test_value, 3264)]:
+        size = len(encode(value)) + (6 if name.startswith("target") else 15 if name.startswith("output_file") else 0)
+        assert size <= bound
+        print(f"file I/O {name}: {size} <= bound {bound}")
+    for binary in [False, True]:
+        head = header(binary)
+        fields = list(head["target"].items())
+        fields.insert(5, ("io", vectors["io"]))
+        head["target"] = dict(fields)
+        actual = len(encode(head)) + 10_000 * sum(len(encode(v)) for v in [entry(binary), test_value, aggregate()]) + 3 * 9999
+        bound = shaped_bound(10_000, 10_000, 10_000, output=True)
+        assert actual <= bound == 127_491_072
+        assert 2 * bound == 254_982_144
+        print(f"file I/O {'base64' if binary else 'utf8'} 10000 full entries: {actual} <= bound {bound}; reservation {2 * bound}")
+    assert shaped_bound(4004, 1000, 0, validator=True, judges=2, interactive=True) == 84_647_936
+    assert 2 * shaped_bound(9382, 1000, 0, validator=True, judges=2, interactive=True) == 268_423_168
+    assert 2 * shaped_bound(9383, 1000, 0, validator=True, judges=2, interactive=True) > 256 * 1024**2
+
+
 def verify():
     files = sorted(ROOT.glob("*.json"))
     for path in files:
@@ -179,6 +324,7 @@ def verify():
     bound = 65536 + 12288 * 10_000
     assert actual <= table <= bound
     print(f"10000 full entries: {actual} <= table {table} <= reservation {bound}")
+    verify_file_io()
 
 
 if __name__ == "__main__":

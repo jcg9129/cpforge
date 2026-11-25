@@ -1,4 +1,4 @@
-16 golden fixtures: compact UTF-8, unique members, canonical order/prefix
+22 golden fixtures: compact UTF-8, unique members, canonical order/prefix
 utf8 Cause: 109 <= table 129 <= bound 129
 utf8 class: 944 <= table 1122 <= bound 1122
 utf8 non-infrastructure class: 100 <= table 169 <= bound 169
@@ -44,3 +44,9 @@ base64 refusal: 89753 <= table 103966 <= bound 106496
 base64 run_finished event: 6220 <= table 6873 <= bound 7168
 base64 output_chunk event: 5601 <= table 5621 <= bound 7168
 10000 full entries: 110592187 <= table 119513645 <= reservation 122945536
+file I/O target.io (member): 562 <= bound 562
+file I/O output_file (member): 169 <= bound 169
+file I/O test class (3 streams): 86 <= bound 204
+file I/O test entry with output file: 2907 <= bound 3264
+file I/O utf8 10000 full entries: 112282749 <= bound 127491072; reservation 254982144
+file I/O base64 10000 full entries: 110646386 <= bound 127491072; reservation 254982144

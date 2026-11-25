@@ -230,6 +230,7 @@ pub struct TestReport {
     pub class: Option<report::RunClass>,
     pub check: Option<report::CheckOutcome>,
     pub verdict: Option<report::TestVerdict>,
+    pub output_file: Option<report::OutputFile>,
 }
 
 #[derive(Clone, Debug)]

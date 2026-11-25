@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
+use super::OutputRejectReason;
 use crate::compare::Diag;
 use crate::supervisor::{
     self, CaptureLoss, Cleanup, Exceed, RootOutcome, StopTrigger, Termination,
@@ -90,7 +91,7 @@ impl Coverage {
     }
 }
 tokens! {
-    pub enum Stream { Stdout => "stdout", Stderr => "stderr" }
+    pub enum Stream { Stdout => "stdout", Stderr => "stderr", OutputFile => "output_file" }
 }
 impl From<supervisor::Stream> for Stream {
     fn from(value: supervisor::Stream) -> Self {
@@ -180,6 +181,8 @@ impl InfrastructureCauses {
 pub struct BudgetStreams {
     pub stdout: bool,
     pub stderr: bool,
+    /// Only test classes may include this stream; run classes retain stdout/stderr.
+    pub output_file: bool,
 }
 impl BudgetStreams {
     pub fn primary(self) -> Option<Stream> {
@@ -187,6 +190,8 @@ impl BudgetStreams {
             Some(Stream::Stdout)
         } else if self.stderr {
             Some(Stream::Stderr)
+        } else if self.output_file {
+            Some(Stream::OutputFile)
         } else {
             None
         }
@@ -195,6 +200,7 @@ impl BudgetStreams {
         [
             self.stdout.then_some(Stream::Stdout),
             self.stderr.then_some(Stream::Stderr),
+            self.output_file.then_some(Stream::OutputFile),
         ]
         .into_iter()
         .flatten()
@@ -312,6 +318,7 @@ impl RunInput {
                         }
                     )
                 }),
+                output_file: false,
             },
             supervisor_errors: root.errors.iter().copied().map(Into::into).collect(),
             stdout: StreamEvidence::from_capture(root.stdout.as_ref(), policies[0]),
@@ -354,6 +361,7 @@ impl RunInput {
             budget_violations: BudgetStreams {
                 stdout: false,
                 stderr: false,
+                output_file: false,
             },
             supervisor_errors: Vec::new(),
             stdout: StreamEvidence::default(),
@@ -484,6 +492,7 @@ pub enum CheckKind {
     Failed { diag: Box<Diag> },
     CheckerFailed { diag: Box<Diag> },
     CheckError { os_error: Option<i32> },
+    OutputRejected { reason: OutputRejectReason },
     InternalError { invariant: Invariant },
 }
 impl CheckKind {
@@ -495,6 +504,7 @@ impl CheckKind {
             Self::Failed { .. } => "failed",
             Self::CheckerFailed { .. } => "checker_failed",
             Self::CheckError { .. } => "check_error",
+            Self::OutputRejected { .. } => "output_rejected",
             Self::InternalError { .. } => "internal_error",
         }
     }
@@ -503,6 +513,7 @@ impl CheckKind {
         match self {
             Self::NotAdmitted { reason } => Some(reason.wire_token()),
             Self::Unchecked => Some("no_answer"),
+            Self::OutputRejected { reason } => Some(reason.wire_token()),
             Self::Failed { diag } => Some(ComparisonReason::from(diag.as_ref()).wire_token()),
             Self::CheckerFailed { .. } => Some("invalid_answer"),
             _ => None,
@@ -715,6 +726,7 @@ pub struct DisplayContext {
     pub installed_limits: Vec<supervisor::LocalLimit>,
     pub invariant: Option<Invariant>,
     pub measurements: Vec<supervisor::Measurement>,
+    pub output_file: Option<(String, super::OutputFile)>,
 }
 
 impl PostBuild {

@@ -1318,6 +1318,48 @@ fn stream_reservations_rollback_atomically_and_count_actual_writes() {
 }
 
 #[test]
+fn report_reservation_is_twice_the_plan_bound_plus_run_reservations() {
+    runtime(async {
+        for shape in [None, Some(crate::report::wire::ReportShape::default())] {
+            let f = Fixture::new();
+            let mut engine = test_engine(&f, "python", 1);
+            if let Some(shape) = shape {
+                engine = engine.report_shape(shape).unwrap();
+            }
+            let budget = engine.ready.budget.clone();
+            let target = engine.ready.target.as_ref().unwrap();
+            let streams = target.run.stdout.bytes.value + target.run.stderr.bytes.value;
+            let expected = crate::report::wire::report_reservation(1, 1, 0, shape).unwrap();
+            // Observer panics become internal evidence, so record and assert later.
+            let at_admission = Arc::new(std::sync::Mutex::new(None));
+            let (before_run_budget, seen) = (budget.clone(), at_admission.clone());
+            let engine = engine.observe(move |point| {
+                if point == Point::AfterAdmission(0) {
+                    *seen.lock().unwrap() = Some(before_run_budget.usage().reserved);
+                }
+            });
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (resume_tx, resume_rx) = oneshot::channel();
+            let mut fake = Fake {
+                entered: Some(entered_tx),
+                resume: Some(resume_rx),
+                ..Fake::default()
+            };
+            let observe = async {
+                entered_rx.await.unwrap();
+                assert_eq!(budget.usage().reserved, expected + streams + METADATA);
+                resume_tx.send(()).unwrap();
+            };
+            let (report, ()) = tokio::join!(run(engine, &mut fake), observe);
+            assert_eq!(*at_admission.lock().unwrap(), Some(expected));
+            assert_eq!(report.data().result.verdict, JobVerdict::Passed);
+            assert_eq!(report.data().details.shape, shape);
+            assert_eq!(budget.usage().reserved, 0);
+        }
+    });
+}
+
+#[test]
 fn unmapped_supervisor_failure_is_internal_with_record_retained() {
     let f = Fixture::new();
     let report = runtime(run(

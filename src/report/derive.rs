@@ -1,5 +1,6 @@
 //! Pure first-matching-row derivations from report §§2.1–2.7.
 
+use super::OutputFile;
 use super::types::*;
 use crate::compare::{self, Diag};
 use crate::supervisor::{CaptureLoss, Cleanup, StopTrigger, Termination};
@@ -69,7 +70,11 @@ pub fn classify_run(record: &RunInput) -> RunClass {
             == Some(StopTrigger::OutputBudget(crate::supervisor::Stream::Stderr));
     if stdout || stderr {
         return RunClass::OutputBudget {
-            streams: BudgetStreams { stdout, stderr },
+            streams: BudgetStreams {
+                stdout,
+                stderr,
+                output_file: false,
+            },
         };
     }
     match record.execution {
@@ -349,6 +354,65 @@ pub fn check_outcome(
     outcome(kind, diagnostic)
 }
 
+/// The execution class remains evidence; only the test class is raised (§2.15.1).
+pub fn file_test_class(class: &RunClass, output: &OutputFile) -> RunClass {
+    if !matches!(output, OutputFile::TooLarge { .. }) {
+        return class.clone();
+    }
+    match class {
+        RunClass::OutputBudget { streams } => RunClass::OutputBudget {
+            streams: BudgetStreams {
+                output_file: true,
+                ..*streams
+            },
+        },
+        RunClass::ExitedZero | RunClass::NonzeroExit { .. } | RunClass::Signal { .. } => {
+            RunClass::OutputBudget {
+                streams: BudgetStreams {
+                    stdout: false,
+                    stderr: false,
+                    output_file: true,
+                },
+            }
+        }
+        _ => class.clone(),
+    }
+}
+
+/// Collection precedes answer absence and comparison, but never check admission.
+/// This adapter also returns the widened test class without mutating the record.
+pub fn file_test_outcome(
+    execution: &ExecutionResult,
+    admission: CheckAdmission,
+    answer_present: bool,
+    comparison: &Comparison,
+    output: &OutputFile,
+) -> (ExecutionResult, CheckOutcome, TestVerdict) {
+    let mut test = execution.clone();
+    test.class = test
+        .class
+        .as_ref()
+        .map(|class| file_test_class(class, output));
+    let mut check = check_outcome(&test, admission, false, &Comparison::NotRun);
+    if matches!(check.kind, CheckKind::Unchecked) {
+        if matches!(output, OutputFile::Collected { .. }) {
+            check = check_outcome(&test, admission, answer_present, comparison);
+        } else {
+            check.kind = match (output.rejection_reason(), output) {
+                (Some(reason), _) => CheckKind::OutputRejected { reason },
+                (_, OutputFile::NotCollected { os_error, .. }) => CheckKind::CheckError {
+                    os_error: *os_error,
+                },
+                _ => CheckKind::InternalError {
+                    invariant: Invariant::CheckEvidence,
+                },
+            };
+        }
+    }
+    let verdict = test_verdict(&test, &check);
+    (test, check, verdict)
+}
+
 /// Total over representable inputs. Illegal combinations return an internal
 /// verdict with an invariant; no ordinary verdict is guessed for an orphan.
 pub fn test_verdict(execution: &ExecutionResult, check: &CheckOutcome) -> TestVerdict {
@@ -422,7 +486,10 @@ pub fn test_verdict(execution: &ExecutionResult, check: &CheckOutcome) -> TestVe
         return internal(Invariant::DiagnosticFlag);
     }
     let ordinary = match &check.kind {
-        CheckKind::Unchecked | CheckKind::Passed | CheckKind::CheckError { .. } => true,
+        CheckKind::Unchecked
+        | CheckKind::Passed
+        | CheckKind::CheckError { .. }
+        | CheckKind::OutputRejected { .. } => true,
         CheckKind::Failed { diag } => !matches!(**diag, Diag::InvalidAnswer { .. }),
         CheckKind::CheckerFailed { diag } => matches!(**diag, Diag::InvalidAnswer { .. }),
         _ => false,
@@ -441,7 +508,7 @@ pub fn test_verdict(execution: &ExecutionResult, check: &CheckOutcome) -> TestVe
             CheckKind::Failed { diag } if matches!(**diag, Diag::IncompleteOutput) => {
                 internal(Invariant::IncompleteZeroExit)
             }
-            CheckKind::Failed { .. } => TestVerdict::WrongAnswer,
+            CheckKind::Failed { .. } | CheckKind::OutputRejected { .. } => TestVerdict::WrongAnswer,
             CheckKind::Unchecked => TestVerdict::Unchecked,
             CheckKind::Passed => TestVerdict::Passed,
             _ => internal(Invariant::TestCheck),

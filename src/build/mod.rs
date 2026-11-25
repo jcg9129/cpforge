@@ -715,6 +715,7 @@ impl BuildExecutionOutcome {
                         }
                     )
                 }),
+                output_file: false,
             },
             supervisor_errors: self.errors.iter().copied().map(Into::into).collect(),
             stdout,

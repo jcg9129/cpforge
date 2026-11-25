@@ -680,6 +680,7 @@ fn producer_failures_follow_run_class_and_never_validate_outputs() {
                 streams: report::BudgetStreams {
                     stdout: false,
                     stderr: true,
+                    output_file: false,
                 },
             },
         ),

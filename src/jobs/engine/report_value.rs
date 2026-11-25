@@ -29,6 +29,7 @@ pub struct Target {
     pub profile: Option<String>,
     pub build_free: bool,
     pub compare: Option<Comparator>,
+    pub io: Option<crate::report::FileIo>,
     pub run_deadline: Option<(u64, &'static str)>,
     pub published_limits: Option<(Option<u32>, Option<u64>)>,
     pub local_limits: Vec<crate::supervisor::InstalledLimit>,
@@ -64,6 +65,10 @@ pub struct Hook {
 }
 #[derive(Clone, Debug)]
 pub enum WarningKind {
+    IoScratch {
+        run: String,
+        detail: crate::report::IoScratchDetail,
+    },
     Prune {
         job: Option<crate::storage::job::JobId>,
         detail: &'static str,
@@ -117,6 +122,9 @@ pub struct PreDeliveryExit {
 }
 #[derive(Clone, Debug)]
 pub struct ReportDetails {
+    /// The planned shape the report reservation used; None keeps the legacy
+    /// compare-only bound and is invalid with file-I/O evidence.
+    pub shape: Option<crate::report::wire::ReportShape>,
     pub problem: Option<Problem>,
     pub target: Option<Target>,
     pub fingerprints: Option<([u8; 32], [u8; 32])>,

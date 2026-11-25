@@ -119,7 +119,7 @@ pub fn encode_final_report(v: &e::FinalizedReport) -> Result<Vec<u8>> {
     let report = super::report_value(v.data(), Some(v.persistence()))?;
     bounded(
         &obj([("event", s("report")), ("report", report)]),
-        super::report_bound(v.data().executions.len())? + 28,
+        super::report_data_bound(v.data())? + 28,
     )
 }
 pub fn encode_final_refusal(v: &Refusal) -> Result<Vec<u8>> {

@@ -117,7 +117,7 @@ pub(super) fn comparator(v: &Comparator) -> Result<Value> {
     })
 }
 pub(super) fn target(v: &Target) -> Result<Value> {
-    Ok(obj([
+    let mut value = obj([
         (
             "name",
             v.name
@@ -173,7 +173,14 @@ pub(super) fn target(v: &Target) -> Result<Value> {
             "local_limits",
             checked_array(&v.local_limits, 2, |v| limit(v, false))?,
         ),
-    ]))
+    ]);
+    if let Some(io) = &v.io {
+        let Value::Object(fields) = &mut value else {
+            unreachable!()
+        };
+        fields.insert(5, ("io", super::io::config(io)?));
+    }
+    Ok(value)
 }
 pub(super) fn capture_check(v: &crate::jobs::CaptureCheck) -> Result<Value> {
     Ok(match v {
@@ -343,13 +350,14 @@ pub(super) fn verdict(v: &r::TestVerdict) -> Value {
 }
 pub(super) fn test(v: &e::TestReport) -> Result<Value> {
     use crate::tests_store::{FrozenAnswer, Origin};
+    super::io::test(v)?;
     let (answer, digest) = match &v.frozen.answer {
         FrozenAnswer::Absent => ("absent", Value::Null),
         FrozenAnswer::Present { len, sha256, .. } => {
             (if *len == 0 { "empty" } else { "present" }, hex(sha256))
         }
     };
-    let value = obj([
+    let mut value = obj([
         ("id", ident(v.frozen.id.as_str())?),
         (
             "origin",
@@ -392,7 +400,17 @@ pub(super) fn test(v: &e::TestReport) -> Result<Value> {
         ),
         ("verdict", opt(v.verdict.as_ref(), verdict)),
     ]);
-    bounded(&value, 3 * 1024)?;
+    if let Some(output) = &v.output_file {
+        let Value::Object(fields) = &mut value else {
+            unreachable!()
+        };
+        fields.push(("output_file", super::io::output_file(output)?));
+    }
+    // Only an output-file entry carries the 192-byte shape term (report §3.7.1).
+    bounded(
+        &value,
+        3 * 1024 + if v.output_file.is_some() { 192 } else { 0 },
+    )?;
     Ok(value)
 }
 pub(super) fn aggregate(v: &e::Aggregate) -> Result<Value> {
@@ -629,6 +647,10 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
         _ => {}
     }
     let (kind, mut fields) = match &v.kind {
+        WarningKind::IoScratch { run, detail } => (
+            "io_scratch",
+            vec![("run", run_id(run)?), ("detail", s(detail.wire_token()))],
+        ),
         WarningKind::Prune { job, detail } => (
             "prune",
             vec![

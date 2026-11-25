@@ -44,7 +44,11 @@ fn causes(values: impl IntoIterator<Item = InfrastructureCause>) -> RunClass {
 }
 fn output_budget(stdout: bool, stderr: bool) -> RunClass {
     RunClass::OutputBudget {
-        streams: BudgetStreams { stdout, stderr },
+        streams: BudgetStreams {
+            stdout,
+            stderr,
+            output_file: false,
+        },
     }
 }
 fn check(kind: CheckKind, diagnostic: bool) -> CheckOutcome {
@@ -2423,6 +2427,7 @@ fn label_qualifier_fixtures() {
                     streams: BudgetStreams {
                         stdout: true,
                         stderr: true,
+                        output_file: false,
                     },
                     budgets: vec![(Stream::Stdout, 100), (Stream::Stderr, 200)],
                 }],
@@ -3147,7 +3152,8 @@ fn wire_token_fixtures() {
     assert_eq!(
         BudgetStreams {
             stdout: true,
-            stderr: true
+            stderr: true,
+            output_file: false,
         }
         .streams()
         .collect::<Vec<_>>(),
@@ -3156,7 +3162,8 @@ fn wire_token_fixtures() {
     assert_eq!(
         BudgetStreams {
             stdout: true,
-            stderr: true
+            stderr: true,
+            output_file: false,
         }
         .primary(),
         Some(Stream::Stdout)

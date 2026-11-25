@@ -1,0 +1,1 @@
+[{"kind":"output_rejected","reason":"output_missing"},{"kind":"output_rejected","reason":"output_misnamed"},{"kind":"output_rejected","reason":"output_dir_too_large"},{"kind":"output_rejected","reason":"output_not_regular"},{"kind":"output_rejected","reason":"output_unreadable"},{"kind":"output_rejected","reason":"output_too_large"}]

@@ -306,6 +306,77 @@ fn max_diag_check() -> Value {
     assert_eq!(encode(&fields[3].1).len(), 2048);
     Value::Object(fields)
 }
+
+#[test]
+fn file_io_structural_maxima_and_ten_thousand_entries_fit_the_shape_formula() {
+    let config = r::FileIo {
+        input: Some(crate::names::PortableComponent::new(format!("{}a", "é".repeat(127))).unwrap()),
+        output: Some(
+            crate::names::PortableComponent::new(format!("{}b", "é".repeat(127))).unwrap(),
+        ),
+    };
+    let io = super::io::config(&config).unwrap();
+    assert_eq!(encode(&io).len() + 6, 562);
+    let collected = super::io::output_file(&r::OutputFile::Collected {
+        bytes: u64::MAX,
+        sha256: [0xff; 32],
+        path: "r99999/out/output".into(),
+    })
+    .unwrap();
+    assert!(encode(&collected).len() + 15 <= 169);
+    let mut check = max_diag_check();
+    replace(
+        &mut check,
+        "diag",
+        obj([("reserved", s(format!("{}x", "\"".repeat(1016))))]),
+    );
+    let mut test = max_test(max_signal(), check);
+    let Value::Object(fields) = &mut test else {
+        unreachable!()
+    };
+    fields.push(("output_file", collected));
+    let class = run::class(&r::RunClass::OutputBudget {
+        streams: r::BudgetStreams {
+            stdout: true,
+            stderr: true,
+            output_file: true,
+        },
+    })
+    .unwrap();
+    assert!(encode(&class).len() <= 204);
+    let vector = obj([("io", io.clone()), ("test", test.clone()), ("class", class)]);
+    assert_eq!(
+        encode(&vector),
+        include_bytes!("fixtures/file_io_size_vectors.json")
+    );
+    let shape = ReportShape {
+        output_file: true,
+        ..ReportShape::default()
+    };
+    assert!(encode(&test).len() + 1 <= shape.test_bound().unwrap());
+    for binary in [false, true] {
+        let mut header = max_header(binary);
+        let Value::Object(fields) = &mut header else {
+            unreachable!()
+        };
+        let target = &mut fields
+            .iter_mut()
+            .find(|(key, _)| *key == "target")
+            .unwrap()
+            .1;
+        let Value::Object(fields) = target else {
+            unreachable!()
+        };
+        fields.insert(5, ("io", io.clone()));
+        let actual = encode(&header).len()
+            + 10_000
+                * (encode(&max_entry(binary)).len()
+                    + encode(&test).len()
+                    + encode(&max_aggregate()).len())
+            + 3 * 9999;
+        assert!(actual <= shaped_report_bound(10_000, 10_000, 10_000, shape).unwrap());
+    }
+}
 fn replace(v: &mut Value, key: &str, value: Value) {
     let Value::Object(fields) = v else {
         panic!("object")

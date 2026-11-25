@@ -27,6 +27,13 @@ pub(super) fn cause(c: &r::InfrastructureCause) -> Value {
     Value::Object(fields)
 }
 pub(super) fn class(c: &r::RunClass) -> Result<Value> {
+    if matches!(c, r::RunClass::Infrastructure { causes } if causes.as_slice().iter().any(|cause| matches!(cause,
+        r::InfrastructureCause::CaptureLoss { stream: r::Stream::OutputFile, .. })))
+    {
+        return Err(Error(
+            "output_file cannot be an infrastructure capture stream",
+        ));
+    }
     let mut fields = vec![("kind", s(c.wire_token()))];
     match c {
         r::RunClass::Infrastructure { causes: c } => fields.extend([
@@ -355,6 +362,9 @@ pub(super) fn timing(v: &p::RootOutcome) -> Result<Value> {
     ]))
 }
 pub(super) fn summary(v: &e::RunSummary) -> Result<Value> {
+    if matches!(v.class, r::RunClass::OutputBudget { streams } if streams.output_file) {
+        return Err(Error("output_file stream is only valid in a test class"));
+    }
     super::schema::cwd_notes(&v.notes, v.cwd_overflow_bytes)?;
     let (execution, timing, stdout, stderr, measurements, limits, errors, mut notes) =
         match v.record.as_ref() {
@@ -535,6 +545,10 @@ pub(super) fn stage(v: e::Stage) -> Value {
     })
 }
 pub(super) fn execution(v: &e::ExecutionReport) -> Result<Value> {
+    if matches!(v.result.class, Some(r::RunClass::OutputBudget { streams }) if streams.output_file)
+    {
+        return Err(Error("output_file stream is only valid in a test class"));
+    }
     let coverage = match v.result.coverage {
         r::Coverage::NotStarted { reason } => {
             let reason = match v.evidence.as_deref() {

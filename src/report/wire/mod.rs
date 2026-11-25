@@ -12,6 +12,7 @@
 //! encoding has no process-status, publication, delivery, or settlement effects.
 mod artifacts;
 mod events;
+mod io;
 mod model;
 mod native;
 pub mod read;
@@ -48,8 +49,97 @@ pub fn report_bound(planned: usize) -> Result<usize> {
     }
     Ok(REPORT_HEADER_BOUND + EXECUTION_ALLOWANCE * planned)
 }
+
+/// The per-test shape of §3.7.2, fixed by the plan, including skipped tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReportShape {
+    pub validator: bool,
+    pub judges: u8,
+    pub interactive: bool,
+    pub output_file: bool,
+}
+impl ReportShape {
+    pub fn test_bound(self) -> Result<usize> {
+        if self.judges > 2 || (self.interactive && self.output_file) {
+            return Err(Error("invalid report shape"));
+        }
+        Ok(3 * 1024
+            + usize::from(self.validator) * 2560
+            + usize::from(self.judges) * 11 * 1024
+            + usize::from(self.interactive) * 19 * 1024
+            + usize::from(self.output_file) * 192)
+    }
+}
+pub fn shaped_report_bound(
+    planned: usize,
+    tests: usize,
+    aggregates: usize,
+    shape: ReportShape,
+) -> Result<usize> {
+    if planned > 10_000
+        || tests > planned
+        || aggregates > planned
+        || ((shape.validator || shape.judges != 0 || shape.interactive) && tests > 1000)
+    {
+        return Err(Error("report population exceeds plan cap"));
+    }
+    Ok(128 * 1024 + 9 * 1024 * planned + shape.test_bound()? * tests + 256 * aggregates)
+}
+/// Exactly the report plus replacement temporary, before the first admission.
+/// None retains the established compare-only reservation byte for byte.
+pub fn report_reservation(
+    planned: usize,
+    tests: usize,
+    aggregates: usize,
+    shape: Option<ReportShape>,
+) -> Result<u64> {
+    let bound = match shape {
+        Some(shape) => shaped_report_bound(planned, tests, aggregates, shape)?,
+        None => report_bound(planned)?,
+    };
+    let bytes = 2 * bound as u64;
+    if bytes > 256 * 1024 * 1024 {
+        return Err(Error("report reservation exceeds plan cap"));
+    }
+    Ok(bytes)
+}
+pub(crate) fn report_data_bound(v: &e::ReportData) -> Result<usize> {
+    let io = v.details.target.as_ref().and_then(|v| v.io.as_ref());
+    // A file-I/O report is bounded by the shape its plan reserved for, never
+    // by a shape inferred afterwards (that could exceed the reservation).
+    if io.is_some() && v.details.shape.is_none() {
+        return Err(Error("file-I/O report has no planned shape"));
+    }
+    if v.details
+        .shape
+        .is_some_and(|shape| shape.output_file != io.is_some_and(|io| io.output.is_some()))
+    {
+        return Err(Error("report shape does not match target I/O"));
+    }
+    match v.details.shape {
+        Some(shape) => {
+            shaped_report_bound(v.executions.len(), v.tests.len(), v.aggregates.len(), shape)
+        }
+        None => report_bound(v.executions.len()),
+    }
+}
 fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Result<Value> {
     let meta = &v.details;
+    let io = meta.target.as_ref().and_then(|v| v.io.as_ref());
+    if io.is_some()
+        && (v.command != crate::report::JobKind::Test
+            || meta
+                .problem
+                .as_ref()
+                .is_some_and(|v| v.kind == "interactive"))
+    {
+        return Err(Error("file I/O is only applied to test jobs"));
+    }
+    for test in &v.tests {
+        if test.output_file.is_some() != io.is_some_and(|io| io.output.is_some()) {
+            return Err(Error("output-file evidence does not match target I/O"));
+        }
+    }
     if v.schema != 1 || v.document != "job_report" || v.outcome != "finished" {
         return Err(Error("expected finalized schema-1 job report"));
     }
@@ -144,7 +234,19 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
             "executions",
             checked_array(&v.executions, 10_000, run::execution)?,
         ),
-        ("tests", checked_array(&v.tests, 10_000, test)?),
+        (
+            "tests",
+            checked_array(&v.tests, 10_000, |v| {
+                let mut value = test(v)?;
+                if io.is_some() && v.output_file.is_none() {
+                    let Value::Object(fields) = &mut value else {
+                        unreachable!()
+                    };
+                    fields.push(("output_file", Value::Null));
+                }
+                Ok(value)
+            })?,
+        ),
         (
             "aggregates",
             checked_array(&v.aggregates, 10_000, aggregate)?,
@@ -201,10 +303,7 @@ pub fn encode_report(report: &e::FinalizedReport) -> Result<Vec<u8>> {
 }
 /// Also useful for fixtures and independent finalized-value producers.
 pub fn encode_report_data(report: &e::ReportData) -> Result<Vec<u8>> {
-    bounded(
-        &report_value(report, None)?,
-        report_bound(report.executions.len())?,
-    )
+    bounded(&report_value(report, None)?, report_data_bound(report)?)
 }
 /// stdout-only wrapper, also embedded by the final event envelope.
 pub fn encode_stdout_report(report: &e::FinalizedReport) -> Result<Vec<u8>> {
@@ -216,7 +315,7 @@ pub fn encode_stdout_report_data(
 ) -> Result<Vec<u8>> {
     bounded(
         &report_value(report, Some(persistence))?,
-        report_bound(report.executions.len())?,
+        report_data_bound(report)?,
     )
 }
 
@@ -385,5 +484,7 @@ pub fn encode_capture_manifest(
 
 #[cfg(test)]
 mod bounds;
+#[cfg(test)]
+mod io_tests;
 #[cfg(test)]
 mod tests;

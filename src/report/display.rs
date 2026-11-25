@@ -2,6 +2,7 @@
 //! Terminal line escaping and length limits belong to callers.
 
 use super::types::*;
+use super::{OutputFile, OutputFileType};
 use crate::compare::Diag;
 use crate::supervisor::{LocalLimit, Measurement};
 use std::time::Duration;
@@ -24,6 +25,41 @@ pub fn render_label(display: &DisplayLabel) -> String {
             Qualifier::FirstDifference(diag) => diag.to_string(),
             Qualifier::OutputDiffers(diag) => format!("(output differs: {diag})"),
             Qualifier::OutputMatched => "(output matched)".into(),
+            Qualifier::OutputFile {
+                name,
+                outcome,
+                diagnostic,
+            } => {
+                let text = match outcome.as_ref() {
+                    // Report §2.8 spells the diagnostic form without the name.
+                    OutputFile::Missing if *diagnostic => "no output file".to_owned(),
+                    OutputFile::Missing => format!("no output file {name}"),
+                    OutputFile::Misnamed => {
+                        format!("output file {name} not found under that exact spelling")
+                    }
+                    OutputFile::NotRegular { file_type } => format!(
+                        "output file {name} {}",
+                        match file_type {
+                            OutputFileType::Link => "is a link",
+                            OutputFileType::Directory => "is a directory",
+                            OutputFileType::Other => "is not a regular file",
+                        }
+                    ),
+                    OutputFile::Unreadable { .. } => format!("output file {name} not readable"),
+                    OutputFile::TooManyEntries => {
+                        format!("too many files in the working directory to find {name}")
+                    }
+                    OutputFile::TooLarge { budget, .. } => {
+                        format!("output file {name}: more than {budget} bytes")
+                    }
+                    _ => format!("output file {name}"),
+                };
+                if *diagnostic {
+                    format!("({text})")
+                } else {
+                    text
+                }
+            }
             Qualifier::WallDeadline {
                 deadline,
                 measured_wall,
@@ -156,6 +192,11 @@ pub enum Qualifier {
     BuildCause(BuildCause),
     InstalledLimit(LocalLimit),
     OutputMatched,
+    OutputFile {
+        name: String,
+        outcome: Box<OutputFile>,
+        diagnostic: bool,
+    },
     OutputDiffers(Box<Diag>),
     Measurement(Measurement),
 }
@@ -187,6 +228,7 @@ impl Qualifier {
             Self::BuildCause(_) => "build_cause",
             Self::InstalledLimit(_) => "installed_limit",
             Self::OutputMatched => "output_matched",
+            Self::OutputFile { .. } => "output_file",
             Self::OutputDiffers(_) => "output_differs",
             Self::Measurement(_) => "measurement",
         }
@@ -404,10 +446,16 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
     if let Some(class) = class {
         match class {
             RunClass::OutputBudget { streams } if token == Some(LabelToken::OutputLimit) => {
-                qualifiers.push(Qualifier::OutputBudget {
-                    streams: *streams,
-                    budgets: context.budgets.clone(),
-                })
+                let mut streams = *streams;
+                if context.output_file.is_some() {
+                    streams.output_file = false;
+                }
+                if streams.primary().is_some() {
+                    qualifiers.push(Qualifier::OutputBudget {
+                        streams,
+                        budgets: context.budgets.clone(),
+                    });
+                }
             }
             RunClass::Signal {
                 signal,
@@ -443,6 +491,20 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
                 qualifiers.push(Qualifier::FirstDifference(diag.clone()))
             }
             _ => {}
+        }
+        if let Some((name, outcome)) = &context.output_file {
+            if matches!(check.kind, CheckKind::OutputRejected { .. })
+                || (matches!(check.kind, CheckKind::Passed | CheckKind::Failed { .. })
+                    && !check.diagnostic)
+            {
+                qualifiers.push(Qualifier::OutputFile {
+                    name: name.clone(),
+                    outcome: Box::new(outcome.clone()),
+                    diagnostic: check.diagnostic
+                        && !(token == Some(LabelToken::OutputLimit)
+                            && matches!(outcome, OutputFile::TooLarge { .. })),
+                });
+            }
         }
     }
     if let Some(invariant) = invariant {
@@ -516,11 +578,19 @@ impl SummaryTemplate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
     pub template: SummaryTemplate,
+    pub file_io: bool,
     pub interrupted_after_completion: bool,
 }
 impl Summary {
+    pub fn with_file_io(mut self) -> Self {
+        self.file_io = true;
+        self
+    }
     pub fn render(&self) -> String {
         let mut text = self.template.render();
+        if self.file_io {
+            text.push_str(" (file I/O)");
+        }
         if self.interrupted_after_completion {
             text.push_str(" (interrupted after completion)");
         }
@@ -532,6 +602,7 @@ impl Summary {
 pub fn summary(template: SummaryTemplate, completed: bool, recorded_intent: bool) -> Summary {
     Summary {
         template,
+        file_io: false,
         interrupted_after_completion: completed && recorded_intent,
     }
 }

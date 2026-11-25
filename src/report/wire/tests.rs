@@ -107,6 +107,7 @@ pub(super) fn passing() -> e::ReportData {
             diagnostic: false,
         }),
         verdict: Some(r::TestVerdict::Passed),
+        output_file: None,
     };
     let counts = r::Counts {
         primary: r::Cov {
@@ -127,6 +128,7 @@ pub(super) fn passing() -> e::ReportData {
     };
     e::ReportData {
         details: e::ReportDetails {
+            shape: None,
             problem: Some(Problem {
                 identity: "local:a".into(),
                 name: "a".into(),

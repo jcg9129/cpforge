@@ -84,6 +84,7 @@ pub enum PlanError {
     TooManyExecutions,
     InvalidIteration,
     BuildRequired,
+    ReportSize,
 }
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,6 +164,7 @@ pub struct Engine<'probe> {
     disabled_hooks: Vec<Hook>,
     kind: JobKind,
     comparator: Option<Comparator>,
+    report_shape: Option<report::wire::ReportShape>,
     keep_going: bool,
     output_events: bool,
     capture_enabled: bool,
@@ -331,6 +333,7 @@ impl<'probe> Engine<'probe> {
             disabled_hooks: Vec::new(),
             kind,
             comparator,
+            report_shape: None,
             keep_going,
             output_events: false,
             capture_enabled: needs_build || kind == JobKind::Run,
@@ -375,7 +378,29 @@ impl<'probe> Engine<'probe> {
                 test: None,
             });
         }
+        self.validate_report_reservation()?;
         Ok(self)
+    }
+
+    /// Future judging/I/O planners supply the frozen shape before admission.
+    pub fn report_shape(mut self, shape: report::wire::ReportShape) -> Result<Self, PlanError> {
+        if self.kind != JobKind::Test {
+            return Err(PlanError::InvalidIteration);
+        }
+        self.report_shape = Some(shape);
+        self.validate_report_reservation()?;
+        Ok(self)
+    }
+
+    fn validate_report_reservation(&self) -> Result<(), PlanError> {
+        report::wire::report_reservation(
+            self.plan.len() + self.after_test.len(),
+            self.ready.manifest.entries().len(),
+            0,
+            self.report_shape,
+        )
+        .map(|_| ())
+        .map_err(|_| PlanError::ReportSize)
     }
 
     pub fn disabled_hooks(
@@ -449,6 +474,7 @@ impl<'probe> Engine<'probe> {
             disabled_hooks,
             kind,
             comparator,
+            report_shape,
             keep_going,
             output_events,
             capture_enabled,
@@ -461,6 +487,7 @@ impl<'probe> Engine<'probe> {
         let started_at = ready.started_at;
         let mut warnings = warnings::admission(&ready.prune_report);
         let mut details = report_details(&ready, capture_enabled, comparator.clone(), kind);
+        details.shape = report_shape;
         if let Some(Hook {
             outcome: HookResult::NotPlanned { reason },
             ..
@@ -509,8 +536,14 @@ impl<'probe> Engine<'probe> {
         let mut admission_closed = false;
         let mut stopped = false;
         // Reserve report + replacement temporary before admitting any run.
-        let report_bytes = (64 * 1024 + 12 * 1024 * (plan.len() + after_test.len()) as u64) * 2;
-        let report_reservation = ready.budget.reserve(report_bytes).ok();
+        let report_reservation = report::wire::report_reservation(
+            plan.len() + after_test.len(),
+            ready.manifest.entries().len(),
+            0,
+            report_shape,
+        )
+        .ok()
+        .and_then(|bytes| ready.budget.reserve(bytes).ok());
         let report_refused = report_reservation.is_none();
         let planned_count = (plan.len() + after_test.len()) as u32;
         persistence.configure(planned_count, cancel.token());
@@ -671,6 +704,7 @@ impl<'probe> Engine<'probe> {
                     class: execution.result.class.clone(),
                     check: Some(check),
                     verdict: Some(verdict),
+                    output_file: None,
                 };
                 if let Some(progress) = &progress {
                     let context = report::DisplayContext {
@@ -745,6 +779,7 @@ impl<'probe> Engine<'probe> {
                         class: None,
                         check: None,
                         verdict: None,
+                        output_file: None,
                     });
                 }
             }
@@ -1763,6 +1798,7 @@ fn report_details(
 ) -> ReportDetails {
     let target = ready.target.as_ref().filter(|_| capture);
     ReportDetails {
+        shape: None,
         problem: ready
             .problem
             .as_ref()
@@ -1793,6 +1829,7 @@ fn report_details(
                 profile: target.profile.as_ref().map(|p| p.value.clone()),
                 build_free: target.build.is_none(),
                 compare: comparator,
+                io: None,
                 run_deadline: Some((deadline.value.saturating_mul(1000), source)),
                 published_limits: ready
                     .report

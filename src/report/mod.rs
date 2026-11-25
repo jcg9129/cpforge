@@ -9,12 +9,14 @@
 pub mod derive;
 mod display;
 mod documents;
+mod file_io;
 mod types;
 pub mod wire;
 
 pub use derive::*;
 pub use display::*;
 pub use documents::*;
+pub use file_io::*;
 pub use types::*;
 
 #[cfg(test)]
