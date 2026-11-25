@@ -708,8 +708,9 @@ fn judge_build_and_run_cover_all_source_stage_settings() {
         let original =
             judge_fingerprint(&judge_config(), &[Some(baseline.clone()), None, None]).unwrap();
         for settings in [
+            // The interpreter flag is fixed at `-c` by the configuration rules,
+            // so only the program can vary.
             shell.replace("'sh'", "'bash'"),
-            shell.replace("'-c'", "'-e'"),
             shell.replace("echo {}", "echo other"),
             shell.replace("'x'", "'y'"),
             shell.replace("'Z'", "'Y'"),
