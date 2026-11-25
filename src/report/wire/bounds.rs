@@ -353,7 +353,7 @@ fn file_io_structural_maxima_and_ten_thousand_entries_fit_the_shape_formula() {
         output_file: true,
         ..ReportShape::default()
     };
-    assert!(encode(&test).len() + 1 <= shape.test_bound().unwrap());
+    assert!(encode(&test).len() < shape.test_bound().unwrap());
     for binary in [false, true] {
         let mut header = max_header(binary);
         let Value::Object(fields) = &mut header else {

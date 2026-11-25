@@ -5,6 +5,7 @@ use r::{CollectionFailure as F, OutputFile as O, OutputFileType as T};
 
 #[path = "../../../tests/ready_support/mod.rs"]
 #[allow(dead_code)] // Shared setup includes helpers for later execution producers.
+#[allow(clippy::duplicate_mod)] // The engine tests load the same shared fixture module.
 mod ready_support;
 
 fn config(input: Option<&str>, output: Option<&str>) -> r::FileIo {
