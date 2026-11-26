@@ -838,3 +838,581 @@ fn streaming_admission_exceeds_plan_cap_with_constant_template_storage() {
     drop(engine);
     assert_eq!(copies.get(), 0);
 }
+
+#[test]
+fn st_l24_batch_orphans_record_internal_evidence_and_retire() {
+    use crate::report::{CheckKind, CheckNotAdmitted, CheckOutcome, RunClass};
+    for incomplete_match in [true, false] {
+        let role = |r| RunTemplate::new(r, 0, 0).unwrap();
+        let templates = BatchTemplates::new(
+            role(BatchRole::Generator),
+            None,
+            None,
+            role(BatchRole::Candidate),
+            None,
+        )
+        .unwrap();
+        let cancel = CancelState::new();
+        let mut engine = StressAdmission::new(
+            templates,
+            Schedule::Search {
+                start_seed: 0,
+                budget: SearchBudget {
+                    iterations: 1,
+                    time: Duration::from_secs(1),
+                },
+                keep_going: true,
+            },
+            cancel.clone(),
+            true,
+            Box::<Clock>::default(),
+        )
+        .unwrap();
+        let mut live = engine.admit().unwrap();
+        let mut runs = Vec::new();
+        while let Some(run) = live.admit_run().unwrap() {
+            runs.push(BatchRunEvidence {
+                role: run.id.role,
+                class: RunClass::ExitedZero,
+                stdout_complete: run.id.role != BatchRole::Candidate || !incomplete_match,
+            });
+            live.record_finalized(RunCompletion {
+                started: true,
+                captured_bytes: 0,
+                gate: RunGate::Continue,
+                retention_refused: false,
+            })
+            .unwrap();
+        }
+        let check = CheckOutcome {
+            kind: if incomplete_match {
+                CheckKind::Passed
+            } else {
+                CheckKind::NotAdmitted {
+                    reason: CheckNotAdmitted::RunNotEligible,
+                }
+            },
+            diagnostic: false,
+        };
+        let decision = live.classify_batch(&BatchEvidence {
+            runs: &runs,
+            check: Some(&check),
+            validation: None,
+            invalid_answer: false,
+            min_score: None,
+        });
+        assert_eq!(decision.class, IterationClass::Infrastructure);
+        assert_eq!(decision.reason, "invariant");
+        assert!(decision.invariant);
+        assert_eq!(
+            cancel.lock().internal.as_ref().unwrap().invariant,
+            Invariant::JobEvidence
+        );
+        live.begin_retirement(decision.class)
+            .unwrap()
+            .complete(None, false)
+            .unwrap();
+        assert_eq!(engine.counters().retired, 1);
+        assert_eq!(stop(&mut engine).reason, StopReason::Infrastructure);
+    }
+}
+
+#[test]
+fn batch_retirement_classification_precedence_and_reference_answer() {
+    use crate::report::{
+        CheckKind, CheckOutcome, InfrastructureCause, InfrastructureCauses, NotStartedReason,
+        RunClass, ValidationOutcome,
+    };
+    let check = CheckOutcome {
+        kind: CheckKind::Passed,
+        diagnostic: false,
+    };
+    let passing = || {
+        BatchRole::ALL
+            .into_iter()
+            .map(|role| BatchRunEvidence {
+                role,
+                class: RunClass::ExitedZero,
+                stdout_complete: true,
+            })
+            .collect::<Vec<_>>()
+    };
+    let classify = |runs: &[BatchRunEvidence], invalid_answer| {
+        classify_batch(
+            &BatchEvidence {
+                runs,
+                check: Some(&check),
+                validation: Some(ValidationOutcome::Valid),
+                invalid_answer,
+                min_score: None,
+            },
+            None,
+        )
+    };
+    assert_eq!(classify(&passing(), false).class, IterationClass::Passed);
+    for (role, expected) in [
+        (BatchRole::Generator, IterationClass::GeneratorFailure),
+        (BatchRole::Brute, IterationClass::OracleFailure),
+        (BatchRole::Candidate, IterationClass::CandidateFailure),
+    ] {
+        let mut runs = passing();
+        runs[role.index()].class = RunClass::NonzeroExit { code: 1 };
+        assert_eq!(classify(&runs, false).class, expected);
+    }
+    assert_eq!(
+        classify(&passing(), true).class,
+        IterationClass::OracleFailure
+    );
+    let mut runs = passing();
+    runs[BatchRole::Generator.index()].class = RunClass::Cancelled;
+    runs[BatchRole::Brute.index()].class = RunClass::Infrastructure {
+        causes: InfrastructureCauses::new([InfrastructureCause::NotStarted {
+            reason: NotStartedReason::RetentionBudget,
+        }]),
+    };
+    let outcome = classify(&runs, false);
+    assert_eq!(outcome.class, IterationClass::Infrastructure);
+    assert_eq!(outcome.reason, "retention_budget");
+    assert_eq!(
+        classify_batch(
+            &BatchEvidence {
+                runs: &passing(),
+                check: Some(&check),
+                validation: Some(ValidationOutcome::Invalid),
+                invalid_answer: false,
+                min_score: None
+            },
+            None
+        )
+        .class,
+        IterationClass::ValidatorFailure
+    );
+}
+
+#[test]
+fn batch_retirement_judge_failures_and_effective_score_threshold() {
+    use crate::report::{CheckKind, CheckOutcome, JudgeReason, JudgedCheck, RunClass, Score};
+    let runs = [
+        BatchRole::Generator,
+        BatchRole::Candidate,
+        BatchRole::Checker,
+    ]
+    .map(|role| BatchRunEvidence {
+        role,
+        class: RunClass::ExitedZero,
+        stdout_complete: true,
+    });
+    let check = |outcome| CheckOutcome {
+        kind: CheckKind::Judged {
+            outcome: Box::new(outcome),
+        },
+        diagnostic: false,
+    };
+    let failed = check(JudgedCheck::JudgeFailed {
+        class: crate::report::JudgeFailClass::DeclaredFail,
+        role: crate::report::JudgeRole::Checker,
+        reason: JudgeReason::DeclaredFail,
+    });
+    let failed_evidence = BatchEvidence {
+        runs: &runs,
+        check: Some(&failed),
+        validation: None,
+        invalid_answer: false,
+        min_score: None,
+    };
+    let decision = classify_batch(&failed_evidence, None);
+    assert_eq!(decision.class, IterationClass::JudgeFailure);
+    assert_eq!(decision.reason, "declared_fail");
+    let scored = check(JudgedCheck::Scored {
+        raw: Score::parse("50").unwrap(),
+        scale: Score::parse("100").unwrap(),
+        role: crate::report::JudgeRole::Checker,
+    });
+    let mut lower = BatchEvidence {
+        runs: &runs,
+        check: Some(&scored),
+        validation: None,
+        invalid_answer: false,
+        min_score: None,
+    };
+    assert_eq!(
+        classify_batch(&lower, None).class,
+        IterationClass::CandidateFailure
+    );
+    lower.min_score = Score::parse("40");
+    assert_eq!(classify_batch(&lower, None).class, IterationClass::Passed);
+}
+
+type Decision = (IterationClass, Option<BatchRole>, &'static str);
+
+fn decide(
+    runs: &[(BatchRole, crate::report::RunClass)],
+    check: Option<crate::report::CheckKind>,
+    validation: Option<crate::report::ValidationOutcome>,
+    invalid_answer: bool,
+    cancelled: Option<BatchRole>,
+) -> Decision {
+    let runs: Vec<_> = runs
+        .iter()
+        .map(|(role, class)| BatchRunEvidence {
+            role: *role,
+            class: class.clone(),
+            stdout_complete: true,
+        })
+        .collect();
+    let check = check.map(|kind| crate::report::CheckOutcome {
+        kind,
+        diagnostic: false,
+    });
+    let decision = classify_batch(
+        &BatchEvidence {
+            runs: &runs,
+            check: check.as_ref(),
+            validation,
+            invalid_answer,
+            min_score: None,
+        },
+        cancelled,
+    );
+    assert_eq!(decision.invariant, decision.reason == "invariant");
+    (decision.class, decision.role, decision.reason)
+}
+
+#[test]
+fn batch_classification_rows_s1_to_s8_decide_class_role_and_reason() {
+    use crate::compare::Diag;
+    use crate::report::{
+        BudgetStreams, CheckKind, CheckNotAdmitted, CheckingUnchecked, InfrastructureCause,
+        InfrastructureCauses, JudgeFail, JudgeFailClass, JudgeReason, JudgeRole, JudgedCheck,
+        NotStartedReason, RunClass, Score, ValidationOutcome,
+    };
+    use BatchRole::{Brute, Candidate, Checker, Generator, Validator};
+    use IterationClass as C;
+    let ok = || RunClass::ExitedZero;
+    let infra = |cause: InfrastructureCause| RunClass::Infrastructure {
+        causes: InfrastructureCauses::new([cause]),
+    };
+    let judged = |outcome: JudgedCheck| CheckKind::Judged {
+        outcome: Box::new(outcome),
+    };
+    let valid = Some(ValidationOutcome::Valid);
+    let full = |candidate: RunClass| {
+        vec![
+            (Generator, ok()),
+            (Validator, ok()),
+            (Brute, ok()),
+            (Candidate, candidate),
+            (Checker, ok()),
+        ]
+    };
+    let compare = |candidate: RunClass| {
+        [
+            (Generator, ok()),
+            (Validator, ok()),
+            (Brute, ok()),
+            (Candidate, candidate),
+        ]
+    };
+    let upto = |role: BatchRole, class: RunClass| {
+        let mut runs = full(ok());
+        runs.truncate(role.index() + 1);
+        runs[role.index()].1 = class;
+        runs
+    };
+
+    // S1: infrastructure (incl. not_started) or a check_error, before S2.
+    let retention = infra(InfrastructureCause::NotStarted {
+        reason: NotStartedReason::RetentionBudget,
+    });
+    assert_eq!(
+        decide(&upto(Brute, retention.clone()), None, valid, false, None),
+        (C::Infrastructure, Some(Brute), "retention_budget")
+    );
+    let mut runs = upto(Brute, retention);
+    runs[0].1 = RunClass::Cancelled;
+    assert_eq!(
+        decide(&runs, None, valid, false, Some(Candidate)).0,
+        C::Infrastructure
+    );
+    let spec = infra(InfrastructureCause::NotStarted {
+        reason: NotStartedReason::SpecTooLarge,
+    });
+    assert_eq!(
+        decide(&upto(Generator, spec), None, None, false, None),
+        (C::Infrastructure, Some(Generator), "not_started")
+    );
+    assert_eq!(
+        decide(
+            &compare(infra(InfrastructureCause::StatusUnknown)),
+            None,
+            valid,
+            false,
+            None
+        ),
+        (C::Infrastructure, Some(Candidate), "status_unknown")
+    );
+    let check_error = || Some(CheckKind::CheckError { os_error: None });
+    assert_eq!(
+        decide(&full(ok()), check_error(), valid, false, None),
+        (C::Infrastructure, Some(Checker), "check_error")
+    );
+    assert_eq!(
+        decide(&compare(ok()), check_error(), valid, false, None),
+        (C::Infrastructure, Some(Candidate), "check_error")
+    );
+
+    // S2: a cancelled record, a run or check not admitted after intent, or
+    // intent before the first run (deciding role none).
+    assert_eq!(
+        decide(&compare(RunClass::Cancelled), None, valid, false, None),
+        (C::Cancelled, Some(Candidate), "cancelled")
+    );
+    assert_eq!(
+        decide(&upto(Brute, ok()), None, valid, false, Some(Candidate)),
+        (C::Cancelled, Some(Candidate), "cancelled")
+    );
+    assert_eq!(
+        decide(&[], None, None, false, Some(Generator)),
+        (C::Cancelled, None, "cancelled")
+    );
+    assert_eq!(
+        decide(
+            &compare(ok()),
+            Some(CheckKind::NotAdmitted {
+                reason: CheckNotAdmitted::Cancelled
+            }),
+            valid,
+            false,
+            None
+        ),
+        (C::Cancelled, Some(Candidate), "cancelled")
+    );
+    assert_eq!(
+        decide(
+            &full(ok()),
+            Some(judged(JudgedCheck::Unchecked {
+                reason: CheckingUnchecked::CheckingInterrupted
+            })),
+            valid,
+            false,
+            None
+        ),
+        (C::Cancelled, Some(Checker), "cancelled")
+    );
+
+    // S3: the generator's class token.
+    for (class, token) in [
+        (RunClass::WallDeadline, "wall_deadline"),
+        (
+            RunClass::OutputBudget {
+                streams: BudgetStreams {
+                    stdout: true,
+                    stderr: false,
+                    output_file: false,
+                },
+            },
+            "output_budget",
+        ),
+        (
+            RunClass::Signal {
+                signal: 9,
+                core_dumped: false,
+            },
+            "signal",
+        ),
+        (RunClass::NonzeroExit { code: 1 }, "nonzero_exit"),
+    ] {
+        assert_eq!(
+            decide(&upto(Generator, class), None, None, false, None),
+            (C::GeneratorFailure, Some(Generator), token)
+        );
+    }
+
+    // S4: B5, B6 and the B7 class reason.
+    for (class, outcome, token) in [
+        (
+            RunClass::NonzeroExit { code: 3 },
+            ValidationOutcome::Invalid,
+            "invalid_input",
+        ),
+        (
+            RunClass::NonzeroExit { code: 3 },
+            ValidationOutcome::ValidationFailed,
+            "validation_failed",
+        ),
+        (
+            RunClass::Signal {
+                signal: 11,
+                core_dumped: false,
+            },
+            ValidationOutcome::ValidatorFailed,
+            "signal",
+        ),
+    ] {
+        assert_eq!(
+            decide(&upto(Validator, class), None, Some(outcome), false, None),
+            (C::ValidatorFailure, Some(Validator), token)
+        );
+    }
+
+    // S5: the brute answer rule (class, then answer validity).
+    assert_eq!(
+        decide(
+            &upto(Brute, RunClass::NonzeroExit { code: 1 }),
+            None,
+            valid,
+            false,
+            None
+        ),
+        (C::OracleFailure, Some(Brute), "nonzero_exit")
+    );
+    assert_eq!(
+        decide(&upto(Brute, ok()), None, valid, true, None),
+        (C::OracleFailure, Some(Brute), "invalid_answer")
+    );
+
+    // S6: judge failures and unverified checking, never candidate failures.
+    assert_eq!(
+        decide(
+            &full(ok()),
+            Some(judged(JudgedCheck::JudgeFailed {
+                class: JudgeFailClass::ReportInvalid,
+                role: JudgeRole::Checker,
+                reason: JudgeReason::ReportMalformed,
+            })),
+            valid,
+            false,
+            None
+        ),
+        (C::JudgeFailure, Some(Checker), "report_malformed")
+    );
+    assert_eq!(
+        decide(
+            &full(ok()),
+            Some(judged(JudgedCheck::Unchecked {
+                reason: CheckingUnchecked::CheckingUnverified
+            })),
+            valid,
+            false,
+            None
+        ),
+        (C::JudgeFailure, Some(Checker), "checking_unverified")
+    );
+
+    // S7: the candidate's class, a rejection, a mismatch or a low score.
+    assert_eq!(
+        decide(
+            &compare(RunClass::NonzeroExit { code: 2 }),
+            None,
+            valid,
+            false,
+            None
+        ),
+        (C::CandidateFailure, Some(Candidate), "nonzero_exit")
+    );
+    for (fail, token) in [
+        (JudgeFail::WrongAnswer, "wrong_answer"),
+        (JudgeFail::PresentationError, "presentation_error"),
+    ] {
+        assert_eq!(
+            decide(
+                &full(ok()),
+                Some(judged(JudgedCheck::Rejected {
+                    fail,
+                    role: JudgeRole::Checker,
+                })),
+                valid,
+                false,
+                None
+            ),
+            (C::CandidateFailure, Some(Checker), token)
+        );
+    }
+    assert_eq!(
+        decide(
+            &compare(ok()),
+            Some(CheckKind::Failed {
+                diag: Box::new(Diag::IncompleteOutput)
+            }),
+            valid,
+            false,
+            None
+        ),
+        (C::CandidateFailure, Some(Candidate), "incomplete_output")
+    );
+    assert_eq!(
+        decide(
+            &full(ok()),
+            Some(judged(JudgedCheck::Scored {
+                raw: Score::parse("99").unwrap(),
+                scale: Score::parse("100").unwrap(),
+                role: JudgeRole::Checker,
+            })),
+            valid,
+            false,
+            None
+        ),
+        (C::CandidateFailure, Some(Checker), "score_below_threshold")
+    );
+
+    // S8: a checker accept, a comparator match, a full score; with or
+    // without the optional roles.
+    let passed = (C::Passed, None, "passed");
+    assert_eq!(
+        decide(&full(ok()), Some(CheckKind::Passed), valid, false, None),
+        passed
+    );
+    assert_eq!(
+        decide(&compare(ok()), Some(CheckKind::Passed), valid, false, None),
+        passed
+    );
+    assert_eq!(
+        decide(
+            &[(Generator, ok()), (Candidate, ok()), (Checker, ok())],
+            Some(judged(JudgedCheck::Scored {
+                raw: Score::parse("100").unwrap(),
+                scale: Score::parse("100").unwrap(),
+                role: JudgeRole::Checker,
+            })),
+            None,
+            false,
+            None
+        ),
+        passed
+    );
+
+    // Combinations no row lists are orphans: infrastructure{invariant}.
+    let orphan = (C::Infrastructure, None, "invariant");
+    assert_eq!(decide(&[], None, None, false, None), orphan);
+    assert_eq!(decide(&full(ok()), None, valid, false, None), orphan);
+    assert_eq!(
+        decide(&full(ok()), Some(CheckKind::Passed), None, false, None),
+        orphan
+    );
+    assert_eq!(
+        decide(
+            &[(Generator, ok()), (Candidate, ok())],
+            Some(CheckKind::Passed),
+            valid,
+            false,
+            None
+        ),
+        orphan
+    );
+    assert_eq!(
+        decide(
+            &[(Generator, ok()), (Candidate, ok())],
+            Some(CheckKind::Passed),
+            None,
+            true,
+            None
+        ),
+        orphan
+    );
+    let mut reversed = full(ok());
+    reversed.swap(0, 1);
+    assert_eq!(
+        decide(&reversed, Some(CheckKind::Passed), valid, false, None),
+        orphan
+    );
+}

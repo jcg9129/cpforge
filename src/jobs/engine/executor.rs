@@ -22,11 +22,17 @@ pub struct RunResources {
         all(test, feature = "storage-test-hooks")
     ))]
     pub(crate) file_io: Option<Box<crate::supervisor::file_io::FileIoSetup>>,
+    pub(super) release: Option<super::stress::RunRelease>,
     pub(super) reservation: Reservation,
     pub(super) _owner: JobOwner,
     pub(super) retained_bytes: Arc<AtomicU64>,
 }
 impl RunResources {
+    /// Track R6 independently of the immutable record returned by `execute`.
+    pub fn track_release(&mut self) -> super::stress::RunRelease {
+        self.release.get_or_insert_default().clone()
+    }
+
     /// File sinks increment this after each successful write, including writes
     /// after record finalization. Release the guard only after all writers end.
     pub fn retained_counter(&self) -> Arc<AtomicU64> {
@@ -37,7 +43,15 @@ impl RunResources {
 impl Drop for RunResources {
     fn drop(&mut self) {
         let bytes = self.retained_bytes.load(Ordering::Acquire);
-        let _ = self.reservation.commit(bytes.min(self.reservation.bytes()));
+        let committed = bytes.min(self.reservation.bytes());
+        let committed = if self.reservation.commit(committed).is_ok() {
+            committed
+        } else {
+            0
+        };
+        if let Some(release) = &self.release {
+            release.released(committed);
+        }
     }
 }
 
@@ -433,6 +447,9 @@ impl Executor for SupervisorExecutor {
                 Ok(admission) => admission,
                 Err(reason) => return not_started(reason),
             };
+            if let Some(release) = &resources.release {
+                release.bind(admission.ticket());
+            }
             admission.file_io = resources.file_io.take();
             let retained_bytes = resources.retained_bytes.clone();
             admission.hold_resources(resources, retained_bytes);

@@ -1348,6 +1348,7 @@ fn stream_reservations_rollback_atomically_and_count_actual_writes() {
     let (reservation, metadata) = reserve(&budget, 10).unwrap();
     let retained_bytes = Arc::new(AtomicU64::new(0));
     let resources = RunResources {
+        release: None,
         #[cfg(any(
             target_os = "linux",
             target_os = "macos",
@@ -2821,7 +2822,7 @@ impl Drop for ReleasePersistenceGate {
 
 // Match the CLI's stack for fixtures that drive the complete engine. The
 // injected executor keeps these persistence fixtures portable to Windows.
-fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
+pub(crate) fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(8 << 20)
@@ -3512,7 +3513,6 @@ fn stub_listing_boundary_reconciles_every_test_execution_on_all_platforms() {
 
 // Worker credits can return before the last JobLease destructor clears the
 // retained bytes. Observe the guaranteed release itself, with a deadline.
-#[cfg(feature = "storage-test-hooks")]
 async fn released_budget(budget: &crate::storage::budget::JobBudget) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while budget.usage() != crate::storage::budget::BudgetUsage::default() {
@@ -3533,3 +3533,6 @@ mod cwd_tests;
 #[cfg(feature = "storage-test-hooks")]
 #[path = "file_io_tests.rs"]
 mod file_io_tests;
+
+#[path = "stress/retirement_tests.rs"]
+mod stress_retirement;

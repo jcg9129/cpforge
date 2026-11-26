@@ -9,7 +9,8 @@ use crate::storage::job::JobOwner;
 pub type JobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Asynchronous credit acquisition and bounded settlement are separate operations. Enqueue
-/// specs at admission and records immediately at record finalization. The service
+/// ordinary specs at admission and records immediately at finalization; stress
+/// holds both until iteration retirement. The service
 /// owns metadata
 /// reservations and owner clones until its last write returns, including after
 /// a settlement timeout. No verdict lock is held while calling this service.
@@ -19,6 +20,24 @@ pub type JobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub trait Persistence {
     fn configure(&mut self, _planned: u32, _cancel: crate::supervisor::CancelToken) {}
     fn enqueue(&mut self, artifact: PendingArtifacts) -> JobFuture<'_, ()>;
+    /// Stress R5: encoded spec and metadata stayed with the live iteration.
+    /// Each of the three publications gets its own enqueue-call deadline.
+    fn enqueue_iteration(
+        &mut self,
+        artifact: super::stress::IterationArtifacts,
+    ) -> JobFuture<'_, ()> {
+        Box::pin(async move {
+            drop(artifact);
+        })
+    }
+    /// Stress R8: drain only this iteration's cells, preserving build references.
+    fn settle_iteration(&mut self) -> JobFuture<'_, Vec<super::stress::SettledRun>> {
+        Box::pin(async { Vec::new() })
+    }
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    fn iteration_debug(&self) -> super::stress::PersistenceDebug {
+        super::stress::PersistenceDebug::default()
+    }
     fn publish_report(
         &mut self,
         _report: Arc<super::ReportData>,

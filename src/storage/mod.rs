@@ -45,6 +45,7 @@ pub use record::{
     classify_user_record_spanned, read_tool_record, read_user_record,
 };
 pub(crate) use record::{RECORD_SIZE_LIMIT, RecordBytes, read_record_bytes};
+pub(crate) use recovery::exact_temp_name;
 pub(crate) use sys::is_link;
 pub use walk::{SkipReason, Skipped, WalkReport, measure_tree, remove_tree};
 pub(crate) use walk::{measure_owned_tree, remove_owned_tree};

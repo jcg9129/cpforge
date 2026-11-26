@@ -1,4 +1,4 @@
-//! Streaming stress admission, independent of process creation and persistence.
+//! Streaming stress admission and bounded per-iteration retirement.
 //!
 //! A planner supplies a fixed set of frozen batch templates. The caller lends
 //! this controller to one live iteration, finalizes each admitted run before
@@ -7,13 +7,20 @@
 //! admission and records an internal failure instead of silently admitting an
 //! overlapping iteration.
 //!
-//! This layer does not perform retirement I/O or derive judging outcomes. In
+//! The admission controller delegates retirement I/O and judging outcomes. In
 //! particular, `complete` is an acknowledgment of retirement, not a substitute
 //! for waiting for resources released or removing and accounting for files.
+//! `RetirementBatch` owns those steps; batch classification consumes finalized
+//! judging observations under the controller's verdict lock.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod classification;
+mod retirement;
+pub use classification::*;
+pub use retirement::*;
 
 use super::CancelState;
 use crate::report::{InternalFailure, InternalLocus, Invariant};
@@ -398,6 +405,18 @@ impl<T: Clone> StressAdmission<T> {
         self.observer = Some(Box::new(observer));
     }
 
+    /// Route stress admission through the engine's shared observation mechanism.
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    pub fn observe_engine(&mut self, observer: impl Fn(super::Point) + Send + Sync + 'static) {
+        let observation = super::Observation(std::sync::Arc::new(observer));
+        self.observe(move |point| {
+            (observation.0)(match point {
+                AdmissionPoint::IterationAdmit(k) => super::Point::StressIterationAdmit(k),
+                AdmissionPoint::RunAdmit(id) => super::Point::StressRunAdmit(id),
+            });
+        });
+    }
+
     /// `stress.counters`: inject initial arithmetic state before any admission.
     /// Search jobs only: a replay checks no counter row (stress §5 row 7).
     #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -539,6 +558,10 @@ impl<'a, T: Clone> LiveIteration<'a, T> {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    pub fn cancellation_token(&self) -> crate::supervisor::CancelToken {
+        self.owner.cancel.token()
     }
 
     pub fn admit_run(&mut self) -> Result<Option<AdmittedRun<T>>, AdmissionError> {

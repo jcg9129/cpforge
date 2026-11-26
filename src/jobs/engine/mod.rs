@@ -135,6 +135,14 @@ impl PhaseHooks for NoHooks {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Point {
     BeforeAdmission(u32),
+    StressIterationAdmit(u64),
+    StressRunAdmit(stress::IterationRunId),
+    StressRetire {
+        iteration: u64,
+        step: stress::RetirementStep,
+    },
+    StressRemove(stress::IterationRunId),
+    StressPromote(u64),
     AfterAdmission(u32),
     #[cfg(feature = "storage-test-hooks")]
     BeforeRunMkdir(u32),
@@ -1769,6 +1777,7 @@ impl Context<'_> {
             if let Some((streams, meta)) = reservations {
                 metadata = Some(meta);
                 resources = Some(RunResources {
+                    release: None,
                     #[cfg(any(
                         target_os = "linux",
                         target_os = "macos",
@@ -2499,4 +2508,4 @@ fn configured_limits(limits: &crate::config::Limits) -> Vec<crate::supervisor::I
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

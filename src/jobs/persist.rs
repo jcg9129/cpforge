@@ -126,6 +126,8 @@ struct Write {
     sender: oneshot::Sender<Outcome>,
     digest: Option<[u8; 32]>,
     spec_result: Option<Arc<Mutex<Option<ArtifactRef>>>>,
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    held: Option<HeldArtifact>,
     #[cfg(test)]
     gate: Option<Arc<Notify>>,
     #[cfg(feature = "storage-test-hooks")]
@@ -143,13 +145,57 @@ struct Request {
     spec_result: Option<Arc<Mutex<Option<ArtifactRef>>>>,
 }
 
+#[cfg(any(test, feature = "storage-test-hooks"))]
+#[derive(Debug, Default)]
+struct HeldArtifacts {
+    count: std::sync::atomic::AtomicUsize,
+    reserved: std::sync::atomic::AtomicU64,
+    charges: std::sync::atomic::AtomicUsize,
+}
+#[cfg(any(test, feature = "storage-test-hooks"))]
+#[derive(Debug)]
+struct HeldArtifact {
+    held: Arc<HeldArtifacts>,
+    reserved: u64,
+    charge: usize,
+}
+#[cfg(any(test, feature = "storage-test-hooks"))]
+impl HeldArtifact {
+    fn new(held: Arc<HeldArtifacts>, reserved: u64, charge: usize) -> Self {
+        held.count.fetch_add(1, Ordering::AcqRel);
+        held.reserved.fetch_add(reserved, Ordering::AcqRel);
+        held.charges.fetch_add(charge, Ordering::AcqRel);
+        Self {
+            held,
+            reserved,
+            charge,
+        }
+    }
+}
+#[cfg(any(test, feature = "storage-test-hooks"))]
+impl Drop for HeldArtifact {
+    fn drop(&mut self) {
+        self.held.count.fetch_sub(1, Ordering::AcqRel);
+        self.held
+            .reserved
+            .fetch_sub(self.reserved, Ordering::AcqRel);
+        self.held.charges.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+struct LateWrite {
+    reservation: Reservation,
+    retained: u64,
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    _held: Option<HeldArtifact>,
+}
+
 // The thread's return value owns its resources, so they outlive the thread
 // itself. Queued writes in the receiver retain their metadata allowances.
 struct WorkerResources {
     _credit: crate::supervisor::Credits,
     owner: JobOwner,
     receiver: mpsc::Receiver<Write>,
-    late: Option<(Reservation, u64)>,
+    late: Option<LateWrite>,
 }
 impl Drop for WorkerResources {
     // This may run on the cleanup polling thread (or, for a detached worker, in
@@ -157,9 +203,9 @@ impl Drop for WorkerResources {
     // length is within the reservation (checked before publication); clamping
     // keeps that invariant without an assertion here.
     fn drop(&mut self) {
-        if let Some((reservation, retained)) = &mut self.late {
-            let retained = (*retained).min(reservation.bytes());
-            let _ = reservation.commit(retained);
+        if let Some(late) = &mut self.late {
+            let retained = late.retained.min(late.reservation.bytes());
+            let _ = late.reservation.commit(retained);
         }
     }
 }
@@ -193,6 +239,10 @@ pub struct JobPersistence {
     pub(crate) clock: Clock,
     cancel: crate::supervisor::CancelToken,
     pending: Vec<Pending>,
+    iteration_start: Option<usize>,
+    iteration_runs: Vec<(stress::IterationRunId, Option<[u8; 32]>)>,
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    held: Arc<HeldArtifacts>,
     active: Vec<usize>,
     specs: BTreeMap<u32, Arc<Mutex<Option<ArtifactRef>>>>,
     bound: Duration,
@@ -361,7 +411,12 @@ impl JobPersistence {
                         } else {
                             worker_pool.close();
                         }
-                        resources.late = Some((write.reservation, 0));
+                        resources.late = Some(LateWrite {
+                            reservation: write.reservation,
+                            retained: 0,
+                            #[cfg(any(test, feature = "storage-test-hooks"))]
+                            _held: write.held.take(),
+                        });
                         break;
                     }
                     #[cfg(all(
@@ -473,7 +528,12 @@ impl JobPersistence {
                     // reservation settlement, including a late completion.
                     drop(write.credit.take());
                     if late {
-                        resources.late = Some((write.reservation, retained));
+                        resources.late = Some(LateWrite {
+                            reservation: write.reservation,
+                            retained,
+                            #[cfg(any(test, feature = "storage-test-hooks"))]
+                            _held: write.held.take(),
+                        });
                         #[cfg(feature = "storage-test-hooks")]
                         if let Some(gate) = &write.rename_gate {
                             gate.completed.notify_one();
@@ -495,6 +555,8 @@ impl JobPersistence {
                         *spec.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(result.reference.clone());
                     }
+                    #[cfg(any(test, feature = "storage-test-hooks"))]
+                    drop(write.held.take());
                     let _ = write.sender.send(result);
                 }
                 resources
@@ -510,6 +572,10 @@ impl JobPersistence {
             clock,
             cancel: crate::supervisor::CancelToken::new(),
             pending: Vec::new(),
+            iteration_start: None,
+            iteration_runs: Vec::new(),
+            #[cfg(any(test, feature = "storage-test-hooks"))]
+            held: Arc::default(),
             active: Vec::new(),
             specs: BTreeMap::new(),
             bound,
@@ -631,6 +697,12 @@ impl JobPersistence {
             let write = Write {
                 path,
                 content,
+                #[cfg(any(test, feature = "storage-test-hooks"))]
+                held: Some(HeldArtifact::new(
+                    self.held.clone(),
+                    reservation.bytes(),
+                    charge,
+                )),
                 reservation,
                 credit: credit.expect("credit granted"),
                 publication: self.pool.publication(deadline),
@@ -842,6 +914,120 @@ impl Persistence for JobPersistence {
         })
     }
 
+    fn enqueue_iteration(&mut self, mut artifact: stress::IterationArtifacts) -> JobFuture<'_, ()> {
+        Box::pin(async move {
+            self.iteration_start.get_or_insert(self.pending.len());
+            self.iteration_runs.push((artifact.id, artifact.digest));
+            let prefix = PathBuf::from("iterations").join(artifact.id.to_string());
+            let writable = artifact.writable && Arc::ptr_eq(&artifact.owner, &self._owner);
+            let mut metadata = artifact.metadata.take().filter(|_| writable);
+            // Retain the entire MiB until its three writes have settled. The
+            // spec gets the unused headroom; record/log each need 2 x 64 KiB.
+            let record_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
+            let cleanup_allowance = metadata.as_mut().and_then(|r| r.split(128 * 1024));
+            let cell = Arc::new(Mutex::new(None));
+            let spec_allowance = metadata.filter(|_| artifact.encoded_spec.is_some());
+            let encoded_spec = artifact.encoded_spec.take().unwrap_or_default();
+            self.enqueue_write(Request {
+                execution: None,
+                run: None,
+                artefact: "spec",
+                path: prefix.join("spec.json"),
+                content: Content::Bytes(encoded_spec),
+                reservation: spec_allowance,
+                digest: artifact.digest,
+                spec_result: Some(cell.clone()),
+            })
+            .await;
+            self.enqueue_write(Request {
+                execution: None,
+                run: None,
+                artefact: "record",
+                path: prefix.join("record.json"),
+                content: Content::Record {
+                    record: artifact.record.clone(),
+                    digest: artifact.digest,
+                    spec: cell,
+                },
+                reservation: record_allowance,
+                digest: None,
+                spec_result: None,
+            })
+            .await;
+            let cleanup = match artifact.record.as_ref() {
+                ExecutionRecord::Started(root) => format!(
+                    "record finalized\ncleanup: {:?}\nkill attempts: {}\n",
+                    root.termination.cleanup, root.kill_attempts
+                ),
+                ExecutionRecord::NotStarted(_) => "record finalized; process not started\n".into(),
+                ExecutionRecord::Transferred => {
+                    "record finalized; cancelled during creation; cleanup pending\n".into()
+                }
+            };
+            self.enqueue_write(Request {
+                execution: None,
+                run: None,
+                artefact: "cleanup_log",
+                path: prefix.join("cleanup.log"),
+                content: Content::Bytes(cleanup.into_bytes()),
+                reservation: cleanup_allowance,
+                digest: None,
+                spec_result: None,
+            })
+            .await;
+        })
+    }
+
+    fn settle_iteration(&mut self) -> JobFuture<'_, Vec<stress::SettledRun>> {
+        Box::pin(async move {
+            let Some(start) = self.iteration_start.take() else {
+                return Vec::new();
+            };
+            self.wait().await;
+            let mut pending = self.pending.drain(start..);
+            let mut settled = Vec::with_capacity(self.iteration_runs.len());
+            for (id, digest) in self.iteration_runs.drain(..) {
+                let mut run = stress::SettledRun::unavailable(id, digest);
+                for (index, reference) in [&mut run.spec, &mut run.record, &mut run.cleanup]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(result) = pending.next().and_then(|p| p.result) {
+                        *reference = result.reference;
+                        run.uncertain[index] = result.uncertain;
+                        run.cleanup_pending[index] = result.cleanup_pending;
+                    }
+                }
+                settled.push(run);
+            }
+            self.active.retain(|index| *index < start);
+            settled
+        })
+    }
+
+    #[cfg(any(test, feature = "storage-test-hooks"))]
+    fn iteration_debug(&self) -> stress::PersistenceDebug {
+        let held = self.held.count.load(Ordering::Acquire);
+        let tail = self.unavailable.load(Ordering::Acquire);
+        stress::PersistenceDebug {
+            pending_cells: self
+                .iteration_start
+                .map_or(0, |start| self.pending.len().saturating_sub(start)),
+            queued_artifacts: if tail { 0 } else { held },
+            tail_artifacts: if tail { held } else { 0 },
+            tail_reserved: if tail {
+                self.held.reserved.load(Ordering::Acquire)
+            } else {
+                0
+            },
+            tail_charges: if tail {
+                self.held.charges.load(Ordering::Acquire)
+            } else {
+                0
+            },
+        }
+    }
+
     fn settle<'a>(
         &'a mut self,
         executions: &'a mut [ExecutionReport],
@@ -888,6 +1074,9 @@ impl Persistence for JobPersistence {
             }
             self.active.clear();
             self.specs.clear();
+            // Job settlement drained every cell, a retiring iteration's too.
+            self.iteration_start = None;
+            self.iteration_runs.clear();
             warnings
         })
     }
@@ -1431,3 +1620,7 @@ mod controlled_tests {
         late_return(true);
     }
 }
+
+#[cfg(test)]
+#[path = "persist/stress_tests.rs"]
+mod stress_tests;
