@@ -49,6 +49,7 @@ mod persistence;
 mod report_value;
 mod role_builds;
 mod spec;
+pub mod stress;
 mod testlib;
 mod types;
 pub(crate) mod warnings;
