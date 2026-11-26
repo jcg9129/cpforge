@@ -38,6 +38,9 @@ pub(super) async fn finish(
     excluded: u64,
     cancel: CancelToken,
     walking: &Arc<AtomicBool>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))] io: Option<
+        crate::supervisor::file_io::FileIoState,
+    >,
     #[cfg(feature = "storage-test-hooks")] observation: Option<super::Observation>,
     #[cfg(feature = "storage-test-hooks")] execution: u32,
 ) -> Result<Option<u64>, RunNote> {
@@ -73,6 +76,23 @@ pub(super) async fn finish(
                 } else {
                     Ok(())
                 }
+            };
+            // File-based I/O (E §5.6): remove the I/O scratch through H first, and
+            // measure only while cwd/ is still the directory H names. Without a
+            // scratch (the run never started, or its output-file worker was
+            // transferred and already warned) the step is skipped.
+            let mut scratch = io.as_ref().and_then(|io| io.take());
+            let excluded = if let Some(io) = &io {
+                let Some(scratch) = &mut scratch else {
+                    return Ok(None);
+                };
+                let (same, kept_input) = scratch.clear(&path, io);
+                if !same {
+                    return Ok(None);
+                }
+                excluded.saturating_add(kept_input)
+            } else {
+                excluded
             };
             check()?;
             #[cfg(not(feature = "storage-test-hooks"))]

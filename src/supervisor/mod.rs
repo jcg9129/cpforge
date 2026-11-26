@@ -20,6 +20,8 @@ pub use creation::create_root;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use creation::post_run;
 pub use creation::{CreationError, Creator};
+pub(crate) mod file_io;
+pub use file_io::{OutputFileSpec, StagedInput};
 mod events;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod forward;

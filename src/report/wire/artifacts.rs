@@ -16,6 +16,8 @@ pub enum SpecStdin {
 }
 #[derive(Clone, Debug)]
 pub struct Spec {
+    pub stage_input: Option<p::StagedInput>,
+    pub output_file: Option<p::OutputFileSpec>,
     pub platform: &'static str,
     pub stage: e::Stage,
     pub program: PathBuf,
@@ -108,6 +110,30 @@ pub fn encode_spec(v: &Spec) -> Result<Vec<u8>> {
                 (
                     "measure",
                     checked_array(&v.measure, 5, |v| Ok(s(metric(*v))))?,
+                ),
+                (
+                    "stage_input",
+                    v.stage_input
+                        .as_ref()
+                        .map(|v| {
+                            obj([
+                                ("name", ns(&native_bytes(&v.name))),
+                                ("source", ns(&native_bytes(v.source.as_os_str()))),
+                            ])
+                        })
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "output_file",
+                    v.output_file
+                        .as_ref()
+                        .map(|v| {
+                            obj([
+                                ("name", ns(&native_bytes(&v.name))),
+                                ("budget", u(v.budget)),
+                            ])
+                        })
+                        .unwrap_or(Value::Null),
                 ),
             ],
         )?,
@@ -252,6 +278,19 @@ pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
                 ("execution", execution),
                 ("stdout", stdout),
                 ("stderr", stderr),
+                // E §6.1 member order: the collection outcome follows the streams.
+                (
+                    "output_file",
+                    match v.execution {
+                        e::ExecutionRecord::Started(root) => root
+                            .output_file
+                            .as_ref()
+                            .map(super::io::output_file)
+                            .transpose()?
+                            .unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    },
+                ),
                 ("measurements", measurements),
                 ("limits", limits),
                 ("supervisor_errors", errors),

@@ -62,3 +62,6 @@ mod creation_pause;
     any(target_os = "linux", target_os = "macos")
 ))]
 pub(in crate::supervisor) use creation_pause::CreationPause;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod file_io;

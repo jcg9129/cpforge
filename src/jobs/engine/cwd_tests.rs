@@ -258,6 +258,7 @@ fn fixed(summary: &RunSummary) -> RunSummary {
         observation: SummaryEvidence::default(),
         class: summary.class.clone(),
         record: Arc::new(ExecutionRecord::Started(Box::new(p::RootOutcome {
+            output_file: None,
             milestones: None,
             kill_attempts: 0,
             stdout: None,
@@ -347,6 +348,7 @@ fn credit_refusal_is_io_and_releases_the_walker_flag() {
                 0,
                 CancelToken::new(),
                 &walking,
+                None,
                 never_walks(),
                 0,
             )
@@ -363,6 +365,7 @@ fn credit_refusal_is_io_and_releases_the_walker_flag() {
                 0,
                 CancelToken::new(),
                 &walking,
+                None,
                 None,
                 0,
             )
@@ -395,6 +398,7 @@ fn cancellation_before_the_step_skips_it_and_keeps_the_tree() {
                     0,
                     cancel,
                     &walking,
+                    None,
                     never_walks(),
                     0,
                 )
@@ -449,6 +453,7 @@ fn dropped_wait_transfers_a_clearing_walker_that_finishes_its_clear() {
                     0,
                     cancel.clone(),
                     &walking,
+                    None,
                     Some(observation),
                     0,
                 ));

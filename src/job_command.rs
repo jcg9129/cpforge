@@ -411,6 +411,14 @@ impl JobCommand for TestRunCommand {
         {
             summary = summary.with_validated_inputs();
         }
+        if data
+            .details
+            .target
+            .as_ref()
+            .is_some_and(|target| target.io.is_some())
+        {
+            summary = summary.with_file_io();
+        }
         lines.push(summary.render());
         lines
     }
@@ -529,13 +537,21 @@ pub fn run_with_config(
         }
         // Config §8.2: a judged plan counts every role build and role run and
         // is capped before admission; the same bounds are recomputed after freezing.
+        let file_io = if kind == JobKind::Test {
+            config
+                .file_io()
+                .map_err(|e| Error::Config(e.to_string()))?
+                .map(|io| io.value)
+        } else {
+            None
+        };
         let judge_options = crate::jobs::plan::JudgeOptions {
             hooks: if hook_reason.is_none() {
                 hook_plans.len()
             } else {
                 0
             },
-            output_file: false,
+            output_file: file_io.as_ref().is_some_and(|io| io.output.is_some()),
         };
         if kind == JobKind::Test {
             let check = config
@@ -660,8 +676,8 @@ pub fn run_with_config(
             .map_err(ready_error)?
         };
         // Judged jobs remove staged scratch before measuring each private cwd.
-        ready.cwd_bytes =
-            (kind == JobKind::Cmd || ready.judging.is_some()).then_some(retention.cwd_bytes.value);
+        ready.cwd_bytes = (kind == JobKind::Cmd || ready.judging.is_some() || file_io.is_some())
+            .then_some(retention.cwd_bytes.value);
         let request = if let Some(named) = &named {
             let bindings = ready.planned_target.as_ref().map(|p| p.command_bindings());
             let frozen: Vec<_> = ready
@@ -721,6 +737,8 @@ pub fn run_with_config(
             Vec::new()
         };
         let mut engine = Engine::with_cancellation(ready, request, cancel.clone())
+            .map_err(|e| Error::Config(e.to_string()))?
+            .file_io(file_io)
             .map_err(|e| Error::Config(e.to_string()))?
             .progress(progress.as_ref().expect("stderr writer").queue())
             .output_events(mode.output_chunks());
@@ -1026,26 +1044,6 @@ fn plan_invocation(
         return Err(Error::Infrastructure(
             "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
         ));
-    }
-    // A judged run cannot honour `io` yet: refuse before admission with a
-    // configuration diagnostic at `config.io` rather than judge stdout.
-    // Configuration stays inspectable, and build, raw run and commands ignore
-    // `io` by contract. On unsupported platforms the refusal above wins.
-    if command.kind() == JobKind::Test {
-        let io = config.file_io().map_err(|e| {
-            refusal.diagnostics = diagnostics(&e.diagnostics);
-            Error::Config(e.to_string())
-        })?;
-        if let Some(io) = io {
-            let diagnostic = crate::config::Diagnostic {
-                severity: crate::config::Severity::Error,
-                message: "file-I/O test execution is not supported in this version".into(),
-                origin: io.origin,
-                second_origin: None,
-            };
-            refusal.diagnostics = diagnostics(std::slice::from_ref(&diagnostic));
-            return Err(Error::Config(diagnostic.to_string()));
-        }
     }
     let (tests, command_tests) = if let Some(named) = &named {
         let entries = if named.for_each_test.value {

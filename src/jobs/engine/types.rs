@@ -136,6 +136,8 @@ pub struct ExecutionSpec {
     pub command: LaunchCommand,
     pub resolved: ResolvedStage,
     pub stdin: Option<PathBuf>,
+    pub stage_input: Option<crate::supervisor::StagedInput>,
+    pub output_file: Option<crate::supervisor::OutputFileSpec>,
     pub directory: PathBuf,
     pub output_events: bool,
     /// Digest of the independent binary execution description.
@@ -233,6 +235,7 @@ pub struct JudgeEvidence {
 
 #[derive(Clone, Debug)]
 pub struct ExecutionReport {
+    pub io_warnings: Vec<report::IoScratchDetail>,
     pub plan: PlannedExecution,
     pub run: Option<RunId>,
     pub program: Option<PathBuf>,

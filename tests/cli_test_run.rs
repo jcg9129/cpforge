@@ -416,6 +416,26 @@ mod execution {
         for metric in measures {
             bytes(&mut hash, metric.as_str().unwrap().as_bytes());
         }
+        let input = &spec["stage_input"];
+        if input.is_null() {
+            bytes(&mut hash, b"none");
+        } else {
+            bytes(&mut hash, b"some");
+            native(&mut hash, &input["name"]);
+            native(&mut hash, &input["source"]);
+        }
+        let output = &spec["output_file"];
+        if output.is_null() {
+            bytes(&mut hash, b"none");
+        } else {
+            bytes(&mut hash, b"some");
+            native(&mut hash, &output["name"]);
+            hash.update(
+                wire::read::read_u64(&output["budget"])
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+        }
         format!("{:x}", hash.finalize())
     }
 

@@ -208,6 +208,7 @@ pub enum SupervisorError {
 
 #[derive(Clone, Debug)]
 pub struct RootOutcome {
+    pub output_file: Option<crate::report::OutputFile>,
     #[cfg(all(
         feature = "storage-test-hooks",
         any(target_os = "linux", target_os = "macos")

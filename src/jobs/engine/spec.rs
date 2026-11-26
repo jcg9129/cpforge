@@ -27,6 +27,8 @@ impl ExecutionSpec {
             limits.push(p::LocalLimit::JobCommit { bytes: limit.value });
         }
         wire::Spec {
+            stage_input: self.stage_input.clone(),
+            output_file: self.output_file.clone(),
             platform: super::super::persist::platform(),
             stage: self.stage,
             program: self.command.program.clone(),
@@ -161,6 +163,22 @@ impl ExecutionSpec {
                     p::MetricKind::ProcessLifetime => b"process_lifetime",
                 },
             );
+        }
+        match &self.stage_input {
+            None => bytes(&mut hash, b"none"),
+            Some(input) => {
+                bytes(&mut hash, b"some");
+                native(&mut hash, &input.name);
+                native(&mut hash, input.source.as_os_str());
+            }
+        }
+        match &self.output_file {
+            None => bytes(&mut hash, b"none"),
+            Some(output) => {
+                bytes(&mut hash, b"some");
+                native(&mut hash, &output.name);
+                hash.update(output.budget.to_le_bytes());
+            }
         }
         hash.finalize().into()
     }

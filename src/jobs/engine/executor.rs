@@ -16,6 +16,8 @@ use crate::supervisor::CancelToken;
 /// record. A stalled writer still owns the full reservation and job lease.
 #[derive(Debug)]
 pub struct RunResources {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) file_io: Option<Box<crate::supervisor::file_io::FileIoSetup>>,
     pub(super) reservation: Reservation,
     pub(super) _owner: JobOwner,
     pub(super) retained_bytes: Arc<AtomicU64>,
@@ -377,7 +379,7 @@ impl Executor for SupervisorExecutor {
         spec: Arc<ExecutionSpec>,
         cancel: CancelToken,
         events: RunEvents,
-        resources: RunResources,
+        mut resources: RunResources,
     ) -> JobFuture<'_, ExecutionRecord> {
         use crate::supervisor::{
             self, OutputSpec, ProgramSpec, RunControls, Sink, StdinSpec, StreamPolicy,
@@ -394,6 +396,7 @@ impl Executor for SupervisorExecutor {
                 Ok(admission) => admission,
                 Err(reason) => return not_started(reason),
             };
+            admission.file_io = resources.file_io.take();
             let retained_bytes = resources.retained_bytes.clone();
             admission.hold_resources(resources, retained_bytes);
             let raw = matches!(spec.role, super::Role::Raw);

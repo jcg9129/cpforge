@@ -225,6 +225,7 @@ impl Executor for Fake {
 
 fn root(code: i64) -> supervisor::RootOutcome {
     supervisor::RootOutcome {
+        output_file: None,
         #[cfg(all(
             feature = "storage-test-hooks",
             any(target_os = "linux", target_os = "macos")
@@ -1311,6 +1312,8 @@ fn stream_reservations_rollback_atomically_and_count_actual_writes() {
     let (reservation, metadata) = reserve(&budget, 10).unwrap();
     let retained_bytes = Arc::new(AtomicU64::new(0));
     let resources = RunResources {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        file_io: None,
         reservation,
         _owner: ready.owner.clone(),
         retained_bytes: retained_bytes.clone(),
@@ -3225,6 +3228,72 @@ fn every_job_verdict_keeps_the_fact_publication_exclusions() {
             )
         );
     }
+}
+
+// F-24 (Discard): caps are scalar config values; inject the resolved policy,
+// then execute a real solution through the ordinary test engine.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn file_output_does_not_consume_discarded_stdout() {
+    run_test(move || async move {
+        supervisor::init_process().unwrap();
+        let f = Fixture::new();
+        let mut engine = test_engine(&f, "python", 1)
+            .file_io(Some(report::FileIo {
+                input: None,
+                output: Some("out.txt".parse().unwrap()),
+            }))
+            .unwrap();
+        let Some(PlannedTarget::BuildFree(free)) = &engine.ready.planned_target else {
+            panic!("build-free target")
+        };
+        let mut stage = free.run(engine.ready.dir.join("cwd")).unwrap();
+        let crate::exec::ResolvedCommand::Argv { program, args } = &mut stage.command else {
+            panic!("argv")
+        };
+        program.path = "/bin/sh".into();
+        program.record.chosen_path = program.path.clone();
+        program.record.request = crate::exec::ProgramRequest::Path(program.path.clone());
+        *args = vec![
+            "-c".into(),
+            "printf 'yes\\n' > out.txt; head -c 8192 /dev/zero".into(),
+            "cpf".into(),
+        ];
+        stage.stdout.bytes.value = 4096;
+        stage.stdout.policy = CapPolicy::Discard;
+        engine.plan[0].recipe = Recipe::Resolved(Box::new(stage));
+        let report = engine
+            .run(
+                &mut SupervisorExecutor::start().unwrap(),
+                &mut MemoryPersistence::default(),
+                &mut NoHooks,
+            )
+            .await;
+        let data = report.data();
+        assert_eq!(data.tests[0].class, Some(RunClass::ExitedZero));
+        assert_eq!(data.tests[0].verdict, Some(report::TestVerdict::Passed));
+        assert!(matches!(
+            data.tests[0].check.as_ref().unwrap().kind,
+            report::CheckKind::Passed
+        ));
+        assert!(matches!(
+            data.tests[0].output_file,
+            Some(report::OutputFile::Collected { bytes: 4, .. })
+        ));
+        assert_eq!(data.executions[0].result.coverage, Coverage::Started);
+        assert!(
+            data.executions[0]
+                .summary
+                .as_ref()
+                .unwrap()
+                .notes
+                .contains(&report::RunNote::TruncatedStdout)
+        );
+        assert!(data.details.target.as_ref().unwrap().io.is_some());
+        assert_eq!(data.result.counts.primary.started, 1);
+        assert_eq!(data.result.counts.by_verdict.passed, 1);
+        assert_eq!(data.details.pre_delivery_exit.code, 0);
+    });
 }
 
 #[cfg(all(

@@ -106,9 +106,12 @@ struct Capture {
 
 #[derive(Debug)]
 pub(in crate::supervisor) struct Captures {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    file_io: Option<Box<crate::supervisor::file_io::FileCapture>>,
     streams: Vec<Capture>,
     budget: watch::Receiver<Option<Stream>>,
     _budget_sender: watch::Sender<Option<Stream>>,
+    cleanup_ready: bool,
     drain_start: Option<Instant>,
     transfer_cutoff: Option<Instant>,
     admission: Option<Admission>,
@@ -139,14 +142,45 @@ impl Captures {
                 )
             })
             .count();
-        let mut credits =
-            admission.worker_credits(count + usize::from(matches!(stdin, StdinSpec::Forward)))?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let file_workers = usize::from(
+            admission
+                .file_io
+                .as_ref()
+                .is_some_and(|io| io.output.is_some()),
+        );
+        #[allow(unused_mut)] // Only Unix adds the output-file worker.
+        let mut workers = count + usize::from(matches!(stdin, StdinSpec::Forward));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            workers += file_workers;
+        }
+        let mut credits = admission.worker_credits(workers)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let file_io = admission
+            .file_io
+            .take()
+            .map(|setup| {
+                let credit =
+                    (file_workers != 0).then(|| credits.pop().expect("output-file credit"));
+                crate::supervisor::file_io::FileCapture::prepare(
+                    *setup,
+                    credit,
+                    admission.retained_counter().unwrap_or_default(),
+                    creation,
+                )
+                .map(Box::new)
+            })
+            .transpose()?;
         let (budget_tx, budget) = watch::channel(None);
         let (activate, _) = watch::channel(false);
         let mut captures = Self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            file_io,
             streams: Vec::with_capacity(2),
             budget,
             _budget_sender: budget_tx.clone(),
+            cleanup_ready: false,
             drain_start: None,
             transfer_cutoff: None,
             admission: Some(admission),
@@ -278,6 +312,10 @@ impl Captures {
 
     pub(in crate::supervisor) fn start_readers(&mut self) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(file) = &mut self.file_io {
+            file.created();
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(input) = &mut self.input {
             input.start();
         }
@@ -364,6 +402,10 @@ impl Captures {
         }
     }
 
+    pub(in crate::supervisor) fn cleanup_result(&mut self) {
+        self.cleanup_ready = true;
+    }
+
     /// Nonblocking; the same freeze operation is used by supervisor and service.
     pub(in crate::supervisor) fn poll_freeze(&mut self, outcome: &mut RootOutcome) -> bool {
         let Some(start) = self.drain_start else {
@@ -384,6 +426,10 @@ impl Captures {
             stamps.mark_at(supervisor::Milestone::DrainStart, start);
         }
         let mut all = true;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(file) = &mut self.file_io {
+            all &= file.poll(outcome, self.cleanup_ready, now >= cutoff);
+        }
         for capture in &mut self.streams {
             let forward = matches!(capture.policy.sink, Sink::Forward(_));
             let cutoff = if forward {
@@ -485,6 +531,8 @@ impl Captures {
 
     pub(in crate::supervisor) fn resources_released(&mut self) -> bool {
         let output = resources_released(&mut self.streams);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let output = self.file_io.as_mut().is_none_or(|file| file.released()) && output;
         input_released(&mut self.input) && output
     }
 
@@ -493,6 +541,7 @@ impl Captures {
         outcome: &mut RootOutcome,
         transferred: bool,
     ) {
+        self.cleanup_result();
         self.start_drain(transferred.then(|| Instant::now() + DRAIN));
         while !self.poll_freeze(outcome) {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -509,7 +558,7 @@ impl Captures {
         // The raw stdin helper may still be blocked in read. It transfers with
         // the slot rather than delaying this invocation's logical completion;
         // only its aborted pump task is awaited here.
-        while !(resources_released(&mut self.streams) && input_settled(&self.input))
+        while !(self.resources_released() && input_settled(&self.input))
             && Instant::now() < deadline
         {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -532,11 +581,17 @@ impl Drop for Captures {
             capture.pending.take();
         }
         if let Some(admission) = self.admission.take() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(file) = &mut self.file_io {
+                file.abort_setup();
+            }
             let pending = self.streams.iter().any(|capture| capture.worker.is_some());
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let pending = pending || self.input.is_some();
+            let pending = pending || self.input.is_some() || self.file_io.is_some();
             if pending {
                 admission.transfer_failed_captures(FailedCaptures {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    file_io: self.file_io.take(),
                     streams: std::mem::take(&mut self.streams),
                     input: std::mem::take(&mut self.input),
                 });
@@ -548,6 +603,8 @@ impl Drop for Captures {
 /// Failed setup retains its slot, worker credits and files until workers return.
 #[derive(Debug)]
 pub(in crate::supervisor) struct FailedCaptures {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    file_io: Option<Box<crate::supervisor::file_io::FileCapture>>,
     streams: Vec<Capture>,
     input: Input,
 }
@@ -555,6 +612,8 @@ pub(in crate::supervisor) struct FailedCaptures {
 impl FailedCaptures {
     pub(in crate::supervisor) fn resources_released(&mut self) -> bool {
         let output = resources_released(&mut self.streams);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let output = self.file_io.as_mut().is_none_or(|file| file.released()) && output;
         input_released(&mut self.input) && output
     }
 }

@@ -198,6 +198,8 @@ impl fmt::Debug for RunCell {
 /// One reserved cleanup slot and its preallocated transfer/result entry.
 #[derive(Debug)]
 pub struct Admission {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) file_io: Option<Box<super::file_io::FileIoSetup>>,
     bounds: &'static GlobalBounds,
     index: usize,
     cell: Arc<RunCell>,
@@ -258,6 +260,8 @@ fn reserve(count: usize) -> Result<Vec<Admission>, NotStarted> {
         *entry = Some(cell.clone());
         bounds.slots_in_use.fetch_add(1, Ordering::AcqRel);
         admissions.push(Admission {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            file_io: None,
             bounds,
             index,
             cell,

@@ -20,18 +20,32 @@ pub(super) fn input_not_validated(plan: &PlannedExecution, earlier: &[ExecutionR
             .is_some_and(|v| v.result.class != Some(RunClass::ExitedZero))
 }
 
-pub(super) fn checker_not_eligible(plan: &PlannedExecution, earlier: &[ExecutionReport]) -> bool {
+pub(super) fn checker_not_eligible(
+    plan: &PlannedExecution,
+    earlier: &[ExecutionReport],
+    output_file: bool,
+) -> bool {
     matches!(plan.role, Role::Checker { .. })
         && earlier
             .iter()
             .rev()
             .find(|e| same_test(plan, &e.plan) && matches!(e.plan.role, Role::Test { .. }))
             .is_none_or(|s| {
-                s.result.coverage != Coverage::Started
+                (output_file && !collected(s))
+                    || s.result.coverage != Coverage::Started
                     || s.result.class.as_ref().is_none_or(|c| {
                         matches!(c, RunClass::Infrastructure { .. } | RunClass::Cancelled)
                     })
             })
+}
+
+/// Report §2.15: with `io.output` a checker runs only on a collected file.
+fn collected(solution: &ExecutionReport) -> bool {
+    matches!(
+        solution.evidence.as_deref(),
+        Some(super::ExecutionRecord::Started(root))
+            if matches!(root.output_file, Some(r::OutputFile::Collected { .. }))
+    )
 }
 
 fn input(execution: &ExecutionReport, profile: r::JudgeProfile) -> r::JudgeInput {
@@ -168,6 +182,7 @@ pub(super) fn finish_test(
     });
     let v = validator.map(|v| input(v, profile(r::RoleName::Validator)));
     let c = checker.map(|c| input(c, profile(r::RoleName::Checker)));
+    let output_file = context.output_file(solution);
     let (admission, comparison) = if checker.is_none()
         && v.as_ref()
             .is_none_or(|v| v.execution.class == Some(RunClass::ExitedZero))
@@ -188,7 +203,7 @@ pub(super) fn finish_test(
             admission,
             answer_present: matches!(test.answer, FrozenAnswer::Present { .. }),
             comparison: &comparison,
-            output_file: None,
+            output_file: output_file.as_ref(),
         })
     }))
     .unwrap_or((
@@ -230,10 +245,10 @@ pub(super) fn finish_test(
         frozen: test,
         first_execution: runs[0].plan.index,
         execution_count: runs.len() as u32,
-        class: solution.result.class.clone(),
+        class: context.test_result(solution).class,
         check: Some(check),
         verdict: Some(verdict),
-        output_file: None,
+        output_file,
         score,
         validation,
         judges,
@@ -246,6 +261,7 @@ pub(super) fn display(
     comparator: &Comparator,
     target: &crate::config::TargetPlan,
     config: &r::CheckConfig,
+    io: Option<&r::FileIo>,
 ) -> r::DisplayLabel {
     let solution = executions.iter().find(|e| {
         e.plan.test.as_ref().is_some_and(|t| t.id == test.frozen.id)
@@ -271,6 +287,10 @@ pub(super) fn display(
             check: test.check.as_ref(),
         },
         &r::DisplayContext {
+            output_file: io
+                .and_then(|io| io.output.as_ref())
+                .zip(test.output_file.as_ref())
+                .map(|(name, output)| (name.as_str().into(), output.clone())),
             judged,
             comparator: (config.kind == r::CheckMode::Compare)
                 .then(|| r::comparator_token(comparator)),

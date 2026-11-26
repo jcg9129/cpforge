@@ -2745,6 +2745,7 @@ fn root_outcome() -> supervisor::RootOutcome {
         sink: None,
     };
     supervisor::RootOutcome {
+        output_file: None,
         #[cfg(all(
             feature = "storage-test-hooks",
             any(target_os = "linux", target_os = "macos")

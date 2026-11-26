@@ -169,6 +169,7 @@ pub struct Engine<'probe> {
     kind: JobKind,
     comparator: Option<Comparator>,
     report_shape: Option<report::wire::ReportShape>,
+    file_io: Option<report::FileIo>,
     keep_going: bool,
     output_events: bool,
     capture_enabled: bool,
@@ -347,6 +348,7 @@ impl<'probe> Engine<'probe> {
             kind,
             comparator,
             report_shape,
+            file_io: None,
             keep_going,
             output_events: false,
             capture_enabled: needs_build || kind == JobKind::Run,
@@ -396,6 +398,25 @@ impl<'probe> Engine<'probe> {
                 test: None,
             });
         }
+        self.validate_report_reservation()?;
+        Ok(self)
+    }
+
+    /// Apply the declaration only to this test job's solution runs.
+    /// Without a declaration this changes nothing (other job kinds pass `None`).
+    pub fn file_io(mut self, io: Option<report::FileIo>) -> Result<Self, PlanError> {
+        let Some(io) = io else {
+            return Ok(self);
+        };
+        if self.kind != JobKind::Test {
+            return Err(PlanError::InvalidIteration);
+        }
+        let mut shape = self.report_shape.unwrap_or_default();
+        shape.output_file = io.output.is_some();
+        self.report_shape = Some(shape);
+        // The post-run cwd/ step removes the I/O scratch, so it always runs.
+        self.ready.cwd_bytes.get_or_insert(u64::MAX);
+        self.file_io = Some(io);
         self.validate_report_reservation()?;
         Ok(self)
     }
@@ -511,6 +532,7 @@ impl<'probe> Engine<'probe> {
             kind,
             comparator,
             report_shape,
+            file_io,
             keep_going,
             output_events,
             capture_enabled,
@@ -524,6 +546,9 @@ impl<'probe> Engine<'probe> {
         let mut warnings = warnings::admission(&ready.prune_report);
         let mut details = report_details(&ready, capture_enabled, comparator.clone(), kind);
         details.shape = report_shape;
+        if let Some(target) = &mut details.target {
+            target.io = file_io.clone();
+        }
         for role in &details.roles {
             if let Some(detail) = role.header_warning() {
                 details.warnings.push(WireWarning {
@@ -603,6 +628,7 @@ impl<'probe> Engine<'probe> {
             })
             .collect();
         let context = Context {
+            file_io: file_io.as_ref(),
             testlib: &testlib,
             staged: &staged,
             runs: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -677,7 +703,11 @@ impl<'probe> Engine<'probe> {
                 _ => &mut target,
             };
             let input_not_validated = judging::input_not_validated(&planned, &executions);
-            let checker_not_eligible = judging::checker_not_eligible(&planned, &executions);
+            let checker_not_eligible = judging::checker_not_eligible(
+                &planned,
+                &executions,
+                file_io.as_ref().is_some_and(|io| io.output.is_some()),
+            );
             // Report §2.1 order: cancelled, build_not_succeeded, admission_closed.
             let skip = if cancel.lock().intent.is_some() {
                 Some(SkipReason::Cancelled)
@@ -844,7 +874,7 @@ impl<'probe> Engine<'probe> {
                     #[cfg(any(test, feature = "storage-test-hooks"))]
                     context.point(Point::BeforeTestVerdict(execution.plan.index));
                     let _state = cancel.lock();
-                    report::test_verdict(&execution.result, &check)
+                    report::test_verdict(&context.test_result(&execution), &check)
                 }))
                 .unwrap_or(report::TestVerdict::InternalError {
                     invariant: Invariant::TestCheck,
@@ -862,16 +892,21 @@ impl<'probe> Engine<'probe> {
                     frozen: test,
                     first_execution: execution.plan.index,
                     execution_count: 1,
-                    class: execution.result.class.clone(),
+                    class: context.test_result(&execution).class,
                     check: Some(check),
                     verdict: Some(verdict),
-                    output_file: None,
+                    output_file: context.output_file(&execution),
                     score: None,
                     validation: None,
                     judges: Vec::new(),
                 };
                 if let Some(progress) = &progress {
                     let context = report::DisplayContext {
+                        output_file: file_io
+                            .as_ref()
+                            .and_then(|io| io.output.as_ref())
+                            .zip(test_report.output_file.as_ref())
+                            .map(|(name, output)| (name.as_str().into(), output.clone())),
                         comparator: comparator.as_ref().map(report::comparator_token),
                         wall_deadline: execution.summary.as_ref().map(|s| s.deadline),
                         measured_wall: execution.evidence.as_deref().and_then(|e| match e {
@@ -1018,10 +1053,27 @@ impl<'probe> Engine<'probe> {
                                 .as_ref()
                                 .and_then(|t| t.check.as_ref())
                                 .expect("judged config"),
+                            file_io.as_ref(),
                         ))
                     ));
                 }
                 tests.push(test_report);
+            }
+        }
+        for execution in &executions {
+            for detail in &execution.io_warnings {
+                details.warnings.push(WireWarning {
+                    kind: WarningKind::IoScratch {
+                        run: execution
+                            .run
+                            .as_ref()
+                            .expect("admitted I/O")
+                            .as_str()
+                            .into(),
+                        detail: *detail,
+                    },
+                    message: format!("file I/O scratch: {}", detail.wire_token()),
+                });
             }
         }
         for execution in executions.iter().filter(|e| e.judge_scratch_kept) {
@@ -1462,6 +1514,7 @@ fn record_hook(details: &mut ReportDetails, execution: &ExecutionReport) {
 }
 
 struct Context<'a> {
+    file_io: Option<&'a report::FileIo>,
     workspace: &'a Path,
     problem: Option<&'a crate::exec::ProblemBinding>,
     job_id: &'a str,
@@ -1558,7 +1611,26 @@ impl Context<'_> {
                 file
             })
             .collect();
-        let stdin = if matches!(plan.role, Role::Validator { .. }) {
+        let io = self
+            .file_io
+            .filter(|_| matches!(plan.role, Role::Test { .. }));
+        let stage_input =
+            io.and_then(|io| io.input.as_ref())
+                .map(|name| crate::supervisor::StagedInput {
+                    name: name.as_str().into(),
+                    source: plan
+                        .test
+                        .as_ref()
+                        .expect("frozen solution input")
+                        .input
+                        .path
+                        .clone(),
+                });
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let io_state = io.map(|_| crate::supervisor::file_io::FileIoState::default());
+        let stdin = if stage_input.is_some() {
+            None
+        } else if matches!(plan.role, Role::Validator { .. }) {
             Some(directory.join("cwd").join("input"))
         } else {
             plan.stdin.clone()
@@ -1647,18 +1719,57 @@ impl Context<'_> {
             let amount = if matches!(plan.role, Role::Raw) {
                 Some(0) // Console forwarding retains no output files (E §5.4).
             } else {
-                stage
-                    .as_ref()
-                    .and_then(|s| s.stdout.bytes.value.checked_add(s.stderr.bytes.value))
+                stage.as_ref().and_then(|s| {
+                    s.stdout
+                        .bytes
+                        .value
+                        .checked_add(s.stderr.bytes.value)
+                        .and_then(|amount| {
+                            amount.checked_add(if io.is_some_and(|io| io.output.is_some()) {
+                                s.stdout.bytes.value
+                            } else {
+                                0
+                            })
+                        })
+                })
             };
             let reservations = if report_refused {
                 None
             } else {
                 amount.and_then(|amount| reserve(self.budget, amount))
             };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let input_reservation = if stage_input.is_some() {
+                Some(
+                    self.budget
+                        .reserve(plan.test.as_ref().expect("frozen input").input.len),
+                )
+            } else {
+                None
+            };
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let reservations =
+                reservations.filter(|_| input_reservation.as_ref().is_none_or(Result::is_ok));
             if let Some((streams, meta)) = reservations {
                 metadata = Some(meta);
                 resources = Some(RunResources {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    file_io: io_state.as_ref().map(|state| {
+                        Box::new(crate::supervisor::file_io::FileIoSetup {
+                            cwd: directory.join("cwd"),
+                            input: stage_input.clone(),
+                            output: io.and_then(|io| io.output.as_ref()).map(|name| {
+                                crate::supervisor::OutputFileSpec {
+                                    name: name.as_str().into(),
+                                    budget: stage.as_ref().expect("stage").stdout.bytes.value,
+                                }
+                            }),
+                            destination: directory.join("out").join("output"),
+                            reservation: input_reservation.and_then(Result::ok),
+                            owner: self.owner.clone(),
+                            state: state.clone(),
+                        })
+                    }),
                     reservation: streams,
                     _owner: self.owner.clone(),
                     retained_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1680,8 +1791,15 @@ impl Context<'_> {
                 stage: plan.stage,
                 role: plan.role.clone(),
                 command,
-                resolved,
                 stdin,
+                stage_input,
+                output_file: io.and_then(|io| io.output.as_ref()).map(|name| {
+                    crate::supervisor::OutputFileSpec {
+                        name: name.as_str().into(),
+                        budget: resolved.stdout.bytes.value,
+                    }
+                }),
+                resolved,
                 directory: directory.clone(),
                 digest: None,
                 output_events: self.output_events,
@@ -1845,6 +1963,8 @@ impl Context<'_> {
                     judge.kept_bytes,
                     self.cancel.token(),
                     &self.cwd_walker,
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    io_state.clone(),
                     #[cfg(feature = "storage-test-hooks")]
                     self.observer.cloned(),
                     #[cfg(feature = "storage-test-hooks")]
@@ -1869,7 +1989,11 @@ impl Context<'_> {
                 {
                     return Err(Invariant::SummaryUnderivable);
                 }
-                let mut input = record.input(matches!(plan.role, Role::Test { .. }), policies);
+                let mut input = record.input(
+                    matches!(plan.role, Role::Test { .. })
+                        && !io.is_some_and(|io| io.output.is_some()),
+                    policies,
+                );
                 input.cwd_overflow_bytes = cwd_result.ok().flatten();
                 let mut notes = report::run_notes(&input);
                 if let Err(note) = cwd_result {
@@ -1901,6 +2025,18 @@ impl Context<'_> {
             });
         }
         ExecutionReport {
+            io_warnings: {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    io_state
+                        .as_ref()
+                        .map_or_else(Vec::new, |state| state.warnings())
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    Vec::new()
+                }
+            },
             judge_stderr: judge.stderr,
             judge_evidence: judge.evidence,
             judge_scratch_kept: judge.kept,
@@ -1920,6 +2056,24 @@ impl Context<'_> {
         }
     }
 
+    fn output_file(&self, execution: &ExecutionReport) -> Option<report::OutputFile> {
+        self.file_io.and_then(|io| io.output.as_ref())?;
+        Some(match execution.evidence.as_deref() {
+            Some(ExecutionRecord::Started(root)) => root
+                .output_file
+                .clone()
+                .unwrap_or(report::OutputFile::NotAttempted),
+            _ => report::OutputFile::NotAttempted,
+        })
+    }
+    fn test_result(&self, execution: &ExecutionReport) -> ExecutionResult {
+        let mut result = execution.result.clone();
+        if let (Some(class), Some(output)) = (&result.class, self.output_file(execution)) {
+            result.class = Some(report::file_test_class(class, &output));
+        }
+        result
+    }
+
     fn check(
         &self,
         execution: &ExecutionReport,
@@ -1929,6 +2083,16 @@ impl Context<'_> {
         let (admission, comparison) = self.comparison(execution, answer, comparator);
         catch_unwind(AssertUnwindSafe(|| {
             let _state = self.cancel.lock();
+            if let Some(output) = self.output_file(execution) {
+                return report::file_test_outcome(
+                    &execution.result,
+                    admission,
+                    matches!(answer, FrozenAnswer::Present { .. }),
+                    &comparison,
+                    &output,
+                )
+                .1;
+            }
             report::check_outcome(
                 &execution.result,
                 admission,
@@ -1958,6 +2122,9 @@ impl Context<'_> {
     ) -> (CheckAdmission, Comparison) {
         let mut admission = CheckAdmission::NoIntent;
         let comparison = catch_unwind(AssertUnwindSafe(|| {
+            if self.file_io.is_some() {
+                crate::storage::crash::barrier("file_io.before_check");
+            }
             #[cfg(any(test, feature = "storage-test-hooks"))]
             self.point(Point::BeforeCheck(execution.plan.index));
             admission = if self.cancel.lock().intent.is_some() {
@@ -1973,25 +2140,44 @@ impl Context<'_> {
             if !matches!(probe.kind, report::CheckKind::Unchecked) {
                 return Comparison::NotRun;
             }
+            if self
+                .output_file(execution)
+                .is_some_and(|o| !matches!(o, report::OutputFile::Collected { .. }))
+            {
+                return Comparison::NotRun;
+            }
             let FrozenAnswer::Present { path, .. } = answer else {
                 return Comparison::NotRun;
             };
             let read = || -> std::io::Result<_> {
                 let answer = fs::read(path)?;
-                let capture = execution
-                    .evidence
-                    .as_deref()
-                    .and_then(ExecutionRecord::stdout)
-                    .ok_or_else(|| std::io::Error::other("missing stdout capture"))?;
-                let output = match &capture.sink {
-                    Some(path) => fs::read(path)?,
-                    None => capture.retained.clone(),
-                };
+                let (output, complete) =
+                    if let Some(report::OutputFile::Collected { path, .. }) =
+                        self.output_file(execution)
+                    {
+                        let path = path
+                            .split('/')
+                            .fold(self.dir.to_path_buf(), |p, c| p.join(c));
+                        (fs::read(path)?, true)
+                    } else {
+                        let capture = execution
+                            .evidence
+                            .as_deref()
+                            .and_then(ExecutionRecord::stdout)
+                            .ok_or_else(|| std::io::Error::other("missing stdout capture"))?;
+                        (
+                            match &capture.sink {
+                                Some(path) => fs::read(path)?,
+                                None => capture.retained.clone(),
+                            },
+                            capture.complete(),
+                        )
+                    };
                 Ok(crate::compare::check(
                     comparator,
                     &output,
                     Some(&answer),
-                    capture.complete(),
+                    complete,
                 ))
             };
             match read() {
@@ -2010,6 +2196,7 @@ impl Context<'_> {
 
 fn skipped(plan: PlannedExecution, reason: SkipReason) -> ExecutionReport {
     ExecutionReport {
+        io_warnings: Vec::new(),
         judge_stderr: None,
         judge_evidence: None,
         judge_scratch_kept: false,

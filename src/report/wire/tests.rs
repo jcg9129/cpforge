@@ -23,6 +23,7 @@ pub(super) fn small_summary() -> e::RunSummary {
         observation: e::SummaryEvidence::default(),
         class: r::RunClass::ExitedZero,
         record: Arc::new(e::ExecutionRecord::Started(Box::new(p::RootOutcome {
+            output_file: None,
             #[cfg(all(
                 feature = "storage-test-hooks",
                 any(target_os = "linux", target_os = "macos")
@@ -62,6 +63,7 @@ pub(super) fn small_summary() -> e::RunSummary {
 pub(super) fn passing() -> e::ReportData {
     let summary = Arc::new(small_summary());
     let execution = e::ExecutionReport {
+        io_warnings: Vec::new(),
         judge_stderr: None,
         judge_evidence: None,
         judge_scratch_kept: false,
@@ -582,6 +584,8 @@ fn spec_record_manifest_and_global_config_mapping() {
         events: false,
     };
     let spec = Spec {
+        stage_input: None,
+        output_file: None,
         platform: "unix",
         stage: e::Stage::Run,
         program: "a\n".into(),
@@ -758,6 +762,8 @@ fn spec_and_record_size_limits_are_enforced() {
         events: false,
     };
     let mut spec = Spec {
+        stage_input: None,
+        output_file: None,
         platform: "unix",
         stage: e::Stage::Run,
         program: "program".into(),

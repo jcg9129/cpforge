@@ -491,6 +491,7 @@ pub(in crate::supervisor) fn spawn_prepared(
         finalized: false,
         captures: Some(captures),
         outcome: Some(RootOutcome {
+            output_file: None,
             #[cfg(feature = "storage-test-hooks")]
             milestones: opts.milestones.clone(),
             kill_attempts: 0,
@@ -833,6 +834,9 @@ impl Transfer {
         let Some(captures) = &mut self.captures else {
             return self.physical_done;
         };
+        if self.physical_done {
+            captures.cleanup_result();
+        }
         let frozen = captures.poll_freeze(&mut self.outcome);
         self.physical_done && frozen && captures.resources_released()
     }
