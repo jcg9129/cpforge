@@ -499,12 +499,12 @@ pub(crate) struct TargetPreflight {
     layout: Option<ArtifactLayout>,
 }
 impl TargetPreflight {
-    pub(crate) fn into_planned<'probe>(
+    pub(crate) fn into_planned(
         self,
         outputs: Option<FreshBuildOutputs>,
         build_bytes: u64,
-        probe: &'probe dyn Probe,
-    ) -> PlannedTarget<'probe> {
+        probe: &dyn Probe,
+    ) -> PlannedTarget<'_> {
         let Self {
             build,
             run,

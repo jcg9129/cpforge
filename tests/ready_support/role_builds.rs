@@ -198,8 +198,9 @@ fn checker_cannot_link_a_solution_output_from_its_own_artifact_directory() {
         f.write("problem/checker.cpp", "int main() {}\n");
         // The default solution artifact is named main. If outputs were shared,
         // this probe would find it; a separate checker directory has no main.
+        // cpf passes `$0 = cpf` itself (config §5.3), so `$1` is the source.
         let user = fs::read_to_string(f.path("user.toml")).unwrap();
-        f.write("user.toml", &format!("{user}\n[languages.judgecpp]\nextensions = ['jcpp']\nsources = ['checker.cpp']\nartifacts = {{ file = 'main' }}\n[languages.judgecpp.build]\nshell = {{ interpreter = ['sh', '-c'], script = 'test ! -e \"$(dirname \"$2\")/main\" && exec \"$3\" \"$1\" -o \"$2\"', args = ['probe', '{{source}}', '{{artifact}}', 'c++'] }}\n[languages.judgecpp.run]\nargv = ['{{artifact}}']\n"));
+        f.write("user.toml", &format!("{user}\n[languages.judgecpp]\nextensions = ['jcpp']\nsources = ['checker.cpp']\nartifacts = {{ file = 'main' }}\n[languages.judgecpp.build]\nshell = {{ interpreter = ['sh', '-c'], script = 'test ! -e \"$(dirname \"$2\")/main\" && exec \"$3\" \"$1\" -o \"$2\"', args = ['{{source}}', '{{artifact}}', 'c++'] }}\n[languages.judgecpp.run]\nargv = ['{{artifact}}']\n"));
         let declarations = "[check]\nkind = 'checker'\nchecker = { sources = ['checker.cpp'], language = 'judgecpp', profile = 'simple' }\n";
         let ready = ready(&f, "cpp", declarations, false);
         let solution_root = match &ready.planned_target {
