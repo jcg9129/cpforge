@@ -14,7 +14,7 @@ use crate::storage::budget::Reservation;
 use crate::storage::inputs::{CapturedRole, FrozenJudging, SourceRole};
 use crate::tests_store::{FrozenAnswer, FrozenManifest};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StagedFile {
     /// None means an intentionally empty answer, never a live input path.
     pub source: Option<PathBuf>,

@@ -62,6 +62,8 @@ pub(super) fn small_summary() -> e::RunSummary {
 pub(super) fn passing() -> e::ReportData {
     let summary = Arc::new(small_summary());
     let execution = e::ExecutionReport {
+        judge_stderr: None,
+        judge_scratch_kept: false,
         plan: e::wire_fixture_plan(0, e::Role::Test { test: "a".into() }),
         run: Some(e::wire_fixture_run(0)),
         program: Some(PathBuf::from("program")),

@@ -14,7 +14,7 @@ const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Marks the job's single outstanding walker; cleared when the walker's work
 /// (or the refused attempt) is dropped, on whichever thread that happens.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-struct Walking(Arc<AtomicBool>);
+pub(super) struct Walking(pub(super) Arc<AtomicBool>);
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for Walking {
@@ -33,6 +33,7 @@ pub(super) async fn finish(
     owner: JobOwner,
     path: PathBuf,
     limit: u64,
+    excluded: u64,
     cancel: CancelToken,
     walking: &Arc<AtomicBool>,
     #[cfg(feature = "storage-test-hooks")] observation: Option<super::Observation>,
@@ -91,7 +92,8 @@ pub(super) async fn finish(
             if !measured.errors.is_empty() || !measured.skipped.is_empty() {
                 return Err(RunNote::CwdUnmeasuredIo);
             }
-            if measured.bytes <= limit {
+            let bytes = measured.bytes.saturating_sub(excluded);
+            if bytes <= limit {
                 return Ok(None);
             }
             // Do not start a clear after the deadline or cancellation. A clear
@@ -112,14 +114,14 @@ pub(super) async fn finish(
             if !cleared.errors.is_empty() || !cleared.skipped.is_empty() {
                 return Err(RunNote::CwdUnmeasuredIo);
             }
-            Ok(Some(measured.bytes))
+            Ok(Some(bytes))
         })
         .await?
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         // Production refuses execution on these platforms before admission.
-        let _ = (owner, path, limit, cancel, walking);
+        let _ = (owner, path, limit, excluded, cancel, walking);
         #[cfg(feature = "storage-test-hooks")]
         let _ = (observation, execution);
         Err(RunNote::CwdUnmeasuredIo)

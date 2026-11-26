@@ -85,7 +85,7 @@ impl fmt::Debug for PrepareJobInputs<'_> {
 
 /// Constructible only after complete freezing and guarded target/role planning.
 /// Judge run layouts and staging recipes name only job-owned frozen inputs;
-/// the CLI refuses these jobs through `plan::judging_supported`.
+/// the CLI admits supported profiles through `plan::judging_supported`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReadyJob<'probe> {

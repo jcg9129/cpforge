@@ -39,6 +39,8 @@ impl Drop for RunResources {
 #[derive(Debug)]
 pub struct RunPreparation {
     pub(super) directory: PathBuf,
+    pub(super) staged: Vec<crate::jobs::roles::StagedFile>,
+    pub(super) budget: Arc<crate::storage::budget::JobBudget>,
     pub(super) recipe: Option<PreparationRecipe>,
     // A cancelled caller may return while the creation thread still uses paths.
     pub(super) owner: JobOwner,
@@ -64,6 +66,7 @@ pub struct PreparedRun {
     /// Cancellation stopped preparation before the stage was resolved: the
     /// report's `program` and `spec` are null (report §4.5).
     pub interrupted: bool,
+    pub(super) scratch: Option<super::judge_files::Scratch>,
 }
 
 impl PreparedRun {
@@ -72,6 +75,7 @@ impl PreparedRun {
             stage: None,
             interrupted: matches!(failure.reason, NotStartedReason::CancelledBeforeStart),
             failure: Some(failure),
+            scratch: None,
             writable: false,
         }
     }
@@ -88,11 +92,12 @@ impl RunPreparation {
     /// its result, so the engine's own intent check decides as it does after
     /// inline setup.
     pub(super) fn prepare(self, cancel: Option<&CancelToken>) -> PreparedRun {
-        let _owner = self.owner;
+        let owner = self.owner;
         let stop = || cancel.is_some_and(CancelToken::is_cancelled);
         let mut result = PreparedRun {
             stage: None,
             failure: None,
+            scratch: None,
             writable: true,
             interrupted: false,
         };
@@ -118,6 +123,18 @@ impl RunPreparation {
                 break;
             }
         }
+        let judge = !self.staged.is_empty();
+        if result.writable && judge {
+            let mut scratch = super::judge_files::Scratch::new(owner.clone());
+            if let Err(error) = scratch.stage(&self.staged, &self.budget, cancel) {
+                result.failure = Some(StartFailure {
+                    os_error: error.raw_os_error(),
+                    ..setup_failure()
+                });
+            }
+            result.scratch = Some(scratch);
+        }
+        let _owner = owner;
         let mut interrupted = false;
         result.stage = catch_unwind(AssertUnwindSafe(|| {
             if stop() {
@@ -143,6 +160,24 @@ impl RunPreparation {
                         }
                         Recipe::TargetRun => return None,
                     };
+                    if judge {
+                        let args = match &mut stage.command {
+                            crate::exec::ResolvedCommand::Argv { args, .. }
+                            | crate::exec::ResolvedCommand::Shell { args, .. } => args,
+                        };
+                        // Appended profile paths were planned before admission.
+                        // Run ids count admissions, so skipped slots require a
+                        // component-wise rebase into this run's actual cwd.
+                        for arg in args {
+                            if let Ok(relative) = std::path::Path::new(arg).strip_prefix(&stage.cwd)
+                            {
+                                *arg = relative
+                                    .components()
+                                    .fold(cwd.clone(), |p, c| p.join(c))
+                                    .into();
+                            }
+                        }
+                    }
                     if !stage.shared_cwd {
                         stage.cwd = cwd;
                     }
@@ -153,12 +188,18 @@ impl RunPreparation {
         .ok()
         .flatten();
         if interrupted {
+            // No judge will run: remove staged copies on this worker now, so
+            // a reply that cancellation discards cannot strand them in cwd/.
+            if let Some(scratch) = &mut result.scratch {
+                let _ = scratch.clear();
+            }
             // Cancellation outranks a directory failure here, so the record
             // matches the null program and spec; a fully created tree stays
             // writable for the cancellation record.
             return PreparedRun {
                 stage: None,
                 failure: Some(cancelled()),
+                scratch: result.scratch,
                 writable: result.writable,
                 interrupted: true,
             };

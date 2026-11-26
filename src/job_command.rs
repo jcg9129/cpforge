@@ -329,7 +329,12 @@ impl JobCommand for TestRunCommand {
         let unchecked = data
             .tests
             .iter()
-            .filter(|t| matches!(t.verdict, Some(crate::report::TestVerdict::Unchecked)))
+            .filter(|t| {
+                matches!(t.verdict, Some(crate::report::TestVerdict::Unchecked))
+                    && t.check
+                        .as_ref()
+                        .is_some_and(|c| matches!(c.kind, crate::report::CheckKind::Unchecked))
+            })
             .count() as u32;
         let comparator = data
             .comparator
@@ -337,6 +342,35 @@ impl JobCommand for TestRunCommand {
             .map_or("tokens", crate::report::comparator_token);
         let template = if data.result.verdict == JobVerdict::NoTests {
             crate::report::SummaryTemplate::NoTests
+        } else if let Some(crate::report::AggregateScore::Points {
+            value,
+            max,
+            aggregation,
+            ..
+        }) = &data.details.score
+        {
+            crate::report::SummaryTemplate::Points {
+                value: *value,
+                max: *max,
+                aggregation: *aggregation,
+                selected: data.tests.len() as u32,
+            }
+        } else if let Some(crate::report::AggregateScore::Incomplete { missing, .. }) =
+            &data.details.score
+        {
+            crate::report::SummaryTemplate::IncompleteScore { missing: *missing }
+        } else if let Some(profile) = data
+            .details
+            .roles
+            .iter()
+            .find(|r| r.role == crate::report::RoleName::Checker)
+            .and_then(|r| r.profile)
+        {
+            crate::report::SummaryTemplate::Checker {
+                passed,
+                selected: data.tests.len() as u32,
+                profile,
+            }
         } else {
             crate::report::SummaryTemplate::Passed {
                 passed,
@@ -359,6 +393,7 @@ impl JobCommand for TestRunCommand {
                 LabelSubject::Job(data.result.verdict),
                 &DisplayContext {
                     invariant: data.result.internal.as_ref().map(|i| i.invariant),
+                    job_score: data.details.score.clone(),
                     ..DisplayContext::default()
                 },
             )));
@@ -366,10 +401,17 @@ impl JobCommand for TestRunCommand {
         if unchecked > 0 {
             lines.push(crate::report::SummaryTemplate::Unchecked { count: unchecked }.render());
         }
-        lines.push(
-            crate::report::summary(template, completed, data.result.cancellation.is_some())
-                .render(),
-        );
+        let mut summary =
+            crate::report::summary(template, completed, data.result.cancellation.is_some());
+        if data
+            .details
+            .roles
+            .iter()
+            .any(|r| r.role == crate::report::RoleName::Validator)
+        {
+            summary = summary.with_validated_inputs();
+        }
+        lines.push(summary.render());
         lines
     }
 }
@@ -486,8 +528,7 @@ pub fn run_with_config(
             }
         }
         // Config §8.2: a judged plan counts every role build and role run and
-        // is capped before admission. `judging_supported` refuses such plans
-        // earlier in this version; the same bounds are recomputed after freezing.
+        // is capped before admission; the same bounds are recomputed after freezing.
         let judge_options = crate::jobs::plan::JudgeOptions {
             hooks: if hook_reason.is_none() {
                 hook_plans.len()
@@ -618,9 +659,9 @@ pub fn run_with_config(
             )
             .map_err(ready_error)?
         };
-        // Commands measure each owned `cwd/` after the run; other job kinds keep
-        // their existing behaviour.
-        ready.cwd_bytes = (kind == JobKind::Cmd).then_some(retention.cwd_bytes.value);
+        // Judged jobs remove staged scratch before measuring each private cwd.
+        ready.cwd_bytes =
+            (kind == JobKind::Cmd || ready.judging.is_some()).then_some(retention.cwd_bytes.value);
         let request = if let Some(named) = &named {
             let bindings = ready.planned_target.as_ref().map(|p| p.command_bindings());
             let frozen: Vec<_> = ready

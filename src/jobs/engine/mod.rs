@@ -43,6 +43,8 @@ mod cancel;
 mod cwd;
 mod events;
 mod executor;
+mod judge_files;
+mod judging;
 mod persistence;
 mod report_value;
 mod role_builds;
@@ -578,7 +580,16 @@ impl<'probe> Engine<'probe> {
                 })
                 .collect()
         });
+        let staged: std::collections::BTreeMap<_, _> = judging
+            .as_ref()
+            .into_iter()
+            .flat_map(|j| &j.roles)
+            .flat_map(|r| &r.runs)
+            .map(|r| (r.execution, r.staged.clone()))
+            .collect();
         let context = Context {
+            staged: &staged,
+            runs: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             dir: &ready.dir,
             workspace: &ready.workspace,
             problem: ready.problem.as_ref(),
@@ -630,7 +641,9 @@ impl<'probe> Engine<'probe> {
                 _ => None,
             })
             .collect();
-        for planned in plan {
+        let judged = !details.roles.is_empty();
+        let mut plan = plan.into_iter().peekable();
+        while let Some(planned) = plan.next() {
             if kind == JobKind::Cmd && executions.len() == 1 {
                 crate::storage::crash::barrier("command.between_iterations");
             }
@@ -647,6 +660,8 @@ impl<'probe> Engine<'probe> {
                 }
                 _ => &mut target,
             };
+            let input_not_validated = judging::input_not_validated(&planned, &executions);
+            let checker_not_eligible = judging::checker_not_eligible(&planned, &executions);
             // Report §2.1 order: cancelled, build_not_succeeded, admission_closed.
             let skip = if cancel.lock().intent.is_some() {
                 Some(SkipReason::Cancelled)
@@ -654,6 +669,10 @@ impl<'probe> Engine<'probe> {
                 Some(SkipReason::BuildNotSucceeded)
             } else if admission_closed {
                 Some(SkipReason::AdmissionClosed)
+            } else if input_not_validated {
+                Some(SkipReason::InputNotValidated)
+            } else if checker_not_eligible {
+                Some(SkipReason::NotEligible)
             } else if stopped {
                 Some(SkipReason::StopPolicy)
             } else {
@@ -680,8 +699,8 @@ impl<'probe> Engine<'probe> {
                         && !builds_succeeded,
                     earlier_retention_refusal,
                     submit_not_succeeded: false,
-                    input_not_validated: false,
-                    not_eligible: false,
+                    input_not_validated,
+                    not_eligible: checker_not_eligible,
                     keep_going,
                     earlier_primary_failed: stopped,
                     intent_before_admission: cancel.lock().intent.is_some(),
@@ -797,7 +816,7 @@ impl<'probe> Engine<'probe> {
             }
 
             if let Some(test) = execution.plan.test.as_ref().filter(|_| {
-                kind == JobKind::Test && matches!(execution.plan.role, Role::Test { .. })
+                kind == JobKind::Test && !judged && matches!(execution.plan.role, Role::Test { .. })
             }) {
                 let test = test.clone();
                 let check = context.check(
@@ -939,18 +958,86 @@ impl<'probe> Engine<'probe> {
             if kind == JobKind::Hook {
                 record_hook(&mut details, &execution);
             }
+            let test = execution.plan.test.clone();
             executions.push(execution);
+            if let Some(test) = test.filter(|t| {
+                judged
+                    && plan
+                        .peek()
+                        .is_none_or(|next| next.test.as_ref().is_none_or(|next| next.id != t.id))
+            }) {
+                let test_report = judging::finish_test(
+                    &context,
+                    test,
+                    &executions,
+                    comparator.as_ref().expect("test comparator"),
+                    details
+                        .target
+                        .as_ref()
+                        .and_then(|t| t.check.as_ref())
+                        .expect("judged config"),
+                    &details.roles,
+                );
+                if let Some(report::TestVerdict::InternalError { invariant }) = test_report.verdict
+                {
+                    record_internal(
+                        &cancel,
+                        invariant,
+                        InternalLocus::Test {
+                            test: test_report.frozen.id.to_string(),
+                        },
+                    );
+                }
+                if let Some(progress) = &progress {
+                    progress.result(&format!(
+                        "{}  {}",
+                        test_report.frozen.id,
+                        report::render_label(&judging::display(
+                            &test_report,
+                            &executions,
+                            comparator.as_ref().expect("test comparator"),
+                            ready.target.as_ref().expect("test target"),
+                            details
+                                .target
+                                .as_ref()
+                                .and_then(|t| t.check.as_ref())
+                                .expect("judged config"),
+                        ))
+                    ));
+                }
+                tests.push(test_report);
+            }
         }
-        if report_shape.is_some() {
-            role_builds::skipped_tests(&details.roles, &executions, &mut tests);
+        for execution in executions.iter().filter(|e| e.judge_scratch_kept) {
+            details.warnings.push(WireWarning {
+                kind: WarningKind::JudgeScratch {
+                    run: execution
+                        .run
+                        .as_ref()
+                        .expect("admitted scratch")
+                        .as_str()
+                        .to_owned(),
+                    detail: report::JudgeScratchDetail::StagedCopyKept,
+                },
+                message: "judge staged copies could not be removed".into(),
+            });
         }
+        let scoring = details
+            .target
+            .as_ref()
+            .and_then(|t| t.check.as_ref())
+            .map_or(report::Scoring::PassFail, |c| c.scoring);
+        details.score =
+            report::aggregate_score(scoring, &tests.iter().map(|t| t.score).collect::<Vec<_>>())
+                .ok()
+                .flatten();
         let primary: Vec<_> = executions.iter().map(|e| e.result.clone()).collect();
         let test_verdicts: Vec<_> = tests.iter().filter_map(|t| t.verdict.clone()).collect();
         let mut result = {
             let mut state = cancel.lock();
             let result = report::job_verdict(&report::JobInput {
                 roles: &details.roles,
-                scoring: crate::report::Scoring::PassFail,
+                scoring,
                 kind,
                 build: build.as_ref().map(|b| &b.result),
                 primary: &primary,
@@ -1370,6 +1457,8 @@ struct Context<'a> {
     events: &'a Events,
     output_events: bool,
     cwd_bytes: Option<u64>,
+    staged: &'a std::collections::BTreeMap<u32, Vec<crate::jobs::roles::StagedFile>>,
+    runs: std::cell::RefCell<std::collections::BTreeMap<u32, RunId>>,
     /// Set while this job's post-run cwd walker runs (at most one).
     cwd_walker: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -1417,7 +1506,46 @@ impl Context<'_> {
         };
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.phase_point(Point::AfterAdmission(plan.index));
+        self.runs.borrow_mut().insert(plan.index, run.clone());
         let directory = self.dir.join(run.as_str());
+        let planned_cwd = crate::jobs::plan::RunLayout::new(self.dir, plan.index as usize).cwd;
+        let staged = self
+            .staged
+            .get(&plan.index)
+            .into_iter()
+            .flatten()
+            .map(|file| {
+                let mut file = file.clone();
+                file.destination = file
+                    .destination
+                    .strip_prefix(&planned_cwd)
+                    .expect("planned judge scratch")
+                    .components()
+                    .fold(directory.join("cwd"), |p, c| p.join(c));
+                if let Some(source) = &mut file.source {
+                    if let Ok(relative) = source.strip_prefix(self.dir) {
+                        let mut components = relative.components();
+                        if let Some(index) = components
+                            .next()
+                            .and_then(|c| c.as_os_str().to_str())
+                            .and_then(|c| c.strip_prefix('r'))
+                            .and_then(|n| n.parse::<u32>().ok())
+                        {
+                            if let Some(run) = self.runs.borrow().get(&index) {
+                                *source =
+                                    components.fold(self.dir.join(run.as_str()), |p, c| p.join(c));
+                            }
+                        }
+                    }
+                }
+                file
+            })
+            .collect();
+        let stdin = if matches!(plan.role, Role::Validator { .. }) {
+            Some(directory.join("cwd").join("input"))
+        } else {
+            plan.stdin.clone()
+        };
         let recipe = if plan.stage == Stage::Build {
             target
                 .pending
@@ -1438,6 +1566,8 @@ impl Context<'_> {
             Some(PreparationRecipe::Stage(plan.recipe.clone()))
         };
         let preparation = RunPreparation {
+            staged,
+            budget: self.budget.clone(),
             directory: directory.clone(),
             recipe,
             owner: self.owner.clone(),
@@ -1453,11 +1583,13 @@ impl Context<'_> {
             mut failure,
             writable,
             interrupted,
+            scratch,
         } = prepared.unwrap_or(PreparedRun {
             stage: None,
             failure: None,
             writable: false,
             interrupted: false,
+            scratch: None,
         });
         if plan.stage == Stage::Hook {
             if let Some(stage) = &mut stage {
@@ -1532,7 +1664,7 @@ impl Context<'_> {
                 role: plan.role.clone(),
                 command,
                 resolved,
-                stdin: plan.stdin.clone(),
+                stdin,
                 directory: directory.clone(),
                 digest: None,
                 output_events: self.output_events,
@@ -1648,13 +1780,35 @@ impl Context<'_> {
             invariant: Some(Invariant::RecordMissing),
         };
         let mut summary = None;
+        // Simple roles consume only frozen capture and status: there is no cwd
+        // result file to extract. Remove staged scratch before measuring cwd.
+        let judge = if matches!(plan.role, Role::Checker { .. } | Role::Validator { .. }) {
+            judge_files::finish(
+                self.owner.clone(),
+                record.clone(),
+                scratch,
+                &self.cwd_walker,
+            )
+            .await
+        } else {
+            judge_files::Finished {
+                stderr: None,
+                kept_bytes: 0,
+                kept: false,
+                cwd: Ok(()),
+            }
+        };
         if let Some(record) = &record {
             // An invalid-limit refusal derives no summary and keeps its cwd/.
             let invalid_limit = matches!(
                 record.as_ref(),
                 ExecutionRecord::NotStarted(failure) if failure.invalid_limit.is_some()
             );
-            let cwd_result = if let Some(limit) = self.cwd_bytes.filter(|_| {
+            let cwd_result = if let Err(note) = judge.cwd {
+                // A scratch worker that did not finish may still own cwd
+                // paths; never start a competing measurement or removal.
+                Err(note)
+            } else if let Some(limit) = self.cwd_bytes.filter(|_| {
                 plan.stage != Stage::Build
                     && !invalid_limit
                     && spec.as_ref().is_some_and(|s| !s.resolved.shared_cwd)
@@ -1663,6 +1817,7 @@ impl Context<'_> {
                     self.owner.clone(),
                     directory.join("cwd"),
                     limit,
+                    judge.kept_bytes,
                     self.cancel.token(),
                     &self.cwd_walker,
                     #[cfg(feature = "storage-test-hooks")]
@@ -1721,6 +1876,8 @@ impl Context<'_> {
             });
         }
         ExecutionReport {
+            judge_stderr: judge.stderr,
+            judge_scratch_kept: judge.kept,
             plan,
             run: Some(run),
             program: spec.as_ref().map(|s| s.command.program.clone()),
@@ -1743,6 +1900,36 @@ impl Context<'_> {
         answer: &FrozenAnswer,
         comparator: &Comparator,
     ) -> report::CheckOutcome {
+        let (admission, comparison) = self.comparison(execution, answer, comparator);
+        catch_unwind(AssertUnwindSafe(|| {
+            let _state = self.cancel.lock();
+            report::check_outcome(
+                &execution.result,
+                admission,
+                matches!(answer, FrozenAnswer::Present { .. }),
+                &comparison,
+            )
+        }))
+        .unwrap_or_else(|_| report::CheckOutcome {
+            kind: report::CheckKind::InternalError {
+                invariant: Invariant::CheckEvidence,
+            },
+            diagnostic: matches!(execution.result.coverage, Coverage::Started)
+                && execution
+                    .result
+                    .class
+                    .as_ref()
+                    .is_some_and(RunClass::diagnostic)
+                && admission != CheckAdmission::IntentBeforeAdmission,
+        })
+    }
+
+    fn comparison(
+        &self,
+        execution: &ExecutionReport,
+        answer: &FrozenAnswer,
+        comparator: &Comparator,
+    ) -> (CheckAdmission, Comparison) {
         let mut admission = CheckAdmission::NoIntent;
         let comparison = catch_unwind(AssertUnwindSafe(|| {
             #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -1791,32 +1978,14 @@ impl Context<'_> {
         .unwrap_or(Comparison::InternalError {
             invariant: Invariant::CheckEvidence,
         });
-        catch_unwind(AssertUnwindSafe(|| {
-            let _state = self.cancel.lock();
-            report::check_outcome(
-                &execution.result,
-                admission,
-                matches!(answer, FrozenAnswer::Present { .. }),
-                &comparison,
-            )
-        }))
-        .unwrap_or_else(|_| report::CheckOutcome {
-            kind: report::CheckKind::InternalError {
-                invariant: Invariant::CheckEvidence,
-            },
-            diagnostic: matches!(execution.result.coverage, Coverage::Started)
-                && execution
-                    .result
-                    .class
-                    .as_ref()
-                    .is_some_and(RunClass::diagnostic)
-                && admission != CheckAdmission::IntentBeforeAdmission,
-        })
+        (admission, comparison)
     }
 }
 
 fn skipped(plan: PlannedExecution, reason: SkipReason) -> ExecutionReport {
     ExecutionReport {
+        judge_stderr: None,
+        judge_scratch_kept: false,
         plan,
         run: None,
         program: None,

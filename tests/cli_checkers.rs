@@ -1,4 +1,4 @@
-//! Unsupported judging declarations are configuration errors before admission.
+//! Judging gates, refusal precedence and CLI report delivery.
 
 use cpforge::report::wire;
 use serde_json::Value;
@@ -178,7 +178,7 @@ fn document(output: &Output) -> Value {
 fn checker_kind_refuses_before_admission() {
     let fixture = Fixture::new();
     fixture.problem(
-        "[check]\nkind = 'checker'\nchecker = { program = 'checker', profile = 'simple' }\n",
+        "[check]\nkind = 'checker'\nchecker = { program = 'checker', profile = 'testlib' }\n",
     );
     fixture.inspectable();
     fixture.refuses("check.kind");
@@ -230,30 +230,24 @@ fn checker_kind_refuses_before_admission() {
 #[test]
 fn checker_spec_refuses_before_admission() {
     let fixture = Fixture::new();
-    for profile in ["simple", "testlib"] {
-        for spec in [
-            format!(
-                "sources = ['checker.cpp'], support_files = ['testlib.h'], assets = ['data/dict'], language = 'cpp', entry = 'checker', profile = '{profile}', deadline_s = '2s', stdout_cap = '1MiB', stderr_cap = 1024"
-            ),
-            format!("program = 'bin/checker', profile = '{profile}'"),
-        ] {
-            fixture.problem(&format!(
-                "[check]\nkind = 'checker'\nchecker = {{ {spec} }}\n"
-            ));
-            fixture.inspectable();
-            fixture.refuses("check.kind");
-        }
+    for spec in [
+        "sources = ['checker.cpp'], support_files = ['testlib.h'], assets = ['data/dict'], language = 'cpp', entry = 'checker', profile = 'testlib', deadline_s = '2s', stdout_cap = '1MiB', stderr_cap = 1024",
+        "program = 'bin/checker', profile = 'testlib'",
+    ] {
+        fixture.problem(&format!(
+            "[check]\nkind = 'checker'\nchecker = {{ {spec} }}\n"
+        ));
+        fixture.inspectable();
+        fixture.refuses("check.kind");
     }
 }
 
 #[test]
 fn validator_spec_refuses_before_admission() {
     let fixture = Fixture::new();
-    for profile in ["simple", "testlib"] {
-        fixture.problem(&format!("[check]\nvalidator = {{ sources = ['validator.cpp'], language = 'cpp', profile = '{profile}' }}\n"));
-        fixture.inspectable();
-        fixture.refuses("check.validator");
-    }
+    fixture.problem("[check]\nvalidator = { sources = ['validator.cpp'], language = 'cpp', profile = 'testlib' }\n");
+    fixture.inspectable();
+    fixture.refuses("check.validator");
 }
 
 #[test]
@@ -275,7 +269,7 @@ fn interactor_settings_refuse_before_admission() {
 fn answer_policy_refuses_before_admission() {
     let fixture = Fixture::new();
     for answer in ["none", "file"] {
-        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'simple' }}\nanswer = '{answer}'\n"));
+        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'testlib' }}\nanswer = '{answer}'\n"));
         fixture.inspectable();
         fixture.refuses("check.kind");
     }
@@ -289,7 +283,7 @@ fn scoring_policy_refuses_before_admission() {
         "{ points = true, scale = 100, aggregation = 'sum' }",
         "{ points = true, scale = 100, aggregation = 'min' }",
     ] {
-        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'simple' }}\nscoring = {scoring}\ndisplay = 'judge-cf'\n"));
+        fixture.problem(&format!("[check]\nkind = 'checker'\nchecker = {{ program = 'checker', profile = 'testlib' }}\nscoring = {scoring}\ndisplay = 'judge-cf'\n"));
         fixture.inspectable();
         fixture.refuses("check.kind");
     }
@@ -520,4 +514,91 @@ fn inspection_exposes_judging_values_and_each_origin() {
         .find(|origin| origin["path"] == serde_json::json!(["check", "scoring", "aggregation"]))
         .unwrap();
     assert_eq!(origin["origin"]["kind"], "built_in");
+}
+
+#[test]
+fn simple_judging_delivers_report_shape_labels_and_platform_refusal() {
+    let fixture = Fixture::new();
+    fixture.problem("[check]\nkind = 'checker'\nchecker = { sources = ['checker.py'], language = 'python', profile = 'simple' }\nvalidator = { sources = ['validator.py'], language = 'python', profile = 'simple' }\n");
+    // A failed expectation exits 3 (a judge failure), never 1 (the rejection).
+    fixture.write("problems/A/checker.py", "import pathlib, sys\nif len(sys.argv) != 4 or pathlib.Path(sys.argv[2]).read_text() != 'ok' or pathlib.Path(sys.argv[3]).read_text() != 'ok\\n':\n    sys.exit(3)\nprint('custom rejection', file=sys.stderr)\nsys.exit(1)\n");
+    fixture.write("problems/A/validator.py", "import pathlib, sys\nassert len(sys.argv) == 2\nassert pathlib.Path(sys.argv[1]).read_bytes() == sys.stdin.buffer.read()\n");
+    let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+    let output = fixture.run(&["--problem", "A", "test", "--json"]);
+    let doc = document(&output);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(doc["target"]["check"]["kind"], "checker");
+        assert_eq!(doc["roles"].as_array().unwrap().len(), 2);
+        assert_eq!(doc["executions"].as_array().unwrap().len(), 3);
+        let test = &doc["tests"][0];
+        assert_eq!(test["executions"]["first"], 0);
+        assert_eq!(test["executions"]["count"], 3);
+        assert_eq!(test["validation"]["outcome"], "valid");
+        assert_eq!(test["check"]["kind"], "rejected");
+        assert_eq!(test["check"]["fail"], "wrong_answer");
+        assert_eq!(test["check"]["role"], "checker");
+        assert_eq!(test["diagnostic"], false);
+        assert_eq!(test["verdict"]["kind"], "wrong_answer");
+        wire::read::read_check_config(&doc["target"]["check"]).unwrap();
+        wire::read::read_validation(&test["validation"]).unwrap();
+        wire::read::read_judge(&test["judges"][0]).unwrap();
+        wire::read::read_roles(&doc["roles"], false).unwrap();
+        assert_eq!(test["judges"][0]["profile"], "simple");
+        assert_eq!(test["judges"][0]["execution"], 2);
+        assert_eq!(test["judges"][0]["result"]["kind"], "rejected");
+        assert!(test["judges"][0]["message"].is_null());
+        assert!(test["judges"][0]["report"].is_null());
+        assert!(doc["fingerprints"]["judge"].is_string(), "{doc}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("simple checker") && stderr.contains("inputs validated"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("WA")
+                && stderr.contains("checker")
+                && stderr.contains("custom rejection"),
+            "{stderr}"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(10), "{output:?}");
+        assert_eq!(doc["refusal"]["class"], "infrastructure");
+        fixture.no_admission(&sequence);
+    }
+}
+
+#[test]
+fn simple_checker_answer_none_stages_empty_answer_and_preserves_absence() {
+    let fixture = Fixture::new();
+    fixture.problem("[check]\nkind = 'checker'\nanswer = 'none'\nchecker = { sources = ['checker.py'], language = 'python', profile = 'simple' }\n");
+    fixture.write(
+        "problems/A/tests.toml",
+        "schema = 1\n[[test]]\nid = 'a'\ninput = 'tests/a.in'\norigin = 'custom'\nenabled = true\n",
+    );
+    fixture.write("problems/A/checker.py", "import pathlib, sys\nassert len(sys.argv) == 4\nassert pathlib.Path(sys.argv[3]).read_bytes() == b''\nassert pathlib.Path(sys.argv[2]).read_text() == 'ok'\n");
+    let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+    let output = fixture.run(&["--problem", "A", "test", "--json"]);
+    let doc = document(&output);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(doc["target"]["check"]["answer"], "none");
+        assert_eq!(doc["tests"][0]["answer"], "absent");
+        assert_eq!(doc["tests"][0]["check"]["kind"], "passed");
+        assert_eq!(doc["tests"][0]["verdict"]["kind"], "passed");
+    } else {
+        assert_eq!(output.status.code(), Some(10), "{output:?}");
+        fixture.no_admission(&sequence);
+    }
+}
+
+#[test]
+fn simple_judging_configuration_errors_precede_platform_refusal() {
+    let fixture = Fixture::new();
+    fixture.problem("[check]\nkind = 'checker'\nanswer = 'invalid'\nchecker = { program = 'checker', profile = 'simple' }\n");
+    let sequence = fs::read(fixture.path(".cpforge/job-seq")).unwrap();
+    let output = fixture.run(&["--problem", "A", "test", "--json"]);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(document(&output)["refusal"]["class"], "config");
+    fixture.no_admission(&sequence);
 }

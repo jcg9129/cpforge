@@ -235,6 +235,8 @@ pub struct ExecutionReport {
     /// fails. A serializer emits class only when summary is absent.
     pub result: ExecutionResult,
     pub evidence: Option<Arc<ExecutionRecord>>,
+    pub judge_stderr: Option<report::JudgeText>,
+    pub judge_scratch_kept: bool,
 }
 
 #[derive(Clone, Debug)]

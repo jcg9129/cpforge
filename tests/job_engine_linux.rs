@@ -4,6 +4,8 @@
 mod ready_support;
 #[path = "ready_support/role_builds.rs"]
 mod role_builds;
+#[path = "ready_support/simple_judging.rs"]
+mod simple_judging;
 
 use cpforge::config::Comparator;
 use cpforge::exec::NativeProbe;
