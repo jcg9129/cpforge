@@ -1496,7 +1496,7 @@ fn listing_workspace_errors_and_closed_json_stdout() {
         ] {
             let path = workspace.path(path);
             let permissions = fs::metadata(&path).unwrap().permissions();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
             // Root can enumerate a mode-000 directory; exercise when enforced.
             let denied = fs::read_dir(&path).is_err();
             let output = workspace.run(&args, if denied { 8 } else { 0 });
