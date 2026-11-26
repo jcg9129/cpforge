@@ -177,7 +177,27 @@ impl<'a> Validator<'a> {
         }
         let missing_io_names =
             matches!(ctx, Context::Io) && !t.contains_key("input") && !t.contains_key("output");
+        let colliding_io_names = matches!(ctx, Context::Io)
+            && t.get("input")
+                .zip(t.get("output"))
+                .is_some_and(|(input, output)| {
+                    !input.has_errors()
+                        && !output.has_errors()
+                        && input
+                            .string()
+                            .zip(output.string())
+                            .is_some_and(|(input, output)| {
+                                crate::names::collision_key(input)
+                                    == crate::names::collision_key(output)
+                            })
+                });
         let missing_template_path = matches!(ctx, Context::Template) && !t.contains_key("path");
+        if colliding_io_names {
+            self.error(
+                node,
+                "io.input and io.output name the same file on some filesystems",
+            );
+        }
         if missing_io_names {
             self.error(node, "io requires at least one of input or output");
         }

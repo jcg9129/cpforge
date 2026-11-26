@@ -1611,7 +1611,7 @@ fn command_placeholder_declarations_are_checked_in_phase_two() {
 }
 
 #[test]
-fn reserved_file_io_validates_in_phase_one_and_refuses_in_phase_two() {
+fn valid_file_io_is_accepted_with_or_without_a_resolved_language() {
     for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
         for fields in [
             "input = 'task.in'",
@@ -1619,38 +1619,187 @@ fn reserved_file_io_validates_in_phase_one_and_refuses_in_phase_two() {
             "input = '输入.txt', output = 'two words.out'",
             "input = '.hidden', output = 'a..b'",
             "input = '{literal}.in'",
+            "input = 'input', output = 'output'",
         ] {
-            for settings in [
-                "",
-                "language = 'cpp'\n[config.run]\ncwd = { selector = 'problem' }\n",
-            ] {
-                let document =
-                    format!("[problem]\nid = 'local:p'\n[config]\nio = {{ {fields} }}\n{settings}");
-                let raw = layer(&document, LayerKind::Problem, platform);
-                assert!(raw.diagnostics.is_empty(), "{:?}", raw.diagnostics);
-                let config = compose(&[raw], platform);
+            for language in ["", "language = 'cpp'\n"] {
+                let config = merged(
+                    &[(
+                        &format!(
+                            "[problem]\nid = 'local:p'\n[config]\nio = {{ {fields} }}\n{language}"
+                        ),
+                        LayerKind::Problem,
+                    )],
+                    platform,
+                );
                 let report = check(&config, &Selection::default());
-                assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-                let diagnostic = &report.diagnostics()[0];
-                assert_eq!(
-                    diagnostic.message,
-                    "file-I/O problems are not supported in this version"
-                );
-                assert_eq!(
-                    diagnostic.origin,
-                    config.at(&["config", "io"]).unwrap().origin
-                );
-                assert_eq!(
-                    diagnostic.origin.file,
-                    std::path::PathBuf::from("problem.toml")
-                );
-                assert_eq!(diagnostic.origin.key_path, "config.io");
-                assert_eq!(diagnostic.origin.line, Some(4));
-                assert!(diagnostic.origin.col.is_some());
-                assert!(report.executable().is_none());
-                assert!(resolve(&config, &Selection::default()).is_err());
+                clean(&report);
+                assert!(report.executable().is_some());
+                if !language.is_empty() {
+                    assert!(resolve(&config, &Selection::default()).is_ok());
+                }
             }
         }
+    }
+}
+
+#[test]
+fn file_io_shared_cwd_uses_the_effective_run_and_related_location() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for cwd in [
+            "{ selector = 'problem' }",
+            "{ selector = 'workspace' }",
+            "{ path = 'x' }",
+        ] {
+            for (scope, profile) in [
+                ("run", None),
+                ("languages.cpp.run", None),
+                ("languages.cpp.profiles.shared.run", Some("shared")),
+                ("config.run", None),
+            ] {
+                let workspace = if scope.starts_with("config") {
+                    String::new()
+                } else {
+                    format!("[{scope}]\ncwd = {cwd}\n")
+                };
+                let problem_run = if scope.starts_with("config") {
+                    format!("[{scope}]\ncwd = {cwd}\n")
+                } else {
+                    String::new()
+                };
+                let config = merged(
+                    &[
+                        (&workspace, LayerKind::Workspace),
+                        (
+                            &format!(
+                                "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nio = {{ input = 'in.txt' }}\n{problem_run}"
+                            ),
+                            LayerKind::Problem,
+                        ),
+                    ],
+                    platform,
+                );
+                for operation in [
+                    Operation::Check,
+                    Operation::Test,
+                    Operation::Run,
+                    Operation::Other,
+                ] {
+                    let selection = Selection {
+                        operation,
+                        profile: profile.map(str::to_owned),
+                        ..Selection::default()
+                    };
+                    let report = check(&config, &selection);
+                    assert_eq!(
+                        report.diagnostics().len(),
+                        1,
+                        "{scope}: {:?}",
+                        report.diagnostics()
+                    );
+                    let d = &report.diagnostics()[0];
+                    assert_eq!(d.message, "file-based I/O needs the run's own directory");
+                    assert_eq!(d.origin, config.at(&["config", "io"]).unwrap().origin);
+                    let keys: Vec<_> = scope.split('.').chain(["cwd"]).collect();
+                    assert_eq!(
+                        d.second_origin.as_ref(),
+                        Some(&config.at(&keys).unwrap().origin)
+                    );
+                    assert!(report.executable().is_none());
+                    assert!(resolve(&config, &selection).is_err());
+                }
+                if profile.is_some() {
+                    clean(&check(
+                        &config,
+                        &Selection {
+                            operation: Operation::Test,
+                            ..Selection::default()
+                        },
+                    ));
+                    assert!(check(&config, &Selection::default()).executable().is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn file_io_profile_validation_composes_problem_overrides_and_skips_other_languages() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        let config = merged(
+            &[
+                (
+                    "[languages.cpp.profiles.shared.run]\ncwd = { selector = 'workspace' }\n[languages.python.profiles.shared.run]\ncwd = { selector = 'problem' }",
+                    LayerKind::Workspace,
+                ),
+                (
+                    "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nio = { output = 'out.txt' }\n[config.run]\ncwd = { selector = 'run' }",
+                    LayerKind::Problem,
+                ),
+            ],
+            platform,
+        );
+        clean(&check(&config, &Selection::default()));
+        clean(&check(
+            &config,
+            &Selection {
+                operation: Operation::Test,
+                profile: Some("shared".into()),
+                ..Selection::default()
+            },
+        ));
+        let config = merged(
+            &[
+                (
+                    "[languages.python.profiles.shared.run]\ncwd = { selector = 'problem' }",
+                    LayerKind::Workspace,
+                ),
+                (
+                    "[problem]\nid = 'local:p'\n[config]\nlanguage = 'cpp'\nio = { output = 'out.txt' }",
+                    LayerKind::Problem,
+                ),
+            ],
+            platform,
+        );
+        clean(&check(&config, &Selection::default()));
+        // An explicit cwd without a selected language has no solution run.
+        let config = merged(
+            &[(
+                "[problem]\nid = 'local:p'\n[config]\nio = { input = 'in' }\n[config.run]\ncwd = { selector = 'problem' }",
+                LayerKind::Problem,
+            )],
+            platform,
+        );
+        clean(&check(&config, &Selection::default()));
+    }
+}
+
+#[test]
+fn stress_file_io_refusal_is_a_phase_two_error_with_provenance() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        let config = merged(
+            &[(
+                "[problem]\nid = 'local:p'\n[config]\nio = { output = 'out.txt' }",
+                LayerKind::Problem,
+            )],
+            platform,
+        );
+        let report = check(
+            &config,
+            &Selection {
+                operation: Operation::Stress,
+                ..Selection::default()
+            },
+        );
+        assert_eq!(report.diagnostics().len(), 1);
+        assert_eq!(
+            report.diagnostics()[0].message,
+            "stress with file-based I/O is unsupported in this version"
+        );
+        assert_eq!(
+            report.diagnostics()[0].origin,
+            config.at(&["config", "io"]).unwrap().origin
+        );
+        assert!(report.executable().is_none());
     }
 }
 
@@ -1674,6 +1823,12 @@ fn invalid_file_io_has_only_phase_one_errors_with_provenance() {
                 "name.",
                 "name ",
                 ".cpf-input",
+                ".cpf-x",
+                "c:x",
+                "con",
+                "NUL.txt",
+                "x.",
+                "x ",
             ] {
                 let document =
                     format!("[problem]\nid = 'local:p'\n[config]\nio = {{ {field} = '{name}' }}\n");
@@ -1735,21 +1890,122 @@ fn invalid_file_io_has_only_phase_one_errors_with_provenance() {
 }
 
 #[test]
-fn reserved_file_io_is_unknown_outside_the_problem_layer() {
-    for kind in [
-        LayerKind::DefaultUser,
-        LayerKind::OverrideUser,
-        LayerKind::Workspace,
-    ] {
-        let raw = layer("io = { input = 'task.in' }", kind, Platform::host());
-        assert_eq!(raw.diagnostics.len(), 1);
-        assert_eq!(raw.diagnostics[0].origin.key_path, "io");
-        assert_eq!(raw.diagnostics[0].message, "unknown configuration key");
-        let config = compose(std::slice::from_ref(&raw), Platform::host());
-        assert!(config.at(&["io"]).is_none());
-        assert_eq!(
-            check(&config, &Selection::default()).diagnostics(),
-            raw.diagnostics
+fn file_io_is_unknown_outside_the_problem_layer() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for kind in [
+            LayerKind::DefaultUser,
+            LayerKind::OverrideUser,
+            LayerKind::Workspace,
+        ] {
+            let raw = layer("io = { input = 'task.in' }", kind, platform);
+            assert_eq!(raw.diagnostics.len(), 1);
+            assert_eq!(raw.diagnostics[0].origin.key_path, "io");
+            assert_eq!(raw.diagnostics[0].message, "unknown configuration key");
+            let config = compose(std::slice::from_ref(&raw), platform);
+            assert!(config.at(&["io"]).is_none());
+            assert_eq!(
+                check(&config, &Selection::default()).diagnostics(),
+                raw.diagnostics
+            );
+        }
+    }
+}
+
+#[test]
+fn file_io_names_collide_by_the_portable_key_in_phase_one() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        for (input, output) in [
+            ("same", "same"),
+            ("a.txt", "A.txt"),
+            ("résultat.txt", "re\u{301}sultat.txt"),
+            ("ß", "ss"),
+        ] {
+            let document = format!(
+                "[problem]\nid = 'local:p'\n[config]\nio = {{ input = '{input}', output = '{output}' }}"
+            );
+            let raw = layer(&document, LayerKind::Problem, platform);
+            assert_eq!(
+                raw.diagnostics.len(),
+                1,
+                "{document}: {:?}",
+                raw.diagnostics
+            );
+            let diagnostic = &raw.diagnostics[0];
+            assert_eq!(diagnostic.origin.key_path, "config.io");
+            assert_eq!(diagnostic.origin.line, Some(4));
+            assert!(
+                diagnostic
+                    .message
+                    .contains("name the same file on some filesystems")
+            );
+            let config = compose(std::slice::from_ref(&raw), platform);
+            for operation in [Operation::Check, Operation::Stress, Operation::Test] {
+                assert_eq!(
+                    check(
+                        &config,
+                        &Selection {
+                            operation,
+                            ..Selection::default()
+                        }
+                    )
+                    .diagnostics(),
+                    raw.diagnostics
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn file_io_portable_name_limits_and_controls_have_no_derived_errors() {
+    for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
+        let at_limit = format!("{}a", "é".repeat(127));
+        let good = layer(
+            &format!("[config]\nio = {{ input = '{at_limit}' }}"),
+            LayerKind::Problem,
+            platform,
         );
+        assert!(good.diagnostics.is_empty());
+        for value in [
+            format!("{at_limit}b"),
+            "x\u{7f}".into(),
+            "x\u{1f}".into(),
+            "x\0".into(),
+            "a<b".into(),
+            "a>b".into(),
+            "a|b".into(),
+            "a?b".into(),
+            "a*b".into(),
+            "a\"b".into(),
+        ] {
+            // TOML basic strings need every control character escaped,
+            // U+007F included (JSON quoting leaves it raw).
+            let mut quoted = String::from("\"");
+            for c in value.chars() {
+                match c {
+                    '"' => quoted.push_str("\\\""),
+                    c if c.is_ascii_control() => {
+                        quoted.push_str(&format!("\\u{:04X}", u32::from(c)));
+                    }
+                    c => quoted.push(c),
+                }
+            }
+            quoted.push('"');
+            let document = format!(
+                "[problem]\nid = 'local:p'\nkind = 'interactive'\n[config]\nlanguage = 'cpp'\nio = {{ input = {quoted} }}\n[config.run]\ncwd = {{ selector = 'problem' }}"
+            );
+            let raw = layer(&document, LayerKind::Problem, platform);
+            assert_eq!(
+                raw.diagnostics.len(),
+                1,
+                "{document}: {:?}",
+                raw.diagnostics
+            );
+            let config = compose(std::slice::from_ref(&raw), platform);
+            assert_eq!(
+                check(&config, &Selection::default()).diagnostics(),
+                raw.diagnostics
+            );
+        }
     }
 }

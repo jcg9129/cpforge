@@ -59,11 +59,20 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             Command::Notes { .. } => Some("notes"),
             Command::Ls(_) => Some("ls"),
             Command::Search(_) => Some("search"),
-            Command::Stress(args) => Some(if args.command.is_some() {
-                "stress ls"
-            } else {
-                "stress"
-            }),
+            Command::Stress(args) => {
+                if args.command.is_none() {
+                    config_commands::stress_preflight(
+                        cli.problem.as_deref(),
+                        cli.config.clone(),
+                        args.profile.clone(),
+                    )?;
+                }
+                Some(if args.command.is_some() {
+                    "stress ls"
+                } else {
+                    "stress"
+                })
+            }
             Command::InteractorTest { .. } => Some("interactor-test"),
             Command::SubmitPrep(_) => Some("submit-prep"),
             Command::Archive(_) => Some("archive"),
@@ -208,7 +217,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             .map(|()| exit::ExitCode::Success);
         }
         None => {}
-        // All unfinished surfaces return before any workspace/configuration I/O.
+        // Unfinished surfaces returned above; stress first checks its I/O declaration.
         Some(_) => unreachable!("unfinished command dispatched above"),
     }
     let help = Cli::command().render_help().to_string();

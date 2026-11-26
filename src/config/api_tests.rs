@@ -1456,3 +1456,35 @@ fn language_only_requests_can_select_without_a_default() {
         }
     );
 }
+
+#[test]
+fn file_io_api_preserves_literal_names_and_problem_provenance() {
+    let dir = Directory::new();
+    for fields in [
+        "input = '{literal}.in'",
+        "output = 'résultat.txt'",
+        "input = 'input', output = 'output'",
+    ] {
+        let document = format!("[config]\nio = {{ {fields} }}\n");
+        dir.problem(&document);
+        let loaded = load_config(&dir.request(true));
+        clean(&loaded);
+        let io = loaded.file_io().unwrap().unwrap();
+        file_value(
+            &io,
+            &dir.path("ws/problems/sample/problem.toml"),
+            &problem_text(&document),
+            "io",
+            "config.io",
+        );
+        assert_eq!(io.value.input.is_some(), fields.contains("input ="));
+        assert_eq!(io.value.output.is_some(), fields.contains("output ="));
+        if fields.contains("{literal}") {
+            assert_eq!(io.value.input.unwrap().as_str(), "{literal}.in");
+        }
+    }
+    dir.problem("[config]\nio = {}\n");
+    assert!(load_config(&dir.request(true)).file_io().is_err());
+    dir.problem("");
+    assert!(load_config(&dir.request(true)).file_io().unwrap().is_none());
+}

@@ -1027,6 +1027,26 @@ fn plan_invocation(
             "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
         ));
     }
+    // A judged run cannot honour `io` yet: refuse before admission with a
+    // configuration diagnostic at `config.io` rather than judge stdout.
+    // Configuration stays inspectable, and build, raw run and commands ignore
+    // `io` by contract. On unsupported platforms the refusal above wins.
+    if command.kind() == JobKind::Test {
+        let io = config.file_io().map_err(|e| {
+            refusal.diagnostics = diagnostics(&e.diagnostics);
+            Error::Config(e.to_string())
+        })?;
+        if let Some(io) = io {
+            let diagnostic = crate::config::Diagnostic {
+                severity: crate::config::Severity::Error,
+                message: "file-I/O test execution is not supported in this version".into(),
+                origin: io.origin,
+                second_origin: None,
+            };
+            refusal.diagnostics = diagnostics(std::slice::from_ref(&diagnostic));
+            return Err(Error::Config(diagnostic.to_string()));
+        }
+    }
     let (tests, command_tests) = if let Some(named) = &named {
         let entries = if named.for_each_test.value {
             let selected = selected.as_ref().expect("test context");

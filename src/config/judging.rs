@@ -729,12 +729,14 @@ pub(super) fn validate(v: &mut Validator<'_>, selection: &Selection) -> Option<B
     if kind == Some("interactive")
         || problem_kind.and_then(EffectiveNode::string) == Some("interactive")
     {
-        if let Some(io) = v.merged.at(&["config", "io"]) {
+        if let Some(io) = v.merged.at(&["config", "io"]).filter(|io| clean(io)) {
             error(
                 v,
                 io,
                 "file I/O is not allowed for interactive problems",
-                n.get("kind"),
+                n.get("kind")
+                    .filter(|_| kind == Some("interactive"))
+                    .or(problem_kind),
             );
         }
     }

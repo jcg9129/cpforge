@@ -694,6 +694,27 @@ impl LoadedConfig {
         Ok(self.report.universe().check.as_deref())
     }
 
+    /// Validated literal file names, with the problem-layer declaration's
+    /// provenance. Execution consumers apply these only to test solutions.
+    pub fn file_io(&self) -> Result<Option<Sourced<crate::report::FileIo>>, ConfigErrors> {
+        self.clean()?;
+        Ok(self.merged.at(&["config", "io"]).map(|io| {
+            let name = |key| {
+                io.get(key).map(|node| {
+                    crate::names::PortableComponent::new(node.string().expect("validated io name"))
+                        .expect("phase-1 portable component")
+                })
+            };
+            sourced(
+                io,
+                crate::report::FileIo {
+                    input: name("input"),
+                    output: name("output"),
+                },
+            )
+        }))
+    }
+
     /// Inspect composed stages and derived defaults without an execution capability.
     pub fn universe(&self) -> &super::ComposedUniverse {
         self.report.universe()

@@ -394,6 +394,31 @@ impl Validator<'_> {
         }
     }
 
+    fn file_io_cwd(&mut self, io: &EffectiveNode, stage: &ComposedStage) {
+        // Invalid cwd declarations have their own phase-1/2 diagnostics; do
+        // not infer a shared directory from an invalid or unknown selector.
+        if self.blocked(stage, &[&["cwd"], &["cwd", "path"], &["cwd", "selector"]])
+            || self.unknown_field(stage, "cwd")
+        {
+            return;
+        }
+        let Some(cwd) = stage.node.get("cwd") else {
+            return;
+        };
+        let shared = match (cwd.get("path"), cwd.get("selector")) {
+            (Some(_), None) => true,
+            (None, Some(selector)) => selector.string().is_some_and(|s| s != "run"),
+            _ => false,
+        };
+        if shared {
+            self.error(
+                io.origin.clone(),
+                "file-based I/O needs the run's own directory",
+                Some(cwd.origin.clone()),
+            );
+        }
+    }
+
     fn target(&mut self, target: &ComposedTarget) {
         self.stage(&target.run);
         if let Some(build) = &target.build {
@@ -608,17 +633,6 @@ pub fn check(merged: &MergedConfig, selection: &Selection) -> CheckReport {
         check: super::judging::validate(&mut validator, selection),
         ..ComposedUniverse::default()
     };
-    // Reject only a structurally valid declaration. Invalid descendants,
-    // including unknown keys, already have phase-1 diagnostics.
-    if let Some(io) = merged.at(&["config", "io"]) {
-        if io.markers.is_empty() {
-            validator.error(
-                io.origin.clone(),
-                "file-I/O problems are not supported in this version",
-                None,
-            );
-        }
-    }
     if let Some(languages) = merged.languages() {
         for name in languages.keys() {
             let language = merged.language(name).expect("language map member");
@@ -758,6 +772,39 @@ pub fn check(merged: &MergedConfig, selection: &Selection) -> CheckReport {
                 format!("unknown language {name:?}"),
                 None,
             );
+        }
+    }
+    if let Some(io) = merged
+        .at(&["config", "io"])
+        .filter(|io| io.markers.is_empty())
+    {
+        if selection.operation == Operation::Stress {
+            validator.error(
+                io.origin.clone(),
+                "stress with file-based I/O is unsupported in this version",
+                None,
+            );
+        }
+        if let Some(target) = &universe.selected {
+            validator.file_io_cwd(io, &target.run);
+            // A check covers every profile, composed for this problem. The
+            // language-only universe above intentionally excludes config.run.
+            if selection.operation == Operation::Check {
+                let language = merged
+                    .language(&target.language)
+                    .expect("selected language");
+                for profile in language.profiles().into_iter().flat_map(|p| p.keys()) {
+                    let mut profile_selection = selection.clone();
+                    profile_selection.profile = Some(profile.clone());
+                    let target = stages::target(
+                        merged,
+                        &target.language,
+                        Some(profile),
+                        Some(&profile_selection),
+                    );
+                    validator.file_io_cwd(io, &target.run);
+                }
+            }
         }
     }
     if matches!(selection.operation, Operation::Test | Operation::Run)

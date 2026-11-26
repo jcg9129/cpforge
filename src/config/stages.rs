@@ -15,6 +15,7 @@ pub enum Operation {
     #[default]
     Check,
     Test,
+    Stress,
     Run,
     Other,
 }
