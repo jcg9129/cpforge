@@ -85,10 +85,14 @@ pub enum PlanError {
     InvalidIteration,
     BuildRequired,
     ReportSize,
+    JudgingUnsupported,
 }
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid execution plan: {self:?}")
+        match self {
+            Self::JudgingUnsupported => f.write_str("judging unsupported in this version"),
+            _ => write!(f, "invalid execution plan: {self:?}"),
+        }
     }
 }
 impl std::error::Error for PlanError {}
@@ -205,6 +209,9 @@ impl<'probe> Engine<'probe> {
         // Report timing runs from admission (step 1) to F, as in `new`; the
         // shared verdict state and token are those installed earlier.
         let ready = ready.into();
+        if !super::plan::judging_supported(ready.judging.as_ref().map(|j| j.check.as_ref())) {
+            return Err(PlanError::JudgingUnsupported);
+        }
         cancel.start = ready.started;
         let mut plan = Vec::new();
         let has_build = matches!(&ready.planned_target, Some(PlannedTarget::Build(_)));

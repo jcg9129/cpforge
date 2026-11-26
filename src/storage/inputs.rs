@@ -14,7 +14,9 @@ use super::{ErrorKind, StorageError, checked_path};
 use crate::config::ProblemPath;
 use crate::tests_store::{FreezeError, FrozenManifest, TestId, TestStore};
 
+pub(crate) mod roles;
 mod sources;
+pub use roles::{CapturedRole, FrozenJudging};
 pub(crate) use sources::current_source_files;
 pub use sources::{
     CaptureError, CapturedSource, CapturedSourceCopy, CapturedSources, SourceRole, capture_sources,
@@ -50,11 +52,18 @@ pub struct FrozenInputs {
     job_dir: PathBuf,
     manifest: FrozenManifest,
     sources: CapturedSources,
+    judging: Option<Box<FrozenJudging>>,
 }
 
 impl FrozenInputs {
-    pub(crate) fn into_parts(self) -> (FrozenManifest, CapturedSources) {
-        (self.manifest, self.sources)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (FrozenManifest, CapturedSources, Option<Box<FrozenJudging>>) {
+        (self.manifest, self.sources, self.judging)
+    }
+
+    pub fn judging(&self) -> Option<&FrozenJudging> {
+        self.judging.as_deref()
     }
 
     pub fn job_dir(&self) -> &Path {
@@ -134,6 +143,7 @@ impl JobInputs<'_> {
             job_dir: self.job.dir.clone(),
             manifest: FrozenManifest::empty(),
             sources,
+            judging: None,
         })
     }
 
@@ -155,6 +165,7 @@ impl JobInputs<'_> {
             job_dir: self.job.dir.clone(),
             manifest,
             sources,
+            judging: None,
         })
     }
 

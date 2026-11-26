@@ -726,3 +726,32 @@ fn invalid_inherited_role_entry_is_not_decoded_as_a_valid_string() {
         assert!(report.executable().is_none());
     }
 }
+
+#[test]
+fn invalid_inherited_artifacts_are_diagnosed_before_role_planning() {
+    for platform in platforms() {
+        for artifacts in ["{ file = false }", "{ dir = true, required = [false] }"] {
+            let merged = compose(
+                &[
+                    raw(
+                        &format!("schema = 1\n[languages.cpp]\nartifacts = {artifacts}"),
+                        LayerKind::Workspace,
+                        platform,
+                    ),
+                    raw(
+                        "schema = 1\n[problem]\nid = 'local:p'\n[check]\nvalidator = { sources = ['v.cpp'], language = 'cpp', profile = 'simple' }",
+                        LayerKind::Problem,
+                        platform,
+                    ),
+                ],
+                platform,
+            );
+            assert!(
+                check(&merged, &Selection::default())
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.severity == Severity::Error)
+            );
+        }
+    }
+}

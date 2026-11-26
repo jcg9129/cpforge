@@ -13,6 +13,8 @@ use crate::tests_store::{Health, open_regular};
 pub enum SourceRole {
     Source,
     Support,
+    Program,
+    Asset,
 }
 
 /// One validated phase-1 declaration. The caller preserves target order.
@@ -44,6 +46,7 @@ pub struct CapturedSourceCopy {
     pub problem_path: ProblemPath,
     pub copy_path: PathBuf,
     pub len: u64,
+    pub sha256: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -54,11 +57,11 @@ impl CapturedSources {
     pub fn files(&self) -> &[CapturedSourceCopy] {
         &self.files
     }
-    /// Bindings for {sources}, excluding support files, in configured order.
+    /// Tool inputs in configured order: sources, or the captured prebuilt program.
     pub fn source_bindings(&self) -> Vec<PathBuf> {
         self.files
             .iter()
-            .filter(|file| file.role == SourceRole::Source)
+            .filter(|file| matches!(file.role, SourceRole::Source | SourceRole::Program))
             .map(|file| file.copy_path.clone())
             .collect()
     }
@@ -119,20 +122,30 @@ pub fn capture_sources(
     problem_dir: &Path,
     inputs: &JobInputs<'_>,
 ) -> Result<CapturedSources, CaptureError> {
-    inputs.finish(capture_checked(target_files, problem_dir, inputs))
+    capture_at(target_files, problem_dir, inputs, Path::new("src"))
+}
+
+pub(super) fn capture_at(
+    files: &[CapturedSource],
+    problem: &Path,
+    inputs: &JobInputs<'_>,
+    prefix: &Path,
+) -> Result<CapturedSources, CaptureError> {
+    inputs.finish(capture_checked(files, problem, inputs, prefix))
 }
 
 fn capture_checked(
     target_files: &[CapturedSource],
     problem_dir: &Path,
     inputs: &JobInputs<'_>,
+    prefix: &Path,
 ) -> Result<CapturedSources, CaptureError> {
     inputs.ensure_active()?;
     let opened = open_sources(target_files, problem_dir)?;
     let mut files = Vec::with_capacity(opened.len());
     for (index, (source, relative, mut file)) in opened.into_iter().enumerate() {
         let copy = inputs
-            .copy(&Path::new("src").join(relative), &mut file)
+            .copy(&prefix.join(relative), &mut file)
             .map_err(|error| match error {
                 InputsError::Storage(StorageError {
                     kind: ErrorKind::Io { path, source },
@@ -150,6 +163,7 @@ fn capture_checked(
             problem_path: source.problem_path,
             copy_path: copy.path,
             len: copy.len,
+            sha256: copy.sha256,
         });
     }
     Ok(CapturedSources { files })

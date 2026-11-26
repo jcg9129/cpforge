@@ -346,6 +346,10 @@ pub struct ProblemPath {
 }
 
 impl ProblemPath {
+    pub(crate) fn from_role(file: &Sourced<String>) -> Self {
+        role_path(file).value
+    }
+
     /// Ordered UTF-8 components, validated without interpreting host separators.
     pub fn components(&self) -> &[String] {
         &self.components
@@ -419,6 +423,52 @@ impl std::error::Error for TemplateDestinationError {}
 pub type TemplateDestination<'a> = (&'a Sourced<PathBuf>, &'a Sourced<ProblemPath>);
 
 impl TargetPlan {
+    /// Adapt a validated role to the ordinary language build/run planner.
+    pub(crate) fn for_role(role: &super::RoleSpec) -> Self {
+        let (language, sources, support_files, entry, artifacts, build, run) = match &role.input {
+            super::RoleInput::Built(built) => (
+                built.language.clone(),
+                built.sources.iter().map(role_path).collect(),
+                built.support_files.iter().map(role_path).collect(),
+                built.entry.clone(),
+                built.artifacts.clone(),
+                built.build.as_ref().map(StagePlan::from_composed),
+                StagePlan::from_composed(&built.run),
+            ),
+            super::RoleInput::Prebuilt(prebuilt) => (
+                Sourced {
+                    value: "prebuilt".into(),
+                    origin: prebuilt.program.origin.clone(),
+                    provenance: prebuilt.program.provenance.clone(),
+                    overlay: prebuilt.program.overlay.clone(),
+                },
+                vec![role_path(&prebuilt.program)],
+                vec![],
+                None,
+                None,
+                None,
+                StagePlan::from_composed(&prebuilt.run),
+            ),
+        };
+        Self {
+            language,
+            language_source: LanguageSource::Problem,
+            profile: None,
+            build,
+            run,
+            sources,
+            support_files,
+            solution_files: vec![],
+            artifacts,
+            entry,
+            template: None,
+            compare: built_in("compare", Comparator::Tokens),
+            ignored: StageHistory::default(),
+            build_history: StageHistory::default(),
+            _validated: Validated,
+        }
+    }
+
     /// Captured file declarations, in sources-then-support order (§6.2).
     pub fn captured_files(&self) -> impl Iterator<Item = &Sourced<ProblemPath>> {
         self.sources.iter().chain(&self.support_files)
@@ -499,15 +549,7 @@ impl TargetPlan {
                 .artifacts
                 .as_ref()
                 .filter(|_| target.build.is_some())
-                .map(|node| {
-                    if let Some(file) = node.get("file") {
-                        Artifacts::File { name: string(file) }
-                    } else {
-                        Artifacts::Dir {
-                            required: array(field(node, "required")).iter().map(string).collect(),
-                        }
-                    }
-                }),
+                .and_then(role_artifacts),
             entry: settings.entry.as_ref().map(string),
             template: settings.template.as_ref().map(|node| {
                 let path = field(node, "path");
@@ -984,6 +1026,35 @@ fn field<'a>(node: &'a EffectiveNode, key: &str) -> &'a EffectiveNode {
 fn array(node: &EffectiveNode) -> &[EffectiveNode] {
     node.array().expect("validated array")
 }
+fn role_path(file: &Sourced<String>) -> Sourced<ProblemPath> {
+    Sourced {
+        value: ProblemPath {
+            components: file.value.split('/').map(str::to_owned).collect(),
+        },
+        origin: file.origin.clone(),
+        provenance: file.provenance.clone(),
+        overlay: file.overlay.clone(),
+    }
+}
+
+pub(crate) fn role_artifacts(node: &EffectiveNode) -> Option<Artifacts> {
+    if let Some(file) = node.get("file") {
+        file.string()?;
+        Some(Artifacts::File { name: string(file) })
+    } else {
+        let required = node
+            .get("required")?
+            .array()?
+            .iter()
+            .map(|file| {
+                file.string()?;
+                Some(string(file))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Artifacts::Dir { required })
+    }
+}
+
 fn problem_paths(node: Option<&EffectiveNode>) -> Vec<Sourced<ProblemPath>> {
     node.into_iter()
         .flat_map(array)

@@ -32,6 +32,8 @@
 pub mod engine;
 pub mod guard;
 pub mod persist;
+pub mod plan;
+pub mod roles;
 
 use std::fmt;
 use std::fs;
@@ -62,6 +64,7 @@ pub struct PrepareJobInputs<'probe> {
     pub baseline: Baseline,
     pub platform: Platform,
     pub build_bytes: u64,
+    pub judge_options: plan::JudgeOptions,
     pub probe: &'probe dyn Probe,
 }
 
@@ -74,11 +77,14 @@ impl fmt::Debug for PrepareJobInputs<'_> {
             .field("baseline", &self.baseline)
             .field("platform", &self.platform)
             .field("build_bytes", &self.build_bytes)
+            .field("judge_options", &self.judge_options)
             .finish_non_exhaustive()
     }
 }
 
-/// Constructible only after complete freezing and guarded target planning.
+/// Constructible only after complete freezing and guarded target/role planning.
+/// Judge run layouts and staging recipes name only job-owned frozen inputs;
+/// the engine still refuses these jobs through `plan::judging_supported`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReadyJob<'probe> {
@@ -99,6 +105,7 @@ pub struct ReadyJob<'probe> {
     pub capture_check: CaptureCheck,
     pub capture_report: engine::CaptureReport,
     pub planned_target: PlannedTarget<'probe>,
+    pub judging: Option<Box<roles::ReadyJudging>>,
     pub budget: Arc<JobBudget>,
     pub prune_report: AdmissionReport,
 }
@@ -121,6 +128,7 @@ pub struct ReadyExecutionJob<'probe> {
     pub(crate) manifest: FrozenManifest,
     pub(crate) capture_report: Option<engine::CaptureReport>,
     pub(crate) planned_target: Option<PlannedTarget<'probe>>,
+    pub(crate) judging: Option<Box<roles::ReadyJudging>>,
     pub(crate) budget: Arc<JobBudget>,
     pub(crate) prune_report: AdmissionReport,
     pub(crate) cwd_bytes: Option<u64>,
@@ -143,6 +151,7 @@ impl<'probe> From<ReadyJob<'probe>> for ReadyExecutionJob<'probe> {
             manifest: ready.manifest,
             capture_report: Some(ready.capture_report),
             planned_target: Some(ready.planned_target),
+            judging: ready.judging,
             budget: ready.budget,
             prune_report: ready.prune_report,
             cwd_bytes: None,
@@ -188,6 +197,7 @@ pub(crate) fn prepare_command_job(
         manifest,
         capture_report: None,
         planned_target: None,
+        judging: None,
         budget: registered.budget,
         prune_report: registered.prune_report,
         cwd_bytes: None,
@@ -207,6 +217,8 @@ pub enum ReadyError {
     Storage(StorageError),
     Plan(build::PlanErrors),
     Guard(GuardError),
+    JudgingPlan(plan::PlanError),
+    Judging(String),
 }
 impl fmt::Display for ReadyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -225,6 +237,8 @@ impl fmt::Display for ReadyError {
             Self::Storage(error) => write!(f, "{error}"),
             Self::Plan(error) => write!(f, "{error}"),
             Self::Guard(error) => write!(f, "{error}"),
+            Self::JudgingPlan(error) => write!(f, "{error}"),
+            Self::Judging(message) => f.write_str(message),
         }
     }
 }
@@ -235,6 +249,7 @@ impl std::error::Error for ReadyError {
             Self::Storage(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Guard(error) => Some(error),
+            Self::JudgingPlan(error) => Some(error),
             _ => None,
         }
     }
@@ -306,7 +321,7 @@ pub fn prepare_job<'probe>(
                 problem: Some(inputs.problem.clone()),
                 workspace: Some(inputs.workspace_root.clone()),
             },
-            baseline: inputs.baseline,
+            baseline: inputs.baseline.clone(),
             platform: inputs.platform,
             build_bytes: inputs.build_bytes,
             probe: inputs.probe,
@@ -341,7 +356,27 @@ pub fn prepare_job<'probe>(
         inputs.platform,
     )
     .map_err(ReadyError::Guard)?;
-    let (manifest, sources) = frozen.into_parts();
+    let (manifest, sources, frozen_judging) = frozen.into_parts();
+    let judging = frozen_judging
+        .map(|frozen| roles::prepare_roles(*frozen, &manifest, target, &registered, &inputs))
+        .transpose()?
+        .map(Box::new);
+    let capture_roles = judging.as_ref().map_or_else(Vec::new, |judging| {
+        judging
+            .roles
+            .iter()
+            .map(|role| crate::report::CaptureRole {
+                role: role.captured.role,
+                files: role
+                    .captured
+                    .files
+                    .files()
+                    .iter()
+                    .map(|file| file.problem_path.components().iter().collect())
+                    .collect(),
+            })
+            .collect()
+    });
     let mut capture_report =
         engine::CaptureReport::from_sources(capture_check.clone(), sources.files());
     let lists = [
@@ -363,7 +398,7 @@ pub fn prepare_job<'probe>(
         &lists[0],
         &lists[1],
         &capture_report.lists_sha256,
-        &[],
+        &capture_roles,
     )
     .map_err(|error| {
         ReadyError::Storage(StorageError::io(
@@ -416,6 +451,7 @@ pub fn prepare_job<'probe>(
         capture_check,
         capture_report,
         planned_target,
+        judging,
         budget: registered.budget,
         prune_report,
     })

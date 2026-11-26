@@ -485,6 +485,33 @@ pub fn run_with_config(
                 ));
             }
         }
+        // Config §8.2: a judged plan counts every role build and role run and
+        // is capped before admission. `judging_supported` refuses such plans
+        // earlier in this version; the same bounds are recomputed after freezing.
+        let judge_options = crate::jobs::plan::JudgeOptions {
+            hooks: if hook_reason.is_none() {
+                hook_plans.len()
+            } else {
+                0
+            },
+            output_file: false,
+        };
+        if kind == JobKind::Test {
+            let check = config
+                .judging()
+                .map_err(|e| Error::Config(e.to_string()))?
+                .filter(|c| c.has_roles());
+            if let (Some(target), Some(check)) = (target.as_ref(), check) {
+                crate::jobs::plan::validate_test_plan(
+                    target,
+                    Some(check),
+                    tests.len(),
+                    judge_options.hooks,
+                    judge_options.output_file,
+                )
+                .map_err(|e| Error::Config(e.to_string()))?;
+            }
+        }
         let retention = config
             .retention()
             .map_err(|e| Error::Config(e.to_string()))?;
@@ -542,6 +569,7 @@ pub fn run_with_config(
                 baseline: baseline.clone(),
                 platform: Platform::host(),
                 build_bytes: retention.build_bytes.value,
+                judge_options,
                 probe: &NativeProbe,
             };
             // Test jobs freeze even an empty selection, as before; build, raw
@@ -551,15 +579,28 @@ pub fn run_with_config(
             {
                 prepare_build_job(registered, target, inputs)
             } else {
-                let frozen = registered
-                    .inputs()
-                    .freeze(
-                        &TestStore::new(inputs.problem.dir.clone()),
+                let store = TestStore::new(inputs.problem.dir.clone());
+                let check = config
+                    .judging()
+                    .map_err(|e| Error::Config(e.to_string()))?
+                    .filter(|c| kind == JobKind::Test && c.has_roles());
+                let frozen = if let Some(check) = check {
+                    registered.inputs().freeze_judged(
+                        &store,
+                        &tests,
+                        target,
+                        check,
+                        &inputs.problem.dir,
+                    )
+                } else {
+                    registered.inputs().freeze(
+                        &store,
                         &tests,
                         &CapturedSource::from_target(target),
                         &inputs.problem.dir,
                     )
-                    .map_err(|e| Error::Workspace(e.to_string()))?;
+                }
+                .map_err(|e| Error::Workspace(e.to_string()))?;
                 prepare_job(registered, frozen, target, inputs)
             }
             .map_err(ready_error)?;
@@ -895,7 +936,13 @@ fn plan_invocation(
                 presentation.problem_kind
             )));
         }
-        if let Some(key) = metadata.as_ref().and_then(|m| m.unsupported_check) {
+        if !crate::jobs::plan::judging_supported(
+            config.judging().map_err(|e| Error::Config(e.to_string()))?,
+        ) {
+            let key = metadata
+                .as_ref()
+                .and_then(|m| m.judging_key)
+                .unwrap_or("check");
             return Err(Error::Config(format!(
                 "{}: {key}: build/test/run unsupported in this version",
                 selected
@@ -1106,7 +1153,7 @@ fn command_request(
 ) -> Result<JobRequest, Error> {
     use crate::jobs::engine::{CommandKind, Iteration, Recipe, Role};
     let mut iterations = Vec::new();
-    let mut errors = command_limit_errors(&plan.stage.limits);
+    let mut errors = crate::exec::limit_errors(&plan.stage.limits);
     let tests: Vec<_> = if plan.for_each_test.value {
         inputs.tests.iter().map(Some).collect()
     } else {
@@ -1185,49 +1232,9 @@ fn command_request(
     })
 }
 
-fn command_limit_errors(limits: &crate::config::Limits) -> Vec<String> {
-    let mut errors = Vec::new();
-    for (name, value) in [
-        ("address_space", &limits.address_space),
-        ("job_commit", &limits.job_commit),
-    ] {
-        let Some(value) = value else { continue };
-        #[cfg(target_os = "linux")]
-        let supported = name == "address_space";
-        #[cfg(not(target_os = "linux"))]
-        let supported = false;
-        if !supported {
-            errors.push(format!(
-                "{}: limits.{name} unsupported on this platform",
-                value.origin
-            ));
-            continue;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: sysconf takes no pointer arguments and only reads the page size.
-            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-            let normalised = u64::try_from(page)
-                .ok()
-                .filter(|p| *p > 0)
-                .and_then(|p| value.value.checked_add(p - 1).map(|bytes| bytes / p * p));
-            // u128: RLIM_INFINITY is u64::MAX on Linux but smaller on macOS.
-            #[allow(clippy::unnecessary_cast)]
-            let infinity = u128::from(libc::RLIM_INFINITY as u64);
-            if normalised.is_none_or(|bytes| bytes == 0 || u128::from(bytes) >= infinity) {
-                errors.push(format!(
-                    "{}: limits.{name} outside the platform range after page rounding",
-                    value.origin
-                ));
-            }
-        }
-    }
-    errors
-}
-
 struct ProblemMetadata {
     presentation: ReportPresentation,
-    unsupported_check: Option<&'static str>,
+    judging_key: Option<&'static str>,
 }
 
 fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
@@ -1238,9 +1245,8 @@ fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
             .map(|v| v.as_str().ok_or("problem.kind must be a string"))
             .transpose()?
             .unwrap_or("batch");
-        // Parsed roles remain non-executable until their judging engines land.
-        // Presence gates prevent any fallback to the built-in comparator.
-        let unsupported_check = document.get("check").and_then(|check| {
+        // Diagnostic location only; jobs::plan::judging_supported owns the gate.
+        let judging_key = document.get("check").and_then(|check| {
             if !check.is_table_like() {
                 return Some("check");
             }
@@ -1267,7 +1273,7 @@ fn problem_metadata(selected: &Selected) -> Result<ProblemMetadata, Error> {
                 target_name: None,
                 published_limits: None,
             },
-            unsupported_check,
+            judging_key,
         })
     });
     selection::record_result(record)
@@ -1321,7 +1327,10 @@ fn check_cancel(cancel: &CancelState) -> Result<(), Error> {
 
 fn ready_error(error: ReadyError) -> Error {
     match error {
-        ReadyError::Plan(_) | ReadyError::Guard(_) => Error::Config(error.to_string()),
+        ReadyError::Plan(_)
+        | ReadyError::Guard(_)
+        | ReadyError::JudgingPlan(_)
+        | ReadyError::Judging(_) => Error::Config(error.to_string()),
         ReadyError::WrongJob { .. } | ReadyError::WrongTarget | ReadyError::FailedInputs => {
             Error::Internal(error.to_string())
         }

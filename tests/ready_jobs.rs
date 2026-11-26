@@ -1,4 +1,6 @@
 //! Portable managed readiness and composed storage lifecycle tests.
+#[path = "ready_support/judging.rs"]
+mod judging;
 mod ready_support;
 
 use cpforge::build::{ExpandedArguments, PlannedTarget};

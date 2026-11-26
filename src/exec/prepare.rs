@@ -404,3 +404,44 @@ fn install(
         entries.push((name, value));
     }
 }
+
+/// Phase-3 local-limit support and range checks, without starting a process.
+pub fn limit_errors(limits: &crate::config::Limits) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (name, value) in [
+        ("address_space", &limits.address_space),
+        ("job_commit", &limits.job_commit),
+    ] {
+        let Some(value) = value else { continue };
+        #[cfg(target_os = "linux")]
+        let supported = name == "address_space";
+        #[cfg(not(target_os = "linux"))]
+        let supported = false;
+        if !supported {
+            errors.push(format!(
+                "{}: limits.{name} unsupported on this platform",
+                value.origin
+            ));
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: sysconf takes no pointer arguments and only reads the page size.
+            let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let normalised = u64::try_from(page)
+                .ok()
+                .filter(|p| *p > 0)
+                .and_then(|p| value.value.checked_add(p - 1).map(|bytes| bytes / p * p));
+            // u128: RLIM_INFINITY is u64::MAX on Linux but smaller on macOS.
+            #[allow(clippy::unnecessary_cast)]
+            let infinity = u128::from(libc::RLIM_INFINITY as u64);
+            if normalised.is_none_or(|bytes| bytes == 0 || u128::from(bytes) >= infinity) {
+                errors.push(format!(
+                    "{}: limits.{name} outside the platform range after page rounding",
+                    value.origin
+                ));
+            }
+        }
+    }
+    errors
+}

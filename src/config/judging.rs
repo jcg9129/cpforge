@@ -24,6 +24,7 @@ pub struct BuiltRole {
     pub support_files: Vec<Sourced<String>>,
     pub language: Sourced<String>,
     pub entry: Option<Sourced<String>>,
+    pub artifacts: Option<Artifacts>,
     pub build: Option<ComposedStage>,
     pub run: ComposedStage,
 }
@@ -95,6 +96,44 @@ pub struct CheckConfig {
 }
 
 impl CheckConfig {
+    pub fn has_roles(&self) -> bool {
+        self.checker.is_some()
+            || self.validator.is_some()
+            || self.kind.value == CheckMode::Interactive
+    }
+
+    /// Result-affecting settings and presentation, without finalized evidence.
+    pub fn report_config(&self) -> crate::report::CheckConfig {
+        use crate::report::{InteractiveConfig, Score, Scoring};
+        crate::report::CheckConfig {
+            kind: self.kind.value,
+            answer: self.answer.value,
+            display: self.display.value,
+            scoring: match &self.scoring.value {
+                ScoringConfig::PassFail => Scoring::PassFail,
+                ScoringConfig::Points(p) => Scoring::Points {
+                    scale: Score::new(i128::from(p.scale.value) * Score::UNIT)
+                        .expect("validated points scale"),
+                    aggregation: p.aggregation.value,
+                },
+            },
+            interactive: self.interactive.as_ref().map(|i| InteractiveConfig {
+                checking: i.checking.value,
+                mode: i.mode.value,
+                idle_us: (i.idle_ms.value != 0).then_some(i.idle_ms.value * 1000),
+                early_reader_close: i.early_reader_close.value,
+                interactor_allowance_us: i.interactor_allowance_ms.value * 1000,
+                peer_allowance_us: i.peer_allowance_ms.value * 1000,
+                solution_seed: i.solution_seed.value,
+                interactor_seed: i
+                    .interactor
+                    .seed
+                    .as_ref()
+                    .map_or(SeedMode::None, |s| s.value),
+            }),
+        }
+    }
+
     /// Phase 3, after run-count validation. Compare-only jobs retain their existing cap.
     pub fn validate_test_count(&self, count: usize) -> Result<(), &'static str> {
         if count > 1000
@@ -483,6 +522,7 @@ fn built_role(v: &mut Validator<'_>, n: &EffectiveNode) -> Option<BuiltRole> {
             if let Some(value) = n.get(key).filter(|n| clean(n)) {
                 if let EffectiveValue::Table(table) = &mut target.run.node.value {
                     table.insert(key.into(), value.clone());
+                    target.run.explicit_fields.insert(key.into());
                 }
             }
         }
@@ -498,11 +538,29 @@ fn built_role(v: &mut Validator<'_>, n: &EffectiveNode) -> Option<BuiltRole> {
     if target.settings.entry.as_ref().is_some_and(|n| !clean(n)) {
         return None;
     }
+    let entry = n.get("entry").or(target.settings.entry.as_ref()).map(text);
+    let mut artifacts = target
+        .settings
+        .artifacts
+        .as_ref()
+        .filter(|_| target.build.is_some())
+        .and_then(super::api::role_artifacts);
+    if language == Some("java") {
+        if let (Some(Artifacts::Dir { required }), Some(entry)) = (&mut artifacts, &entry) {
+            for path in required
+                .iter_mut()
+                .filter(|p| matches!(p.provenance, Provenance::Derived { .. }))
+            {
+                path.value = format!("{}.class", entry.value.replace('.', "/"));
+            }
+        }
+    }
     Some(BuiltRole {
         sources: paths(n, "sources"),
         support_files: paths(n, "support_files"),
         language: text(leaf(n, "language")),
-        entry: n.get("entry").or(target.settings.entry.as_ref()).map(text),
+        entry,
+        artifacts,
         build: target.build,
         run: target.run,
     })
@@ -519,7 +577,15 @@ fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<Ro
             if let EffectiveValue::Table(table) = &mut node.value {
                 let mut argv = program.clone();
                 argv.name = "argv".into();
-                argv.value = EffectiveValue::Array(vec![program.clone()]);
+                let mut executable = program.clone();
+                executable.typed = Some(TypedValue::Text(ParsedText {
+                    unexpanded: "{source}".into(),
+                    tokens: vec![Token::Placeholder(Placeholder::Source)],
+                    path: None,
+                    lookup: false,
+                    expanded_home: None,
+                }));
+                argv.value = EffectiveValue::Array(vec![executable]);
                 table.insert("argv".into(), argv);
                 for key in ["deadline_s", "stdout_cap", "stderr_cap"] {
                     if let Some(value) = n.get(key) {
@@ -532,10 +598,14 @@ fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<Ro
                 run: ComposedStage {
                     kind: StageKind::Run,
                     node,
-                    explicit_fields: Default::default(),
+                    explicit_fields: ["deadline_s", "stdout_cap", "stderr_cap"]
+                        .into_iter()
+                        .filter(|key| n.get(key).is_some())
+                        .map(str::to_owned)
+                        .collect(),
                     history: Default::default(),
                     stdout_policy: CapPolicy::Kill,
-                    stderr_policy: CapPolicy::Kill,
+                    stderr_policy: CapPolicy::Discard,
                     context: Default::default(),
                     deferred: vec![],
                     inputs: vec![],

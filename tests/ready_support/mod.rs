@@ -108,6 +108,7 @@ impl Fixture {
             ]),
             platform: Platform::host(),
             build_bytes: 64 << 20,
+            judge_options: cpforge::jobs::plan::JudgeOptions::default(),
             probe,
         }
     }

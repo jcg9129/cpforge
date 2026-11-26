@@ -36,7 +36,7 @@ pub use context::{
 };
 pub use error::{PrepareError, PrepareErrorKind, PrepareErrors};
 pub(crate) use inspect::{ToolStatus, inspect_program};
-pub use prepare::prepare;
+pub use prepare::{limit_errors, prepare};
 pub use probe::{Executable, NativeProbe, Probe, ProbeResult};
 pub use resolve::{
     CandidateReason, DeferredStage, EntryReason, LaunchKind, Resolution, ResolutionRecord,

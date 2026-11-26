@@ -1,0 +1,329 @@
+//! Resolve captured judge stages. No role is executed or staged here.
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use super::{
+    CaptureCheck, PrepareJobInputs, ReadyError, guard,
+    plan::{self, ExecutionRole, TestJobPlan},
+};
+use crate::build::{self, BuildArea, BuildId, FreshBuildOutputs, PlanInputs};
+use crate::config::TargetPlan;
+use crate::exec::{self, Context, InvocationDirs, Resolution, ResolvedStage};
+use crate::report::{AnswerPolicy, CheckMode, JudgeProfile, RoleName};
+use crate::storage::budget::Reservation;
+use crate::storage::inputs::{CapturedRole, FrozenJudging, SourceRole};
+use crate::tests_store::{FrozenAnswer, FrozenManifest};
+
+#[derive(Debug)]
+pub struct StagedFile {
+    /// None means an intentionally empty answer, never a live input path.
+    pub source: Option<PathBuf>,
+    pub destination: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct JudgeRun {
+    pub execution: u32,
+    /// A generated program stays deferred until its build has been validated.
+    pub stage: Box<Resolution>,
+    pub stdin: Option<PathBuf>,
+    pub staged: Vec<StagedFile>,
+}
+
+#[derive(Debug)]
+pub struct ReadyRole {
+    pub captured: CapturedRole,
+    pub target: Box<TargetPlan>,
+    pub capture_check: CaptureCheck,
+    pub outputs: Option<FreshBuildOutputs>,
+    pub build_stage: Option<Box<ResolvedStage>>,
+    pub runs: Vec<JudgeRun>,
+}
+
+#[derive(Debug)]
+pub struct ReadyJudging {
+    pub check: Box<crate::config::CheckConfig>,
+    pub plan: TestJobPlan,
+    pub roles: Vec<ReadyRole>,
+    /// Held until eventual report publication; independent of run allowances.
+    pub report_reservation: Reservation,
+    pub judge_fingerprint: Option<[u8; 32]>,
+}
+
+pub(super) fn prepare_roles(
+    frozen: FrozenJudging,
+    manifest: &FrozenManifest,
+    target: &TargetPlan,
+    registered: &crate::storage::admission::RegisteredJob,
+    inputs: &PrepareJobInputs<'_>,
+) -> Result<ReadyJudging, ReadyError> {
+    let plan = plan::plan_test_job(
+        target,
+        Some(&frozen.check),
+        manifest.entries().len(),
+        inputs.judge_options.hooks,
+        inputs.judge_options.output_file,
+        &registered.dir,
+    )
+    .map_err(ReadyError::JudgingPlan)?;
+    // Config §9.1.4: under `answer = "file"` every selected test of a judged
+    // kind needs an answer; the error names all of them.
+    if frozen.check.kind.value != CheckMode::Compare
+        && frozen.check.answer.value == AnswerPolicy::File
+    {
+        let missing: Vec<_> = manifest
+            .entries()
+            .iter()
+            .filter(|test| matches!(test.answer, FrozenAnswer::Absent))
+            .map(|test| test.id.to_string())
+            .collect();
+        if !missing.is_empty() {
+            return Err(ReadyError::Judging(format!(
+                "tests without an answer under answer = \"file\": {}",
+                missing.join(", ")
+            )));
+        }
+    }
+    // Retention, not configuration: refused like the capture manifest's.
+    let report_reservation = registered.budget.reserve(plan.report_bytes).map_err(|e| {
+        ReadyError::Storage(crate::storage::StorageError::io(
+            &registered.dir,
+            std::io::Error::other(e.to_string()),
+        ))
+    })?;
+    let area = BuildArea::new(registered.dir.join("builds")).map_err(ReadyError::Storage)?;
+    let mut roles = Vec::new();
+    for captured in frozen.roles {
+        // Boxed at once: the plan is held across every per-run resolution.
+        let role_target = Box::new(TargetPlan::for_role(&captured.spec));
+        for stage in role_target
+            .build
+            .iter()
+            .chain(std::iter::once(&role_target.run))
+        {
+            let errors = exec::limit_errors(&stage.limits);
+            if !errors.is_empty() {
+                return Err(ReadyError::Judging(errors.join("\n")));
+            }
+        }
+        let build = plan
+            .executions
+            .iter()
+            .find(|e| e.role == ExecutionRole::RoleBuild(captured.role));
+        let outputs = build
+            .map(|e| {
+                build::allocate(
+                    &area,
+                    BuildId::new(format!("r{:05}", e.index)).expect("plan build id"),
+                )
+            })
+            .transpose()
+            .map_err(ReadyError::Storage)?;
+        let source_cwd = build
+            .or_else(|| {
+                plan.executions
+                    .iter()
+                    .find(|e| e.role == ExecutionRole::Judge(captured.role))
+            })
+            .map_or_else(
+                || registered.dir.join("role").join("cwd"),
+                |e| e.layout.cwd.clone(),
+            );
+        let dirs = |cwd| InvocationDirs {
+            run_cwd: cwd,
+            problem: Some(inputs.problem.clone()),
+            workspace: Some(inputs.workspace_root.clone()),
+        };
+        let sources = captured.files.source_bindings();
+        let preflight = build::preflight_target(
+            &role_target,
+            PlanInputs {
+                sources,
+                dirs: dirs(source_cwd),
+                baseline: inputs.baseline.clone(),
+                platform: inputs.platform,
+                build_bytes: inputs.build_bytes,
+                probe: inputs.probe,
+            },
+            outputs.as_ref().map(|o| o.path()),
+        )
+        .map_err(ReadyError::Plan)?;
+        let (stage, args) = preflight.source_stage();
+        let capture_check = guard::check_capture(
+            role_target.build.as_ref().unwrap_or(&role_target.run),
+            args,
+            &stage.cwd,
+            &inputs.workspace_root,
+            &registered.dir,
+            inputs.platform,
+        )
+        .map_err(ReadyError::Guard)?;
+        let build_stage = role_target.build.as_ref().map(|_| Box::new(stage.clone()));
+        let mut runs = Vec::new();
+        for execution in plan
+            .executions
+            .iter()
+            .filter(|e| e.role == ExecutionRole::Judge(captured.role))
+        {
+            let test_index = execution.test.expect("judge test");
+            let test = &manifest.entries()[test_index];
+            let cwd = &execution.layout.cwd;
+            let mut staged: Vec<_> = captured
+                .files
+                .files()
+                .iter()
+                .filter(|f| f.role == SourceRole::Asset)
+                .map(|f| StagedFile {
+                    source: Some(f.copy_path.clone()),
+                    destination: f
+                        .problem_path
+                        .components()
+                        .iter()
+                        .fold(cwd.clone(), |p, c| p.join(c)),
+                })
+                .collect();
+            staged.push(StagedFile {
+                source: Some(test.input.path.clone()),
+                destination: cwd.join("input"),
+            });
+            let mut extra: Vec<OsString> = Vec::new();
+            let stdin = if captured.role == RoleName::Validator {
+                if captured.spec.profile.value == JudgeProfile::Simple {
+                    extra.push(cwd.join("input").into());
+                }
+                Some(cwd.join("input"))
+            } else {
+                let solution = plan
+                    .executions
+                    .iter()
+                    .find(|e| e.test == Some(test_index) && e.role == ExecutionRole::Solution)
+                    .expect("solution run");
+                staged.push(StagedFile {
+                    source: Some(if plan.shape.output_file {
+                        solution.layout.output.clone()
+                    } else {
+                        solution.layout.stdout.clone()
+                    }),
+                    destination: cwd.join("output"),
+                });
+                // Absent is reachable only under `answer = "none"` (checked above).
+                let answer = match &test.answer {
+                    FrozenAnswer::Present { path, .. } => Some(path.clone()),
+                    FrozenAnswer::Absent => None,
+                };
+                staged.push(StagedFile {
+                    source: answer,
+                    destination: cwd.join("answer"),
+                });
+                extra.extend([
+                    cwd.join("input").into(),
+                    cwd.join("output").into(),
+                    cwd.join("answer").into(),
+                ]);
+                if captured.spec.profile.value == JudgeProfile::Testlib {
+                    extra.extend([cwd.join("report").into(), OsString::from("-appes")]);
+                }
+                None
+            };
+            let ctx = Context::target_run(
+                &role_target,
+                dirs(cwd.clone()),
+                preflight.command_bindings(),
+            )
+            .map_err(|e| ReadyError::Judging(e.to_string()))?;
+            let prepared = exec::prepare(
+                &role_target.run,
+                &ctx,
+                &inputs.baseline,
+                inputs.platform,
+                &extra,
+            )
+            .map_err(|e| ReadyError::Judging(e.to_string()))?;
+            let stage = exec::resolve(prepared, inputs.probe, inputs.platform)
+                .map_err(|e| ReadyError::Judging(e.to_string()))?;
+            if let Resolution::Resolved(stage) = &stage {
+                stage
+                    .launch_command(inputs.platform)
+                    .map_err(|e| ReadyError::Judging(e.to_string()))?;
+            }
+            runs.push(JudgeRun {
+                execution: execution.index,
+                stage: Box::new(stage),
+                stdin,
+                staged,
+            });
+        }
+        roles.push(ReadyRole {
+            captured,
+            target: role_target,
+            capture_check,
+            outputs,
+            build_stage,
+            runs,
+        });
+    }
+    let judge_fingerprint =
+        fingerprint(&frozen.check, &roles).map_err(|e| ReadyError::Judging(e.to_string()))?;
+    Ok(ReadyJudging {
+        check: frozen.check,
+        plan,
+        roles,
+        report_reservation,
+        judge_fingerprint,
+    })
+}
+
+fn fingerprint(
+    check: &crate::config::CheckConfig,
+    roles: &[ReadyRole],
+) -> std::io::Result<Option<[u8; 32]>> {
+    use crate::config::RoleInput;
+    use crate::report::SeedMode;
+    use crate::storage::facts::fingerprint::{
+        JudgeFingerprintBuilt, JudgeFingerprintOrigin, JudgeFingerprintRole,
+        judge_fingerprint_from_copies,
+    };
+    let mut slots = [None, None, None];
+    let mut copies: [Vec<_>; 3] = std::array::from_fn(|_| Vec::new());
+    let paths = |paths: &[crate::config::Sourced<String>]| -> Vec<PathBuf> {
+        paths
+            .iter()
+            .map(|p| p.value.split('/').collect::<PathBuf>())
+            .collect()
+    };
+    for role in roles {
+        let index = match role.captured.role {
+            RoleName::Checker => 0,
+            RoleName::Validator => 1,
+            RoleName::Interactor => 2,
+            _ => unreachable!("judging role"),
+        };
+        let spec = &role.captured.spec;
+        let origin = match &spec.input {
+            RoleInput::Built(b) => JudgeFingerprintOrigin::Built(Box::new(JudgeFingerprintBuilt {
+                sources: paths(&b.sources),
+                support_files: paths(&b.support_files),
+                assets: paths(&spec.assets),
+                language: b.language.value.clone(),
+                entry: b.entry.as_ref().map(|e| e.value.clone()),
+                build: role.target.build.clone(),
+                run: role.target.run.clone(),
+            })),
+            RoleInput::Prebuilt(p) => JudgeFingerprintOrigin::Prebuilt {
+                program: p.program.value.split('/').collect(),
+                assets: paths(&spec.assets),
+            },
+        };
+        copies[index] = role.captured.files.files().iter().collect();
+        slots[index] = Some(JudgeFingerprintRole {
+            profile: spec.profile.value,
+            files: vec![],
+            origin,
+            deadline_us: spec.deadline_ms.as_ref().map(|d| d.value * 1000),
+            stdout_cap: spec.stdout_cap.as_ref().map(|c| c.value),
+            stderr_cap: spec.stderr_cap.as_ref().map(|c| c.value),
+            seed: spec.seed.as_ref().map_or(SeedMode::None, |s| s.value),
+        });
+    }
+    judge_fingerprint_from_copies(&check.report_config(), &slots, &copies)
+}

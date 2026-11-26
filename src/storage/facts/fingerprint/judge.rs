@@ -65,13 +65,37 @@ pub fn encode_judge(
     check: &CheckConfig,
     roles: &[Option<JudgeFingerprintRole>; 3],
 ) -> io::Result<()> {
+    encode_judge_files(out, check, roles, None)
+}
+
+/// Stream only job-owned copies; large role files never enter a Vec of bytes.
+pub fn judge_fingerprint_from_copies(
+    check: &CheckConfig,
+    roles: &[Option<JudgeFingerprintRole>; 3],
+    copies: &[Vec<&crate::storage::inputs::CapturedSourceCopy>; 3],
+) -> io::Result<Option<[u8; 32]>> {
+    if roles.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut hash = HashWriter(Sha256::new());
+    encode_judge_files(&mut hash, check, roles, Some(copies))?;
+    Ok(Some(hash.0.finalize().into()))
+}
+
+fn encode_judge_files(
+    out: &mut impl Write,
+    check: &CheckConfig,
+    roles: &[Option<JudgeFingerprintRole>; 3],
+    copies: Option<&[Vec<&crate::storage::inputs::CapturedSourceCopy>; 3]>,
+) -> io::Result<()> {
     let config = wire::encode_judge_fingerprint_config(check)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     bytes(out, b"cpf-fp-judge-v1")?;
     bytes(out, &config)?;
-    for (token, role) in ["checker", "validator", "interactor"]
+    for (index, (token, role)) in ["checker", "validator", "interactor"]
         .into_iter()
         .zip(roles)
+        .enumerate()
     {
         let Some(role) = role else {
             out.write_all(&[0])?;
@@ -90,16 +114,41 @@ pub fn encode_judge(
             role.origin,
             JudgeFingerprintOrigin::Prebuilt { .. }
         ))])?;
-        let mut files: Vec<_> = role
-            .files
-            .iter()
-            .map(|f| (path_bytes(&f.path), &f.copied_bytes))
-            .collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        count(out, files.len() as u64)?;
-        for (path, contents) in files {
-            bytes(out, &path)?;
-            bytes(out, contents)?;
+        if let Some(copies) = copies {
+            let mut files: Vec<_> = copies[index]
+                .iter()
+                .map(|file| {
+                    let path: PathBuf = file.problem_path.components().iter().collect();
+                    (path_bytes(&path), *file)
+                })
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            count(out, files.len() as u64)?;
+            for (path, file) in files {
+                bytes(out, &path)?;
+                count(out, file.len)?;
+                let reader = crate::tests_store::open_regular(&file.copy_path)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                let mut reader = std::io::Read::take(reader, file.len);
+                if io::copy(&mut reader, out)? != file.len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "captured role file changed",
+                    ));
+                }
+            }
+        } else {
+            let mut files: Vec<_> = role
+                .files
+                .iter()
+                .map(|f| (path_bytes(&f.path), &f.copied_bytes))
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            count(out, files.len() as u64)?;
+            for (path, contents) in files {
+                bytes(out, &path)?;
+                bytes(out, contents)?;
+            }
         }
         match &role.origin {
             JudgeFingerprintOrigin::Built(built) => {
