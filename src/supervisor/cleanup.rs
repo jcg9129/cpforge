@@ -112,6 +112,10 @@ enum Transfer {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Root(super::root::unix::Transfer),
     FailedCaptures(super::capture::FailedCaptures),
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    FileIo(Box<super::file_io::FileCapture>),
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    FileCreation(std::thread::JoinHandle<()>),
 }
 
 #[derive(Debug)]
@@ -322,7 +326,7 @@ impl Admission {
         self.cell.retained_bytes.get().cloned()
     }
 
-    pub(super) fn worker_credits(&mut self, count: usize) -> Result<Vec<Credits>, NotStarted> {
+    pub(crate) fn worker_credits(&mut self, count: usize) -> Result<Vec<Credits>, NotStarted> {
         if let Some(credits) = self.worker_credits.take() {
             assert_eq!(credits.len(), count);
             return Ok(credits);
@@ -354,6 +358,15 @@ impl Admission {
 
     pub(super) fn transfer_failed_captures(self, captures: super::capture::FailedCaptures) {
         self.publish_transfer(Transfer::FailedCaptures(captures));
+    }
+
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    pub(crate) fn transfer_file_io(self, capture: Box<super::file_io::FileCapture>) {
+        self.publish_transfer(Transfer::FileIo(capture));
+    }
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    pub(crate) fn transfer_file_creation(self, worker: std::thread::JoinHandle<()>) {
+        self.publish_transfer(Transfer::FileCreation(worker));
     }
 
     fn publish_transfer(mut self, record: Transfer) {
@@ -549,6 +562,10 @@ impl GlobalBounds {
                 };
                 let released = match record {
                     Transfer::FailedCaptures(captures) => captures.resources_released(),
+                    #[cfg(all(test, feature = "storage-test-hooks"))]
+                    Transfer::FileIo(capture) => capture.released(),
+                    #[cfg(all(test, feature = "storage-test-hooks"))]
+                    Transfer::FileCreation(worker) => worker.is_finished(),
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     Transfer::Root(record) => {
                         let released = record.poll();
@@ -564,6 +581,13 @@ impl GlobalBounds {
                 if released {
                     let outcome = match transfer.take().expect("poller owns record") {
                         Transfer::FailedCaptures(_) => None,
+                        #[cfg(all(test, feature = "storage-test-hooks"))]
+                        Transfer::FileIo(_) => None,
+                        #[cfg(all(test, feature = "storage-test-hooks"))]
+                        Transfer::FileCreation(worker) => {
+                            worker.join().unwrap();
+                            None
+                        }
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         Transfer::Root(mut record) => {
                             record.close_observer();

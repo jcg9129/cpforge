@@ -6,11 +6,11 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use crate::report::{CollectionFailure, IoScratchDetail, OutputFile, OutputFileType};
-use crate::supervisor::file_io_listing::{Listing, Scan};
-use sha2::{Digest, Sha256};
+use crate::supervisor::file_io_copy::extract;
+use crate::supervisor::file_io_listing::{Decision, Listing, Observation, Scan, decide};
 
 pub(crate) struct Directory {
     file: File,
@@ -58,6 +58,21 @@ impl Directory {
         execution: u32,
     ) -> Self {
         self.hooks.observation = observer.map(|observer| (observer, execution));
+        self
+    }
+
+    #[cfg(all(test, feature = "storage-test-hooks"))]
+    pub(crate) fn set_hooks(&mut self, mut hooks: crate::supervisor::file_io_hooks::Hooks) {
+        hooks.observation = self.hooks.observation.take();
+        self.hooks = hooks;
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    pub(crate) fn accounted(
+        mut self,
+        budget: Option<std::sync::Arc<crate::storage::budget::JobBudget>>,
+    ) -> Self {
+        self.hooks.budget = budget;
         self
     }
 
@@ -296,37 +311,33 @@ impl Directory {
             if let Err(e) = self.hooks.at("file_io.after_listing", 0) {
                 return failure(e);
             }
-            let Some(inode) = listing.inode else {
-                return if listing.cutoff {
-                    OutputFile::TooManyEntries
-                } else if listing.alias {
-                    OutputFile::Misnamed
-                } else {
-                    OutputFile::Missing
-                };
-            };
-            let stat = match observation {
-                Ok(stat) if stat.st_ino as u64 == inode => stat,
-                Ok(_) => continue,
+            let observed = match &observation {
+                Ok(stat) => Observation::Entry {
+                    inode: stat.st_ino as u64,
+                    kind: match stat.st_mode & libc::S_IFMT {
+                        libc::S_IFREG => None,
+                        libc::S_IFLNK => Some(OutputFileType::Link),
+                        libc::S_IFDIR => Some(OutputFileType::Directory),
+                        _ => Some(OutputFileType::Other),
+                    },
+                },
                 Err(e)
                     if matches!(
                         e.raw_os_error(),
                         Some(libc::ENOENT | libc::ELOOP | libc::ENXIO)
                     ) =>
                 {
-                    continue;
+                    Observation::Retry
                 }
-                Err(e) => return failure(e),
+                Err(e) => Observation::Failed(observation_failure(e)),
             };
-            let file_type = match stat.st_mode & libc::S_IFMT {
-                libc::S_IFREG => None,
-                libc::S_IFLNK => Some(OutputFileType::Link),
-                libc::S_IFDIR => Some(OutputFileType::Directory),
-                _ => Some(OutputFileType::Other),
-            };
-            if let Some(file_type) = file_type {
-                return OutputFile::NotRegular { file_type };
+            match decide(listing, observed) {
+                Decision::Outcome(outcome) => return outcome,
+                Decision::Retry => continue,
+                Decision::Accept => {}
             }
+            let stat = observation.expect("accepted regular observation");
+            let inode = stat.st_ino as u64;
             let (file, metadata) = match opened.expect("regular observation") {
                 Ok(f) => f,
                 Err(e)
@@ -393,12 +404,18 @@ unsafe fn set_errno(value: i32) {
 }
 
 fn failure(e: io::Error) -> OutputFile {
+    observation_failure(&e)
+}
+fn observation_failure(e: &io::Error) -> OutputFile {
     if e.raw_os_error() == Some(libc::EACCES) {
         OutputFile::Unreadable {
             os_error: e.raw_os_error().expect("permission errno"),
         }
     } else {
-        io_failure(e)
+        OutputFile::NotCollected {
+            reason: CollectionFailure::Io,
+            os_error: e.raw_os_error(),
+        }
     }
 }
 fn io_failure(e: io::Error) -> OutputFile {
@@ -434,134 +451,12 @@ fn fill(
     close(output)
 }
 
-fn close(file: File) -> io::Result<()> {
+pub(crate) fn close(file: File) -> io::Result<()> {
     // SAFETY: ownership of this fd was moved out of File, and it is closed exactly once.
     if unsafe { libc::close(file.into_raw_fd()) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
-    }
-}
-
-fn extract(
-    source: File,
-    budget: u64,
-    destination: &Path,
-    retained: &AtomicU64,
-    warnings: &mut Vec<IoScratchDetail>,
-    #[cfg(feature = "storage-test-hooks")] hooks: &crate::supervisor::file_io_hooks::Hooks,
-) -> OutputFile {
-    let mut copy = BoundedCopy {
-        written: 0,
-        created: false,
-    };
-    let outcome = copy
-        .run(
-            source,
-            budget,
-            destination,
-            retained,
-            #[cfg(feature = "storage-test-hooks")]
-            hooks,
-        )
-        .unwrap_or_else(io_failure);
-    if copy.created && !matches!(outcome, OutputFile::Collected { .. }) {
-        #[cfg(feature = "storage-test-hooks")]
-        let removed = hooks
-            .at("file_io.partial.unlink", 0)
-            .and_then(|()| std::fs::remove_file(destination));
-        #[cfg(not(feature = "storage-test-hooks"))]
-        let removed = std::fs::remove_file(destination);
-        match removed {
-            Ok(()) => {
-                retained.fetch_sub(copy.written, Ordering::AcqRel);
-            }
-            Err(_) => warnings.push(IoScratchDetail::PartialCopyKept),
-        }
-    }
-    outcome
-}
-
-/// What a bounded copy left on disk, also after an error.
-struct BoundedCopy {
-    written: u64,
-    created: bool,
-}
-impl BoundedCopy {
-    fn run(
-        &mut self,
-        mut source: File,
-        budget: u64,
-        destination: &Path,
-        retained: &AtomicU64,
-        #[cfg(feature = "storage-test-hooks")] hooks: &crate::supervisor::file_io_hooks::Hooks,
-    ) -> io::Result<OutputFile> {
-        #[cfg(feature = "storage-test-hooks")]
-        hooks.at("file_io.destination", 0)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)?;
-        self.created = true;
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 64 * 1024];
-        loop {
-            let len = (budget - self.written).min(buffer.len() as u64) as usize;
-            // At the cap, probe into memory only; the retained file never exceeds its reservation.
-            let n = loop {
-                #[cfg(feature = "storage-test-hooks")]
-                let result = hooks.read(&mut source, &mut buffer[..len.max(1)]);
-                #[cfg(not(feature = "storage-test-hooks"))]
-                let result = source.read(&mut buffer[..len.max(1)]);
-                match result {
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    result => break result?,
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            if len == 0 {
-                return Ok(OutputFile::TooLarge {
-                    bytes: budget + 1,
-                    budget,
-                });
-            }
-            let mut pending = &buffer[..n];
-            while !pending.is_empty() {
-                #[cfg(feature = "storage-test-hooks")]
-                let write = hooks
-                    .at("file_io.write", pending.len())
-                    .and_then(|()| output.write(pending));
-                #[cfg(not(feature = "storage-test-hooks"))]
-                let write = output.write(pending);
-                let n = match write {
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    result => result?,
-                };
-                if n == 0 {
-                    return Err(io::ErrorKind::WriteZero.into());
-                }
-                hash.update(&pending[..n]);
-                self.written += n as u64;
-                retained.fetch_add(n as u64, Ordering::AcqRel);
-                pending = &pending[n..];
-            }
-        }
-        output.flush()?;
-        close(output)?;
-        #[cfg(feature = "storage-test-hooks")]
-        hooks.at("file_io.extracted", 0)?;
-        let run = destination
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .expect("run");
-        Ok(OutputFile::Collected {
-            bytes: self.written,
-            sha256: hash.finalize().into(),
-            path: format!("{}/out/output", run.to_string_lossy()),
-        })
     }
 }
 

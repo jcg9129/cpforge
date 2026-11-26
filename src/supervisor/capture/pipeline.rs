@@ -167,7 +167,7 @@ impl Captures {
                     *setup,
                     credit,
                     admission.retained_counter().unwrap_or_default(),
-                    creation,
+                    || creation.check(),
                 )
                 .map(Box::new)
             })

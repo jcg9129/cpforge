@@ -65,3 +65,8 @@ pub(in crate::supervisor) use creation_pause::CreationPause;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod file_io;
+
+// A process-free filesystem adapter; production Windows still refuses io.
+#[cfg(all(test, feature = "storage-test-hooks", windows))]
+#[path = "file_io_stub.rs"]
+pub(crate) mod file_io;

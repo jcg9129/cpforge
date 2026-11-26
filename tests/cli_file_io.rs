@@ -1855,20 +1855,32 @@ impl Fixture {
         status: i32,
         change: impl FnOnce(&Path),
     ) -> (PathBuf, serde_json::Value, String) {
+        let mut change = Some(change);
+        self.paused_report_with_env(point, status, &[], |_, cwd, _| {
+            change.take().unwrap()(cwd);
+        })
+    }
+
+    fn paused_report_with_env(
+        &self,
+        points: &str,
+        status: i32,
+        settings: &[(&str, &str)],
+        mut change: impl FnMut(&str, &Path, &Path),
+    ) -> (PathBuf, serde_json::Value, String) {
         use std::io::{BufRead, BufReader, Read};
         use std::time::{Duration, Instant};
         let barriers = self.path("barriers");
         fs::create_dir(&barriers).unwrap();
         let log = self.path("operations");
+        let mut settings = settings.to_vec();
+        settings.extend([
+            ("CPF_STORAGE_PAUSE_AT", points),
+            ("CPF_STORAGE_BARRIER_DIR", barriers.to_str().unwrap()),
+            ("CPF_FILE_IO_LOG", log.to_str().unwrap()),
+        ]);
         let mut child = self
-            .command(
-                &["test", "--json"],
-                &[
-                    ("CPF_STORAGE_PAUSE_AT", point),
-                    ("CPF_STORAGE_BARRIER_DIR", barriers.to_str().unwrap()),
-                    ("CPF_FILE_IO_LOG", log.to_str().unwrap()),
-                ],
-            )
+            .command(&["test", "--json"], &settings)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1881,7 +1893,12 @@ impl Fixture {
             for line in BufReader::new(stdout).split(b'\n') {
                 let line = line.unwrap();
                 if line.starts_with(b"CPF-PAUSED ") {
-                    let _ = send.send(());
+                    let point = std::str::from_utf8(&line)
+                        .unwrap()
+                        .strip_prefix("CPF-PAUSED ")
+                        .unwrap()
+                        .to_owned();
+                    let _ = send.send(point);
                 } else {
                     doc.extend(line);
                     doc.push(b'\n');
@@ -1903,7 +1920,7 @@ impl Fixture {
             }
         }
         let mut child = Child(child);
-        receive
+        let first_point = receive
             .recv_timeout(Duration::from_secs(120))
             .expect("file-I/O barrier not reached");
         let jobs: Vec<_> = fs::read_dir(self.path(".cpforge/runs"))
@@ -1917,8 +1934,15 @@ impl Fixture {
             .map(|e| e.unwrap().path().join("cwd"))
             .find(|cwd| cwd.join("out.txt").is_file())
             .expect("solution cwd at barrier");
-        change(&cwd);
-        fs::write(barriers.join(format!("{point}.release")), b"release").unwrap();
+        let mut point = first_point;
+        loop {
+            change(&point, &cwd, &job);
+            fs::write(barriers.join(format!("{point}.release")), b"release").unwrap();
+            if points.rsplit(',').next() == Some(point.as_str()) {
+                break;
+            }
+            point = receive.recv_timeout(Duration::from_secs(20)).unwrap();
+        }
         let until = Instant::now() + Duration::from_secs(45);
         let exit = loop {
             if let Some(exit) = child.0.try_wait().unwrap() {
@@ -2135,5 +2159,337 @@ fn failed_io_scratch_removal_warns_and_excludes_the_staged_input_from_measuremen
                 .iter()
                 .any(|w| w["kind"] == "retention" && w["detail"] == "cwd_overflow")
         );
+    });
+}
+
+// The child detaches before the root exits, closes the capture pipes and waits
+// on a socket. Every mutation is requested only while the collector is paused.
+#[cfg(all(feature = "storage-test-hooks", unix))]
+struct Descendant {
+    listener: std::net::TcpListener,
+    stream: Option<std::net::TcpStream>,
+}
+#[cfg(all(feature = "storage-test-hooks", unix))]
+impl Descendant {
+    fn solution(fixture: &Fixture, initial: usize) -> Self {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let source = r#"#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cstdio>
+#include <fstream>
+#include <string>
+static void write(const char* name, const std::string& bytes) {
+    std::ofstream f(name, std::ios::binary); f << bytes; f.close();
+    if (!f) _exit(31);
+}
+int main() {
+    write("out.txt", std::string(INITIAL, 'x'));
+    int ready[2]; if (pipe(ready)) return 32;
+    pid_t root = getpid();
+    pid_t child = fork(); if (child < 0) return 33;
+    if (child) {
+        close(ready[1]); char c;
+        return read(ready[0], &c, 1) == 1 && c == 'r' ? 0 : 34;
+    }
+    close(ready[0]);
+    if (setsid() < 0) _exit(35);
+    close(0); close(1); close(2);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    timeval timeout{20, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    sockaddr_in address{}; address.sin_family = AF_INET;
+    address.sin_port = htons(PORT); address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address))) _exit(36);
+    if (write(ready[1], "r", 1) != 1) _exit(37);
+    close(ready[1]);
+    char action;
+    while (read(fd, &action, 1) == 1) {
+        if (action == 'q') _exit(0);
+        // Collection starts only after the root has been reaped.
+        if (getppid() == root) _exit(38);
+        if (action == 'a' && (rename("out.txt", "swap.tmp") || rename("swap.tmp", "OUT.TXT"))) _exit(39);
+        if (action == 'b') {
+            if (rename("out.txt", "accepted.txt")) _exit(40);
+            write("out.txt", "new\n");
+        }
+        if (action == 'c' && (rename("OUT.TXT", "swap.tmp") || rename("swap.tmp", "out.txt"))) _exit(41);
+        if (action == 'd') {
+            if (rename("out.txt", "accepted.txt")) _exit(42);
+            write("out.txt", "replacement\n");
+            std::ofstream f("accepted.txt", std::ios::app); f << "appended";
+            f.close(); if (!f) _exit(43);
+        }
+        if (action == 'g') {
+            std::ofstream f("out.txt", std::ios::app); f << std::string(4192, 'x');
+            f.close(); if (!f) _exit(44);
+        }
+        if (write(fd, "k", 1) != 1) _exit(45);
+    }
+    _exit(0);
+}
+"#;
+        fixture.write(
+            "problems/A/main.cpp",
+            &source
+                .replace("INITIAL", &initial.to_string())
+                .replace("PORT", &port.to_string()),
+        );
+        Self {
+            listener,
+            stream: None,
+        }
+    }
+
+    fn change(&mut self, action: u8) {
+        use std::io::{Read, Write};
+        let stream = self.stream.get_or_insert_with(|| {
+            // A collector barrier proves the root exited after the child
+            // connected and acknowledged readiness, so the connection is
+            // already queued; the bound only turns a descendant that failed
+            // before connecting into a failure instead of a hang.
+            self.listener.set_nonblocking(true).unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let stream = loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < until,
+                            "the descendant never connected"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("accept: {e}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(20)))
+                .unwrap();
+            stream
+        });
+        stream.write_all(&[action]).unwrap();
+        let mut ack = [0];
+        stream.read_exact(&mut ack).unwrap();
+        assert_eq!(
+            ack,
+            [b'k'],
+            "descendant survived the root and completed its mutation"
+        );
+    }
+}
+#[cfg(all(feature = "storage-test-hooks", unix))]
+impl Drop for Descendant {
+    fn drop(&mut self) {
+        use std::io::Write;
+        if let Some(stream) = &mut self.stream {
+            let _ = stream.write_all(b"q");
+        }
+    }
+}
+
+// F-29(a)-(d): the mutator is a surviving descendant, not the test driver.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn surviving_descendant_changes_spelling_inode_and_accepted_source_at_barriers() {
+    run_test(move || async move {
+        for variant in ['a', 'b', 'c', 'd'] {
+            let fixture = Fixture::new();
+            fixture.executable_problem("output = 'out.txt'", "");
+            fixture.cases(&[(
+                "one",
+                "",
+                Some(if variant == 'b' { "new\n" } else { "xxx" }),
+            )]);
+            #[cfg(windows)]
+            assert!(fixture.test_report(10).is_none());
+            #[cfg(unix)]
+            {
+                let mut descendant = Descendant::solution(&fixture, 3);
+                let points = if variant == 'd' {
+                    "file_io.extracted"
+                } else {
+                    "file_io.before_listing,file_io.after_listing"
+                };
+                let misnamed = matches!(variant, 'a' | 'c');
+                let (job, doc, log) = fixture.paused_report_with_env(
+                    points,
+                    i32::from(misnamed),
+                    &[("CPF_FILE_IO_UNVERIFIED", "1")],
+                    |point, cwd, job| match point {
+                        "file_io.before_listing" => {
+                            descendant.change(if variant == 'b' { b'b' } else { b'a' })
+                        }
+                        "file_io.after_listing" if variant == 'c' => descendant.change(b'c'),
+                        "file_io.extracted" => {
+                            let copy = cwd.parent().unwrap().join("out").join("output");
+                            assert!(copy.starts_with(job));
+                            let before = fs::read(&copy).unwrap();
+                            descendant.change(b'd');
+                            assert_eq!(fs::read(copy).unwrap(), before);
+                            assert_eq!(fs::read(cwd.join("out.txt")).unwrap(), b"replacement\n");
+                            assert_eq!(fs::read(cwd.join("accepted.txt")).unwrap(), b"xxxappended");
+                        }
+                        _ => {}
+                    },
+                );
+                assert_job(
+                    &doc,
+                    serde_json::json!({"input":null,"output":"out.txt","stdin":"test_input"}),
+                );
+                assert_test(
+                    &doc,
+                    "one",
+                    if misnamed { "wrong_answer" } else { "passed" },
+                    if misnamed {
+                        "output_rejected"
+                    } else {
+                        "passed"
+                    },
+                    "exited_zero",
+                    Some(if misnamed { "misnamed" } else { "collected" }),
+                );
+                if misnamed {
+                    assert_eq!(
+                        test_entry(&doc, "one")["check"]["reason"],
+                        "output_misnamed"
+                    );
+                } else {
+                    assert_collected(
+                        &job,
+                        test_entry(&doc, "one"),
+                        if variant == 'b' { b"new\n" } else { b"xxx" },
+                    );
+                }
+                let observations = log
+                    .lines()
+                    .filter(|l| l.starts_with("file_io.before_listing "))
+                    .count();
+                assert_eq!(observations, if variant == 'b' { 2 } else { 1 }, "{log}");
+                for point in points.split(',') {
+                    assert!(log.contains(&format!("{point} 1 ")), "{log}");
+                }
+                assert!(
+                    doc["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|w| w["kind"] == "cleanup_unverified")
+                );
+            }
+        }
+    });
+}
+
+// F-32: real growth after accepted fstat, with and without partial unlink failure.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn surviving_descendant_growth_probes_without_writing_beyond_the_reservation() {
+    run_test(move || async move {
+        for kept in [false, true] {
+            let fixture = Fixture::new();
+            fixture.executable_problem("output = 'out.txt'", "[config.run]\nstdout_cap = 4096\n");
+            let answer = "x".repeat(4096);
+            fixture.cases(&[("one", "", Some(answer.as_str()))]);
+            #[cfg(windows)]
+            {
+                let _ = kept;
+                assert!(fixture.test_report(10).is_none());
+            }
+            #[cfg(unix)]
+            {
+                let mut descendant = Descendant::solution(&fixture, 4000);
+                let (job, doc, log) = fixture.paused_report_with_env(
+                    "file_io.read",
+                    1,
+                    &[
+                        ("CPF_FILE_IO_UNVERIFIED", "1"),
+                        ("CPF_FILE_IO_READ_CHUNK", "1024"),
+                        (
+                            "CPF_FILE_IO_FAULTS",
+                            if kept {
+                                "file_io.partial.unlink=EIO"
+                            } else {
+                                ""
+                            },
+                        ),
+                    ],
+                    |_, cwd, _| {
+                        assert_eq!(fs::metadata(cwd.join("out.txt")).unwrap().len(), 4000);
+                        descendant.change(b'g');
+                        assert_eq!(fs::metadata(cwd.join("out.txt")).unwrap().len(), 8192);
+                    },
+                );
+                assert_job(
+                    &doc,
+                    serde_json::json!({"input":null,"output":"out.txt","stdin":"test_input"}),
+                );
+                assert_test(
+                    &doc,
+                    "one",
+                    "output_budget",
+                    "output_rejected",
+                    "output_budget",
+                    Some("too_large"),
+                );
+                let test = test_entry(&doc, "one");
+                assert_eq!(test["output_file"]["bytes"], "4097");
+                assert_eq!(test["output_file"]["budget"], "4096");
+                assert_eq!(test["check"]["reason"], "output_too_large");
+                assert_eq!(test["class"]["stream"], "output_file");
+                let execution =
+                    &doc["executions"][test["executions"]["first"].as_u64().unwrap() as usize];
+                assert_eq!(execution["summary"]["class"]["kind"], "exited_zero");
+                let copied: Vec<usize> = log
+                    .lines()
+                    .filter(|l| l.starts_with("file_io.copied "))
+                    .map(|l| l.split_whitespace().nth(2).unwrap().parse().unwrap())
+                    .collect();
+                assert_eq!(copied, [1024, 2048, 3072, 4096]);
+                let values = |point: &str| -> Vec<u64> {
+                    log.lines()
+                        .filter(|line| line.starts_with(point))
+                        .map(|line| line.split_whitespace().nth(2).unwrap().parse().unwrap())
+                        .collect()
+                };
+                assert_eq!(values("file_io.copy_length "), [1024, 2048, 3072, 4096]);
+                // The charge at the first collection point includes the
+                // output-file reservation; copying and probing never add to it.
+                let charged = values("file_io.charged ");
+                let limits = values("file_io.limit ");
+                assert!(!charged.is_empty());
+                assert_eq!(charged.len(), limits.len());
+                assert!(
+                    charged
+                        .iter()
+                        .zip(limits)
+                        .all(|(charged, limit)| *charged <= limit)
+                );
+                assert!(charged.iter().all(|c| *c <= charged[0]), "{log}");
+                let probe = log.find("file_io.probe 1 4096 ").unwrap();
+                assert!(log[..probe].contains("file_io.copied 4 4096 "));
+                assert!(log[probe..].contains("file_io.read 5 1 "));
+                assert!(log.contains("file_io.partial.unlink 1 "));
+                let run = execution["run"].as_str().unwrap();
+                let copy = job.join(run).join("out").join("output");
+                assert_eq!(copy.exists(), kept);
+                if kept {
+                    assert_eq!(fs::metadata(copy).unwrap().len(), 4096);
+                }
+                assert_eq!(
+                    doc["warnings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|w| w["kind"] == "io_scratch" && w["detail"] == "partial_copy_kept"),
+                    kept
+                );
+            }
+        }
     });
 }

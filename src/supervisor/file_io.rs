@@ -13,10 +13,18 @@ pub struct OutputFileSpec {
     pub budget: u64,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    all(test, feature = "storage-test-hooks")
+))]
 pub(crate) use implementation::*;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    all(test, feature = "storage-test-hooks")
+))]
 mod implementation {
     use super::*;
     use crate::report::{CollectionFailure, IoScratchDetail, OutputFile};
@@ -68,6 +76,8 @@ mod implementation {
         pub(crate) observation: Option<crate::jobs::engine::Observation>,
         #[cfg(feature = "storage-test-hooks")]
         pub(crate) execution: u32,
+        #[cfg(all(test, feature = "storage-test-hooks"))]
+        pub(crate) hooks: Option<crate::supervisor::file_io_hooks::Hooks>,
     }
     #[derive(Debug)]
     pub(crate) struct Scratch {
@@ -138,17 +148,27 @@ mod implementation {
         frozen: bool,
     }
     impl FileCapture {
-        pub(in crate::supervisor) fn prepare(
+        pub(crate) fn prepare(
             setup: FileIoSetup,
             credit: Option<Credits>,
             retained: Arc<AtomicU64>,
-            creation: &crate::supervisor::creation::CreationState,
+            check: impl Fn() -> Result<(), NotStarted>,
         ) -> Result<Self, NotStarted> {
-            creation.check()?;
+            check()?;
             let directory = crate::supervisor::sys::file_io::Directory::open(&setup.cwd)
                 .map_err(NotStarted::Setup)?;
             #[cfg(feature = "storage-test-hooks")]
             let directory = directory.observed(setup.observation, setup.execution);
+            #[cfg(all(test, feature = "storage-test-hooks"))]
+            let directory = {
+                let mut directory = directory;
+                if let Some(hooks) = setup.hooks {
+                    directory.set_hooks(hooks);
+                }
+                directory
+            };
+            #[cfg(feature = "storage-test-hooks")]
+            let directory = directory.accounted(setup.owner.budget().cloned());
             let bytes = setup.reservation.as_ref().map_or(0, Reservation::bytes);
             let mut scratch = Scratch {
                 directory,
@@ -171,7 +191,7 @@ mod implementation {
                     }
                     return Err(NotStarted::Setup(e.error));
                 }
-                if let Err(e) = creation.check() {
+                if let Err(e) = check() {
                     scratch.clear_input();
                     return Err(e);
                 }
@@ -330,7 +350,7 @@ mod implementation {
         /// is removed before the outcome is reported (E §5.6 handoff). The
         /// output-file worker is still waiting for its start, so the join is
         /// bounded by its own removal.
-        pub(in crate::supervisor) fn abort_setup(&mut self) {
+        pub(crate) fn abort_setup(&mut self) {
             drop(self.start.take());
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();

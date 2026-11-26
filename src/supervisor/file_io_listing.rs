@@ -9,6 +9,46 @@ pub(crate) struct Listing {
 }
 
 #[derive(Debug)]
+pub(crate) enum Observation {
+    Entry {
+        inode: u64,
+        kind: Option<crate::report::OutputFileType>,
+    },
+    Retry,
+    Failed(crate::report::OutputFile),
+}
+#[derive(Debug)]
+pub(crate) enum Decision {
+    Accept,
+    Retry,
+    Outcome(crate::report::OutputFile),
+}
+pub(crate) fn decide(listing: Listing, observed: Observation) -> Decision {
+    use crate::report::OutputFile;
+    let Some(inode) = listing.inode else {
+        return Decision::Outcome(if listing.cutoff {
+            OutputFile::TooManyEntries
+        } else if listing.alias {
+            OutputFile::Misnamed
+        } else {
+            OutputFile::Missing
+        });
+    };
+    match observed {
+        Observation::Entry {
+            inode: observed, ..
+        } if observed != inode => Decision::Retry,
+        Observation::Entry {
+            kind: Some(file_type),
+            ..
+        } => Decision::Outcome(OutputFile::NotRegular { file_type }),
+        Observation::Entry { .. } => Decision::Accept,
+        Observation::Retry => Decision::Retry,
+        Observation::Failed(outcome) => Decision::Outcome(outcome),
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct Scan {
     name: Vec<u8>,
     key: String,
@@ -47,5 +87,56 @@ impl Scan {
 
     pub(crate) fn finish(self) -> Listing {
         self.result
+    }
+}
+
+#[cfg(all(test, feature = "storage-test-hooks"))]
+mod tests {
+    use super::*;
+    use crate::report::OutputFile;
+    #[test]
+    fn spelling_is_final_and_only_matching_inodes_can_be_accepted() {
+        for observed in [
+            Observation::Retry,
+            Observation::Failed(OutputFile::Unreadable { os_error: 5 }),
+            Observation::Entry {
+                inode: 42,
+                kind: None,
+            },
+        ] {
+            assert!(matches!(
+                decide(
+                    Listing {
+                        alias: true,
+                        ..Listing::default()
+                    },
+                    observed
+                ),
+                Decision::Outcome(OutputFile::Misnamed)
+            ));
+        }
+        assert!(matches!(
+            decide(
+                Listing {
+                    inode: Some(43),
+                    ..Listing::default()
+                },
+                Observation::Entry {
+                    inode: 42,
+                    kind: None
+                }
+            ),
+            Decision::Retry
+        ));
+        assert!(matches!(
+            decide(
+                Listing {
+                    inode: Some(42),
+                    ..Listing::default()
+                },
+                Observation::Retry
+            ),
+            Decision::Retry
+        ));
     }
 }

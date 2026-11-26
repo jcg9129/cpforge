@@ -171,8 +171,15 @@ impl ChildEnd {
 ))]
 pub(crate) mod file_io_listing;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    all(test, feature = "storage-test-hooks")
+))]
+mod file_io_copy;
+
 #[cfg(all(
     feature = "storage-test-hooks",
-    any(target_os = "linux", target_os = "macos")
+    any(test, target_os = "linux", target_os = "macos")
 ))]
-mod file_io_hooks;
+pub(crate) mod file_io_hooks;

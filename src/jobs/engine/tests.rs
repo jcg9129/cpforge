@@ -1348,7 +1348,11 @@ fn stream_reservations_rollback_atomically_and_count_actual_writes() {
     let (reservation, metadata) = reserve(&budget, 10).unwrap();
     let retained_bytes = Arc::new(AtomicU64::new(0));
     let resources = RunResources {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            all(test, feature = "storage-test-hooks")
+        ))]
         file_io: None,
         reservation,
         _owner: ready.owner.clone(),
@@ -3512,3 +3516,7 @@ fn stub_listing_boundary_reconciles_every_test_execution_on_all_platforms() {
 ))]
 #[path = "cwd_tests.rs"]
 mod cwd_tests;
+
+#[cfg(feature = "storage-test-hooks")]
+#[path = "file_io_tests.rs"]
+mod file_io_tests;

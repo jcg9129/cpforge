@@ -16,7 +16,11 @@ use crate::supervisor::CancelToken;
 /// record. A stalled writer still owns the full reservation and job lease.
 #[derive(Debug)]
 pub struct RunResources {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        all(test, feature = "storage-test-hooks")
+    ))]
     pub(crate) file_io: Option<Box<crate::supervisor::file_io::FileIoSetup>>,
     pub(super) reservation: Reservation,
     pub(super) _owner: JobOwner,
@@ -508,8 +512,12 @@ fn not_started(reason: crate::supervisor::NotStarted) -> ExecutionRecord {
     ExecutionRecord::NotStarted(start_failure(reason))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn start_failure(reason: crate::supervisor::NotStarted) -> StartFailure {
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    all(test, feature = "storage-test-hooks")
+))]
+pub(super) fn start_failure(reason: crate::supervisor::NotStarted) -> StartFailure {
     use crate::report::NotStartedReason as R;
     use crate::supervisor::NotStarted as N;
     let mut failure = super::StartFailure {

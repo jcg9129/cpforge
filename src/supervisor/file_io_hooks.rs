@@ -9,14 +9,19 @@
 //! `file_io.staging.write`, `file_io.unlink`, `file_io.partial.unlink`.
 //! Every point also supports the existing CPF_STORAGE_PAUSE_AT barriers.
 //! `file_io.before_listing`, `file_io.after_listing`, `file_io.extracted`
-//! are observation barriers only. The barrier directory protocol permits an
+//! are observation barriers only; so are `file_io.copied` (size: bytes
+//! written to the copy so far), `file_io.copy_length` (size: the copy's
+//! on-disk length) and `file_io.probe` (before the 1-byte read into memory
+//! at the cap). The barrier directory protocol permits an
 //! external driver to cancel the job while a worker remains blocked.
 //!
 //! `CPF_FILE_IO_READ_SIZE` replaces the accepted handle's read stream with
 //! that many `x` bytes (independent of fstat); `CPF_FILE_IO_READ_CHUNK` bounds
 //! each read. `CPF_FILE_IO_LISTING_POSITION` stubs the exact name's position,
 //! retaining the real inode. `CPF_FILE_IO_LOG` appends point, per-point call
-//! count, requested size and thread identity. No hook state exists in a
+//! count, requested size and thread identity; once the directory knows the
+//! job's budget, each point also appends `file_io.charged` (retained plus
+//! reserved bytes) and `file_io.limit` lines. No hook state exists in a
 //! feature-disabled build. Settings are captured per directory, so inline
 //! tests can supply local Hooks without changing the process environment.
 //! `CPF_FILE_IO_UNVERIFIED` marks the cleanup result unverified before
@@ -32,6 +37,7 @@ use std::sync::Mutex;
 pub(crate) struct Hooks {
     pub(crate) observation: Option<(crate::jobs::engine::Observation, u32)>,
     pub(crate) faults: String,
+    pub(crate) budget: Option<std::sync::Arc<crate::storage::budget::JobBudget>>,
     pub(crate) read_size: Option<u64>,
     pub(crate) read_chunk: Option<usize>,
     pub(crate) listing_position: Option<u64>,
@@ -40,6 +46,16 @@ pub(crate) struct Hooks {
     read: Mutex<u64>,
 }
 impl Hooks {
+    #[cfg(test)]
+    pub(crate) fn testing(faults: &str, read_size: Option<u64>) -> Self {
+        Self {
+            faults: faults.into(),
+            read_size,
+            read_chunk: Some(1024),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn environment() -> Self {
         Self {
             faults: std::env::var("CPF_FILE_IO_FAULTS").unwrap_or_default(),
@@ -74,6 +90,21 @@ impl Hooks {
                 "{point} {count} {size} {:?}",
                 std::thread::current().id()
             )?;
+            if let Some(budget) = &self.budget {
+                let usage = budget.usage();
+                writeln!(
+                    file,
+                    "file_io.charged {count} {} {:?}",
+                    usage.retained + usage.reserved,
+                    std::thread::current().id()
+                )?;
+                writeln!(
+                    file,
+                    "file_io.limit {count} {} {:?}",
+                    budget.limit(),
+                    std::thread::current().id()
+                )?;
+            }
         }
         if let Some((observer, execution)) = &self.observation {
             (observer.0)(crate::jobs::engine::Point::FileIo {
@@ -134,6 +165,18 @@ fn errno(name: &str) -> Option<i32> {
         "EPERM" => return Some(libc::EPERM),
         "EINTR" => return Some(libc::EINTR),
         "ENOENT" => return Some(libc::ENOENT),
+        _ => {}
+    }
+    // Windows codes whose io::ErrorKind matches the errno's (the stub
+    // filesystem of process-free tests): ERROR_IO_DEVICE, ERROR_DISK_FULL,
+    // ERROR_ACCESS_DENIED, WSAEINTR (Interrupted), ERROR_FILE_NOT_FOUND.
+    #[cfg(windows)]
+    match name {
+        "EIO" => return Some(1117),
+        "ENOSPC" => return Some(112),
+        "EACCES" | "EPERM" => return Some(5),
+        "EINTR" => return Some(10004),
+        "ENOENT" => return Some(2),
         _ => {}
     }
     name.parse().ok()

@@ -1639,7 +1639,11 @@ impl Context<'_> {
                         .path
                         .clone(),
                 });
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            all(test, feature = "storage-test-hooks")
+        ))]
         let io_state = io.map(|_| crate::supervisor::file_io::FileIoState::default());
         let stdin = if stage_input.is_some() {
             None
@@ -1764,7 +1768,11 @@ impl Context<'_> {
             if let Some((streams, meta)) = reservations {
                 metadata = Some(meta);
                 resources = Some(RunResources {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        all(test, feature = "storage-test-hooks")
+                    ))]
                     file_io: io_state.as_ref().map(|state| {
                         Box::new(crate::supervisor::file_io::FileIoSetup {
                             cwd: directory.join("cwd"),
@@ -1783,6 +1791,8 @@ impl Context<'_> {
                             observation: self.observer.cloned(),
                             #[cfg(feature = "storage-test-hooks")]
                             execution: plan.index,
+                            #[cfg(all(test, feature = "storage-test-hooks"))]
+                            hooks: None,
                         })
                     }),
                     reservation: streams,
@@ -2054,13 +2064,21 @@ impl Context<'_> {
         }
         ExecutionReport {
             io_warnings: {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    all(test, feature = "storage-test-hooks")
+                ))]
                 {
                     io_state
                         .as_ref()
                         .map_or_else(Vec::new, |state| state.warnings())
                 }
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    all(test, feature = "storage-test-hooks")
+                )))]
                 {
                     Vec::new()
                 }

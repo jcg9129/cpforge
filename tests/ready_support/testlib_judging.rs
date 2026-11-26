@@ -516,6 +516,13 @@ impl Executor for Observed {
     ) -> cpforge::jobs::engine::JobFuture<'_, cpforge::jobs::engine::PreparedRun> {
         self.real.prepare_run(preparation, cancel)
     }
+    fn finish_judge(
+        &mut self,
+        work: Box<dyn FnOnce() + Send>,
+        deadline: tokio::time::Instant,
+    ) -> cpforge::jobs::engine::JobFuture<'_, Result<(), cpforge::report::RunNote>> {
+        self.real.finish_judge(work, deadline)
+    }
     fn execute(
         &mut self,
         spec: std::sync::Arc<cpforge::jobs::engine::ExecutionSpec>,
