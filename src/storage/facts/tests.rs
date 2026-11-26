@@ -53,6 +53,7 @@ fn fact(n: u64) -> FactRecord {
         verdict: JobVerdict::Passed,
         source: [0x12; 32],
         tests: [0xab; 32],
+        judge: None,
         capture_check: CaptureCheck::Checked,
     }
 }
@@ -126,7 +127,7 @@ fn codec_validates_all_fields_after_schema_and_preserves_u64_range() {
         ("job", "bad"),
         ("finished_at", "2026-02-30T00:00:00.000Z"),
         ("finished_at", "2026-01-01T24:00:00.000Z"),
-        ("verdict", "cancelled"),
+        ("verdict", "not_a_verdict"),
         ("source", "ABC"),
         ("tests", "abcd"),
     ] {
@@ -141,6 +142,51 @@ fn codec_validates_all_fields_after_schema_and_preserves_u64_range() {
         );
     }
 }
+#[test]
+fn every_job_verdict_and_optional_judge_round_trip() {
+    for &verdict in JobVerdict::ALL {
+        for judge in [None, Some([0; 32]), Some([0xab; 32])] {
+            let mut expected = fact(1);
+            expected.verdict = verdict;
+            expected.judge = judge;
+            let bytes = expected.encode();
+            assert!(
+                matches!(classify_fact(&bytes), Record::Valid(actual) if actual == expected),
+                "{verdict:?} {judge:?}"
+            );
+            let document: DocumentMut = String::from_utf8(bytes).unwrap().parse().unwrap();
+            assert_eq!(document.contains_key("judge"), judge.is_some());
+            if judge == Some([0xab; 32]) {
+                assert_eq!(
+                    document["judge"].as_str(),
+                    Some("abababababababababababababababababababababababababababababababab")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn optional_judge_requires_a_lowercase_hex_digest() {
+    let encoded = String::from_utf8(fact(1).encode()).unwrap();
+    for judge in [
+        "''",
+        "'abcd'",
+        "'ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB'",
+        "'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'",
+        "42",
+        "false",
+        "[]",
+        "{}",
+    ] {
+        let bytes = format!("judge = {judge}\n{encoded}");
+        assert!(
+            matches!(classify_fact(bytes.as_bytes()), Record::Malformed(_)),
+            "{judge}"
+        );
+    }
+}
+
 #[test]
 fn every_publication_decision_row_and_read_classification() {
     let f = Fixture::new();

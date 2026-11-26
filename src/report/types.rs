@@ -15,6 +15,7 @@ macro_rules! tokens {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
         pub enum $name { $($variant),+ }
         impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
             pub const fn wire_token(self) -> &'static str {
                 match self { $(Self::$variant => $token),+ }
             }
@@ -652,6 +653,7 @@ pub type CommandOutcome = ExecutionResult;
 tokens! {
     pub enum JobVerdict {
         InternalError => "internal_error", Infrastructure => "infrastructure", Cancelled => "cancelled",
+        SubmitVersionMismatch => "submit_version_mismatch", SubmitFailed => "submit_failed",
         BuildFailed => "build_failed", WallDeadline => "wall_deadline", OutputBudget => "output_budget", Signal => "signal",
         NonzeroExit => "nonzero_exit", CheckerFailed => "checker_failed", WrongAnswer => "wrong_answer",
         PresentationError => "presentation_error", Scored => "scored",

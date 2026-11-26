@@ -45,6 +45,10 @@ impl JobId {
     /// Years outside 0000..=9999 and randomness failures are errors. Callers use
     /// `create_dir` and generate again on collision; an id never reuses a job.
     pub fn generate(now: SystemTime) -> io::Result<Self> {
+        #[cfg(feature = "storage-test-hooks")]
+        if let Ok(id) = std::env::var("CPF_STORAGE_FIXED_JOB_ID") {
+            return Self::parse(&id).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e));
+        }
         let timestamp = utc_timestamp(now)?;
         let mut random = [0_u8; 8];
         getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;

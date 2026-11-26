@@ -60,6 +60,9 @@
 //! (successful atomic replacement itself leaves no temp). Set
 //! `CPF_STORAGE_FACT_RECOVERY_REMOVE_FAILURE=<path>` to fail recovery of that
 //! exact leftover only on the fact's lock acquisition.
+//! Golden fact vectors: `CPF_STORAGE_FIXED_JOB_ID=<valid id>` overrides job-id
+//! generation and `CPF_STORAGE_FIXED_FACT_TIME_MS=<Unix milliseconds>` supplies
+//! the fact publication clock. Each fixed id still requires an exclusive directory.
 //! `CPF_STORAGE_SIGNAL_READY=<path>` publishes a first-notification acknowledgement
 //! from the control thread, for deterministic force-exit debounce tests.
 //! `CPF_STORAGE_RUN_WAITING=<path>` publishes the pid when the executor starts

@@ -507,6 +507,11 @@ def verify():
         assert encode(value) == raw, path
         if "schema" in value:
             assert raw.startswith(b'{"schema":1,"document":'), path
+        if isinstance(value, dict) and value.get("document") == "status":
+            for problem in value["problems"]:
+                for target in problem["targets"]:
+                    assert list(target) == ["target", "fact_state", "comparison", "last_verdict", "finished_at", "capture_check", "judge"]
+                    assert target["judge"] in ["none", "unchanged", "changed", "unknown"]
         for report in [value, value.get("report") if isinstance(value, dict) else None]:
             if isinstance(report, dict) and report.get("document") == "job_report":
                 job_report_members(report, path)

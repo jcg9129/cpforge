@@ -612,6 +612,19 @@ fn testlib_execution_and_platform_refusal_with_config_precedence() {
     let doc = document(&output);
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let fact = fs::read_to_string(fixture.path(".cpforge/facts/A/solution.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            fact["judge"].as_str(),
+            doc["fingerprints"]["judge"].as_str()
+        );
+        assert_eq!(fact["verdict"].as_str(), Some("scored"));
+        assert!(matches!(
+            cpforge::storage::facts::read_fact(fixture.path(".cpforge/facts/A/solution.toml")),
+            cpforge::storage::Record::Valid(_)
+        ));
         assert_eq!(doc["tests"][0]["verdict"]["kind"], "scored");
         assert_eq!(doc["tests"][0]["judges"][0]["result"]["raw"], "12.5");
         assert_eq!(doc["tests"][0]["score"], "12.5");

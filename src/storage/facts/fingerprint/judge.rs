@@ -45,6 +45,84 @@ pub struct JudgeFingerprintRole {
     pub seed: SeedMode,
 }
 
+impl JudgeFingerprintRole {
+    /// The same composed, unexpanded settings for freeze and read-only status.
+    pub(crate) fn from_spec(spec: &crate::config::RoleSpec) -> Self {
+        use crate::config::{RoleInput, Sourced, TargetPlan};
+        let paths = |paths: &[Sourced<String>]| -> Vec<PathBuf> {
+            paths.iter().map(|p| p.value.split('/').collect()).collect()
+        };
+        let origin = match &spec.input {
+            RoleInput::Built(b) => {
+                let target = Box::new(TargetPlan::for_role(spec));
+                JudgeFingerprintOrigin::Built(Box::new(JudgeFingerprintBuilt {
+                    sources: paths(&b.sources),
+                    support_files: paths(&b.support_files),
+                    assets: paths(&spec.assets),
+                    language: b.language.value.clone(),
+                    entry: b.entry.as_ref().map(|e| e.value.clone()),
+                    build: target.build.clone(),
+                    run: target.run.clone(),
+                }))
+            }
+            RoleInput::Prebuilt(p) => JudgeFingerprintOrigin::Prebuilt {
+                program: p.program.value.split('/').collect(),
+                assets: paths(&spec.assets),
+            },
+        };
+        Self {
+            profile: spec.profile.value,
+            files: Vec::new(),
+            origin,
+            deadline_us: spec.deadline_ms.as_ref().map(|d| d.value * 1000),
+            stdout_cap: spec.stdout_cap.as_ref().map(|c| c.value),
+            stderr_cap: spec.stderr_cap.as_ref().map(|c| c.value),
+            seed: spec.seed.as_ref().map_or(SeedMode::None, |s| s.value),
+        }
+    }
+}
+
+/// Read current role files with no admission, tool resolution or filesystem writes.
+/// The streaming encoder is also used for frozen job-owned copies.
+pub(crate) fn current_judge_fingerprint(
+    check: Option<&crate::config::CheckConfig>,
+    dir: &std::path::Path,
+) -> io::Result<Option<[u8; 32]>> {
+    use crate::config::ProblemPath;
+    use crate::storage::inputs::{CapturedSourceCopy, SourceRole};
+    let Some(check) = check else { return Ok(None) };
+    let mut slots = [None, None, None];
+    let mut files: [Vec<CapturedSourceCopy>; 3] = std::array::from_fn(|_| Vec::new());
+    for (index, spec) in [
+        check.checker.as_deref(),
+        check.validator.as_deref(),
+        check.interactive.as_ref().map(|i| &i.interactor),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(spec) = spec else { continue };
+        slots[index] = Some(JudgeFingerprintRole::from_spec(spec));
+        for path in spec.captured_paths() {
+            let problem_path = ProblemPath::from_role(path);
+            let relative: PathBuf = problem_path.components().iter().collect();
+            let content_path = crate::storage::checked_path(dir, &relative, false)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let file = crate::tests_store::open_regular(&content_path)
+                .map_err(|e| io::Error::other(format!("{}: {e}", relative.display())))?;
+            files[index].push(CapturedSourceCopy {
+                role: SourceRole::Asset,
+                problem_path,
+                copy_path: content_path,
+                len: file.metadata()?.len(),
+                sha256: [0; 32],
+            });
+        }
+    }
+    let copies = files.each_ref().map(|files| files.iter().collect());
+    judge_fingerprint_from_copies(&check.report_config(), &slots, &copies)
+}
+
 /// Slots are checker, validator, interactor, including absent-role tags.
 /// A role-free problem has no judge fingerprint.
 pub fn judge_fingerprint(
@@ -68,7 +146,8 @@ pub fn encode_judge(
     encode_judge_files(out, check, roles, None)
 }
 
-/// Stream only job-owned copies; large role files never enter a Vec of bytes.
+/// Stream regular role files: frozen copies for jobs, originals for status.
+/// Large role files never enter a Vec of bytes.
 pub fn judge_fingerprint_from_copies(
     check: &CheckConfig,
     roles: &[Option<JudgeFingerprintRole>; 3],

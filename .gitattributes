@@ -1,2 +1,4 @@
 # Vendored CI fixtures stay byte-identical on every checkout (hash-pinned).
 tests/fixtures/testlib/** -text
+# Golden judge-fact vectors are compared byte for byte on every OS.
+tests/fixtures/judge_facts/** -text

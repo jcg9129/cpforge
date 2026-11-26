@@ -627,7 +627,9 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
                 JobVerdict::CheckerFailed => Some(LabelToken::CheckerFailed),
                 JobVerdict::WrongAnswer => Some(LabelToken::WrongAnswer),
                 JobVerdict::Unchecked => Some(LabelToken::Unchecked),
-                JobVerdict::NoTests => None,
+                JobVerdict::NoTests
+                | JobVerdict::SubmitVersionMismatch
+                | JobVerdict::SubmitFailed => None,
                 JobVerdict::PresentationError => Some(LabelToken::PresentationError),
                 JobVerdict::Scored => Some(LabelToken::Points),
                 JobVerdict::SessionLimit => Some(LabelToken::SessionLimit),

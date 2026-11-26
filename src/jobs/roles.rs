@@ -278,20 +278,9 @@ fn fingerprint(
     check: &crate::config::CheckConfig,
     roles: &[ReadyRole<'_>],
 ) -> std::io::Result<Option<[u8; 32]>> {
-    use crate::config::RoleInput;
-    use crate::report::SeedMode;
-    use crate::storage::facts::fingerprint::{
-        JudgeFingerprintBuilt, JudgeFingerprintOrigin, JudgeFingerprintRole,
-        judge_fingerprint_from_copies,
-    };
+    use crate::storage::facts::fingerprint::{JudgeFingerprintRole, judge_fingerprint_from_copies};
     let mut slots = [None, None, None];
     let mut copies: [Vec<_>; 3] = std::array::from_fn(|_| Vec::new());
-    let paths = |paths: &[crate::config::Sourced<String>]| -> Vec<PathBuf> {
-        paths
-            .iter()
-            .map(|p| p.value.split('/').collect::<PathBuf>())
-            .collect()
-    };
     for role in roles {
         let index = match role.captured.role {
             RoleName::Checker => 0,
@@ -299,32 +288,8 @@ fn fingerprint(
             RoleName::Interactor => 2,
             _ => unreachable!("judging role"),
         };
-        let spec = &role.captured.spec;
-        let origin = match &spec.input {
-            RoleInput::Built(b) => JudgeFingerprintOrigin::Built(Box::new(JudgeFingerprintBuilt {
-                sources: paths(&b.sources),
-                support_files: paths(&b.support_files),
-                assets: paths(&spec.assets),
-                language: b.language.value.clone(),
-                entry: b.entry.as_ref().map(|e| e.value.clone()),
-                build: role.target.build.clone(),
-                run: role.target.run.clone(),
-            })),
-            RoleInput::Prebuilt(p) => JudgeFingerprintOrigin::Prebuilt {
-                program: p.program.value.split('/').collect(),
-                assets: paths(&spec.assets),
-            },
-        };
         copies[index] = role.captured.files.files().iter().collect();
-        slots[index] = Some(JudgeFingerprintRole {
-            profile: spec.profile.value,
-            files: vec![],
-            origin,
-            deadline_us: spec.deadline_ms.as_ref().map(|d| d.value * 1000),
-            stdout_cap: spec.stdout_cap.as_ref().map(|c| c.value),
-            stderr_cap: spec.stderr_cap.as_ref().map(|c| c.value),
-            seed: spec.seed.as_ref().map_or(SeedMode::None, |s| s.value),
-        });
+        slots[index] = Some(JudgeFingerprintRole::from_spec(&role.captured.spec));
     }
     judge_fingerprint_from_copies(&check.report_config(), &slots, &copies)
 }

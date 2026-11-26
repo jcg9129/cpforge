@@ -49,6 +49,7 @@ impl TestFacts {
                 verdict: JobVerdict::Passed,
                 source: [0; 32],
                 tests: [0; 32],
+                judge: ready.judging.as_ref().and_then(|j| j.judge_fingerprint),
                 capture_check: ready.capture_check.clone(),
             },
             fingerprints: None,
@@ -94,7 +95,7 @@ impl PhaseHooks for TestFacts {
                 return;
             }
             self.record.verdict = primary;
-            match crate::report::wire::timestamp(std::time::SystemTime::now()) {
+            match fact_finish_time().and_then(crate::report::wire::timestamp) {
                 Ok(time) => self.record.finished_at = time,
                 Err(error) => {
                     self.failed(error.to_string());
@@ -161,4 +162,18 @@ impl PhaseHooks for TestFacts {
         }
         Some((self.fact.clone(), warnings))
     }
+}
+
+// Feature-gated clock injection for byte-exact fact vectors, alongside storage's
+// process crash hooks. Normal builds always use the actual phase-A finish time.
+fn fact_finish_time() -> Result<std::time::SystemTime, crate::report::wire::Error> {
+    #[cfg(feature = "storage-test-hooks")]
+    if let Ok(milliseconds) = std::env::var("CPF_STORAGE_FIXED_FACT_TIME_MS") {
+        let milliseconds = crate::storage::job_seq::parse_decimal_u64(&milliseconds)
+            .ok_or(crate::report::wire::Error("invalid fixed fact time"))?;
+        return std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_millis(milliseconds))
+            .ok_or(crate::report::wire::Error("fixed fact time out of range"));
+    }
+    Ok(std::time::SystemTime::now())
 }

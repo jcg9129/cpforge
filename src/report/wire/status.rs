@@ -15,6 +15,7 @@ pub(crate) struct ProblemStatus {
     pub diagnostics: Vec<String>,
     pub fact_state: &'static str,
     pub comparison: &'static str,
+    pub judge: &'static str,
     pub fact: Option<FactRecord>,
 }
 
@@ -64,6 +65,7 @@ pub(crate) fn encode_status(platform: &str, problems: &[ProblemStatus]) -> Resul
                         opt(problem.fact.as_ref(), |f| s(&f.finished_at)),
                     ),
                     ("capture_check", capture),
+                    ("judge", token(problem.judge)?),
                 ])]),
             ),
             ("diagnostics", array(&problem.diagnostics, |m| text(m))),
@@ -93,6 +95,7 @@ mod tests {
             verdict: JobVerdict::Passed,
             source: [0; 32],
             tests: [0; 32],
+            judge: None,
             capture_check: CaptureCheck::Unchecked {
                 reasons: vec![CaptureCheckReason::ShellStage],
             },
@@ -109,6 +112,7 @@ mod tests {
                     diagnostics: Vec::new(),
                     fact_state: "missing",
                     comparison: "unknown",
+                    judge: "unknown",
                     fact: None,
                 },
                 ProblemStatus {
@@ -120,6 +124,7 @@ mod tests {
                     diagnostics: vec!["note".into()],
                     fact_state: "valid",
                     comparison: "source_changed",
+                    judge: "none",
                     fact: Some(fact),
                 },
             ],

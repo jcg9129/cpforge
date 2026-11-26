@@ -1,0 +1,1 @@
+{"schema":1,"document":"status","platform":"windows","problems":[{"problem":"local:A","tags":[],"user_status":null,"missing_registered":[],"untracked":[],"targets":[{"target":"solution","fact_state":"valid","comparison":"unchanged","last_verdict":"scored","finished_at":"2026-01-01T00:00:00.000Z","capture_check":{"kind":"checked"},"judge":"unchanged"}],"diagnostics":[]}]}

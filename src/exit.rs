@@ -71,7 +71,8 @@ pub fn exit_status(input: &ExitInputs) -> ExitCode {
             Some(F::Infrastructure) => ExitCode::Infrastructure,
             _ => match input.verdict {
                 Some(V::Infrastructure) => ExitCode::Infrastructure,
-                Some(V::BuildFailed) => ExitCode::BuildFailed,
+                Some(V::SubmitVersionMismatch) => ExitCode::Config,
+                Some(V::BuildFailed | V::SubmitFailed) => ExitCode::BuildFailed,
                 Some(V::CheckerFailed) => ExitCode::CheckerFailed,
                 Some(
                     V::WallDeadline
@@ -120,6 +121,16 @@ mod tests {
                 false,
                 10,
             ),
+            (
+                None,
+                Some(V::SubmitVersionMismatch),
+                false,
+                false,
+                false,
+                false,
+                7,
+            ),
+            (None, Some(V::SubmitFailed), false, false, false, false, 3),
             (None, Some(V::BuildFailed), false, false, false, false, 3),
             (None, Some(V::CheckerFailed), false, false, false, false, 5),
             (None, Some(V::WallDeadline), false, false, false, false, 1),

@@ -35,6 +35,8 @@ pub struct FactRecord {
     pub verdict: JobVerdict,
     pub source: [u8; 32],
     pub tests: [u8; 32],
+    /// Frozen judge evidence; absent for a problem without judging roles.
+    pub judge: Option<[u8; 32]>,
     pub capture_check: CaptureCheck,
 }
 impl FactRecord {
@@ -48,6 +50,9 @@ impl FactRecord {
         document["verdict"] = value(self.verdict.wire_token());
         document["source"] = value(hex(&self.source));
         document["tests"] = value(hex(&self.tests));
+        if let Some(judge) = &self.judge {
+            document["judge"] = value(hex(judge));
+        }
         let mut capture = Table::new();
         match &self.capture_check {
             CaptureCheck::Checked => capture["kind"] = value("checked"),
@@ -139,22 +144,11 @@ fn fields(document: &DocumentMut) -> Result<FactRecord, &'static str> {
     if !valid_timestamp(finished_at) {
         return Err("invalid fact finish timestamp");
     }
-    use JobVerdict::*;
-    let verdict = [
-        BuildFailed,
-        WallDeadline,
-        OutputBudget,
-        Signal,
-        NonzeroExit,
-        CheckerFailed,
-        WrongAnswer,
-        Unchecked,
-        NoTests,
-        Passed,
-    ]
-    .into_iter()
-    .find(|v| v.wire_token() == text("verdict").unwrap_or(""))
-    .ok_or("invalid completed test verdict")?;
+    let verdict = JobVerdict::try_from(text("verdict")?).map_err(|()| "invalid job verdict")?;
+    let judge = document
+        .get("judge")
+        .map(|_| digest(text("judge")?))
+        .transpose()?;
     let source = digest(text("source")?)?;
     let tests = digest(text("tests")?)?;
     let capture = document
@@ -191,6 +185,7 @@ fn fields(document: &DocumentMut) -> Result<FactRecord, &'static str> {
         verdict,
         source,
         tests,
+        judge,
         capture_check,
     })
 }

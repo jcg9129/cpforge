@@ -123,6 +123,7 @@ impl Workspace {
             verdict: cpforge::report::JobVerdict::Unchecked,
             source,
             tests,
+            judge: None,
             capture_check: CaptureCheck::Checked,
         };
         self.write(

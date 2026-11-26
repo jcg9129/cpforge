@@ -1,0 +1,12 @@
+schema = 1
+epoch = "0123456789abcdef0123456789abcdef"
+n = "0"
+job = "20260101000000000-0123456789abcdef"
+finished_at = "2026-01-01T00:00:00.000Z"
+verdict = "scored"
+source = "dda68485ef21c922f97824c73db1de375ecdca1b06fac8037083126e7846deee"
+tests = "cdec1c4525aea3048b60abe53bb7de69ed0a2e122a7f3c24c90053ff8d8d1587"
+judge = "5e996bb36d2abaa6678e56e54679dd5abfcc9300e986a9a20ffb1a9192a458ab"
+
+[capture_check]
+kind = "checked"

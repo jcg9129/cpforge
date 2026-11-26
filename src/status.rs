@@ -1,7 +1,7 @@
 //! `cpf status`: lock-free, read-only inspection of the working files and the
 //! last completed run (workspace design §3.2, §3.3). Nothing is created,
-//! recovered or written; the comparison recomputes both fingerprints over the
-//! current files with the publication encoder and never consults history.
+//! recovered or written; the comparison recomputes all fingerprints over the
+//! current files with the publication encoders and never consults history.
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -132,7 +132,12 @@ fn human(status: &ProblemStatus, output: &mut String) {
     for path in &status.untracked {
         let _ = writeln!(output, "  untracked: {}", path.display());
     }
-    let comparison = status.comparison.replace('_', " ");
+    let comparison = match (status.comparison, status.judge) {
+        ("unchanged", "changed") => "judge changed".into(),
+        ("unchanged", "unknown") => "unknown".into(),
+        (comparison, "changed") => format!("{}, judge changed", comparison.replace('_', " ")),
+        (comparison, _) => comparison.replace('_', " "),
+    };
     let _ = write!(output, "  solution: {comparison}");
     match &status.fact {
         Some(fact) => {
@@ -191,6 +196,7 @@ fn problem_status(
         diagnostics: Vec::new(),
         fact_state: "missing",
         comparison: "unknown",
+        judge: "unknown",
         fact: None,
     };
     let request = crate::workspace_files::request(root, cwd, &problem.dir, config_path);
@@ -295,6 +301,19 @@ fn problem_status(
             "valid"
         }
     };
+    let current_judge = loaded
+        .judging()
+        .map_err(|e| e.to_string())
+        .and_then(|check| {
+            facts::fingerprint::current_judge_fingerprint(check, &problem.dir)
+                .map_err(|e| e.to_string())
+        });
+    result.judge = judge_comparison(result.fact.as_ref(), current_judge.as_ref().ok().copied());
+    if let Err(error) = current_judge {
+        result
+            .diagnostics
+            .push(format!("current judge not fingerprintable: {error}"));
+    }
     if let (Some(fact), Some(target)) = (&result.fact, target.as_ref()) {
         let current = current_fingerprints(&problem.dir, target, &store);
         match current {
@@ -312,6 +331,21 @@ fn problem_status(
         }
     }
     Ok(result)
+}
+
+/// An outer None is unavailable evidence; an inner None is a role-free problem.
+fn judge_comparison(
+    fact: Option<&facts::FactRecord>,
+    current: Option<Option<[u8; 32]>>,
+) -> &'static str {
+    match (fact, current) {
+        (Some(fact), Some(current)) => match (fact.judge, current) {
+            (None, None) => "none",
+            (old, new) if old == new => "unchanged",
+            _ => "changed",
+        },
+        _ => "unknown",
+    }
 }
 
 fn relative(text: &str) -> Result<PathBuf, Error> {
@@ -489,6 +523,83 @@ fn ignore_matches(pattern: &str, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn status_fact(judge: Option<[u8; 32]>) -> facts::FactRecord {
+        facts::FactRecord {
+            epoch: storage::job::Epoch::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            n: 0,
+            job: storage::job::JobId::parse("20260101000000000-0123456789abcdef").unwrap(),
+            finished_at: "2026-01-01T00:00:00.000Z".into(),
+            verdict: crate::report::JobVerdict::Scored,
+            source: [0; 32],
+            tests: [0; 32],
+            judge,
+            capture_check: crate::jobs::CaptureCheck::Checked,
+        }
+    }
+
+    #[test]
+    fn judge_comparison_table_including_unavailable_and_role_transitions() {
+        for old in [None, Some([1; 32]), Some([2; 32])] {
+            let fact = status_fact(old);
+            for current in [None, Some([1; 32]), Some([2; 32])] {
+                let expected = if old.is_none() && current.is_none() {
+                    "none"
+                } else if old == current {
+                    "unchanged"
+                } else {
+                    "changed"
+                };
+                assert_eq!(judge_comparison(Some(&fact), Some(current)), expected);
+                assert_eq!(judge_comparison(None, Some(current)), "unknown");
+            }
+            assert_eq!(judge_comparison(Some(&fact), None), "unknown");
+        }
+        // A malformed judge field cannot supply evidence, even if other fields parse.
+        let encoded = status_fact(None).encode();
+        let malformed = [b"judge = 42\n".as_slice(), encoded.as_slice()].concat();
+        let record = facts::classify_fact(&malformed);
+        assert!(matches!(record, Record::Malformed(_)));
+        let fact = match &record {
+            Record::Valid(fact) => Some(fact),
+            _ => None,
+        };
+        assert_eq!(judge_comparison(fact, Some(None)), "unknown");
+    }
+
+    #[test]
+    fn human_unchanged_requires_both_comparisons() {
+        for comparison in [
+            "unchanged",
+            "source_changed",
+            "tests_changed",
+            "source_and_tests_changed",
+            "unknown",
+        ] {
+            for judge in ["none", "unchanged", "changed", "unknown"] {
+                let status = ProblemStatus {
+                    problem: "local:A".into(),
+                    tags: vec![],
+                    user_status: None,
+                    missing: vec![],
+                    untracked: vec![],
+                    diagnostics: vec![],
+                    fact_state: "valid",
+                    comparison,
+                    judge,
+                    fact: Some(status_fact(None)),
+                };
+                let mut text = String::new();
+                human(&status, &mut text);
+                assert_eq!(
+                    text.contains("solution: unchanged"),
+                    comparison == "unchanged" && matches!(judge, "none" | "unchanged"),
+                    "{text}"
+                );
+                assert_eq!(text.contains("judge changed"), judge == "changed", "{text}");
+            }
+        }
+    }
+
     #[test]
     fn ignore_patterns_match_components_and_unicode_units() {
         for (pattern, parts, expected) in [

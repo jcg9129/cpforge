@@ -3214,6 +3214,19 @@ fn report_deadline_has_its_own_five_second_origin_after_empty_w() {
     });
 }
 
+#[test]
+fn every_job_verdict_keeps_the_fact_publication_exclusions() {
+    for &verdict in JobVerdict::ALL {
+        assert_eq!(
+            eligible(verdict),
+            !matches!(
+                verdict,
+                JobVerdict::Cancelled | JobVerdict::Infrastructure | JobVerdict::InternalError
+            )
+        );
+    }
+}
+
 #[cfg(all(
     feature = "storage-test-hooks",
     any(target_os = "linux", target_os = "macos")
