@@ -168,9 +168,18 @@ pub(crate) fn barrier(name: &str) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             } else {
-                std::io::stdin()
-                    .read_exact(&mut [0_u8; 1])
-                    .expect("release storage barrier");
+                match std::io::stdin().read_exact(&mut [0_u8; 1]) {
+                    Ok(()) => {}
+                    // The driver closed its end without releasing: the paused
+                    // thread stays paused, like a stalled system call, so a
+                    // cancelled command abandons it instead of observing a
+                    // panic. A driver that is gone ends the wait after 20 s.
+                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        panic!("storage barrier {name} never released");
+                    }
+                    Err(error) => panic!("release storage barrier {name}: {error}"),
+                }
             }
         }
     }

@@ -2138,11 +2138,12 @@ fn search_nonregular_and_unreadable_notes_are_visible_and_optional() {
         let original = fs::metadata(&path).unwrap().permissions();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
         if File::open(&path).is_err() {
-            let value = search_doc(&w, &["needle"]);
+            let value = document(&w.run(&["search", "needle", "--json"], 0));
             assert_eq!(value["findings"][0]["kind"], "notes_unreadable");
             assert_eq!(reasons(&value), ["unreadable_source"]);
             // Zero hits: `no matches`, the finding, then the incompleteness line.
-            let output = w.unchanged(&["search", "needle"], 0);
+            // `run`, not `unchanged`: a snapshot cannot read the mode-000 file.
+            let output = w.run(&["search", "needle"], 0);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(stdout.starts_with("no matches\n"), "{stdout}");
             assert!(stdout.contains("notes_unreadable"), "{stdout}");
@@ -2533,6 +2534,8 @@ fn search_cancellation_abandons_worker_and_delivers_finished_candidates() {
                 .collect::<Vec<_>>()
         );
         assert_eq!(reasons(&value), ["cancelled"]);
+        // Keep the barrier pipe open: the paused worker is abandoned, not released.
+        let _stdin = child.stdin.take();
         let output = child.wait_with_output().unwrap();
         signal_exit(&output);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
@@ -2627,6 +2630,8 @@ fn cancelled_search_with_broken_delivery_exits_eleven() {
     barrier(&mut child, "search.before_action#20");
     drop(child.stdout.take());
     search_signal(&child);
+    // Keep the barrier pipe open: the paused worker is abandoned, not released.
+    let _stdin = child.stdin.take();
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(11), "{output:?}");
 }
@@ -2644,6 +2649,8 @@ fn search_human_cancellation_reports_only_completed_hits() {
         .unwrap();
     barrier(&mut child, "search.before_action#20");
     search_signal(&child);
+    // Keep the barrier pipe open: the paused worker is abandoned, not released.
+    let _stdin = child.stdin.take();
     let output = child.wait_with_output().unwrap();
     signal_exit(&output);
     let text = String::from_utf8_lossy(&output.stdout);

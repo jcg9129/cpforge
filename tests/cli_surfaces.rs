@@ -208,6 +208,9 @@ fn unfinished_forms_refuse_and_invalid_flags_are_clap_usage_errors() {
             "stress ls"
         } else if args.starts_with(&["ls", "--archived"]) {
             "ls --archived"
+        } else if args[0] == "search" {
+            // Workspace search has landed; only the archive-root form has not.
+            "search --root"
         } else if args[0] == "quarantine" {
             if args[1] == "ls" {
                 "quarantine ls"
