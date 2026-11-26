@@ -27,7 +27,7 @@ async fn enqueue(service: &mut JobPersistence, owner: &JobOwner, budget: &Arc<Jo
                 encoded_spec: Some(b"{}".to_vec()),
                 digest: Some([0x42; 32]),
                 record: Arc::new(ExecutionRecord::NotStarted(StartFailure {
-                    reason: crate::report::NotStartedReason::Setup,
+                    reason: crate::report::NotStartedReason::RetentionBudget,
                     api: None,
                     os_error: None,
                     invalid_limit: None,
