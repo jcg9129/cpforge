@@ -235,8 +235,11 @@ fn b06_invalid_input_skips_solution_and_checker_then_later_test_uses_its_admitte
             "test \"$(cat)\" = input && exit 1; exit 0",
         );
         f.write("problem/tests/second.in", "valid");
+        // Each entry names its own answer file (storage §8.1 refuses two
+        // entries whose paths share a collision key).
+        f.write("problem/tests/second.ans", "answer\n");
         let catalog = fs::read_to_string(f.path("problem/tests.toml")).unwrap();
-        f.write("problem/tests.toml", &format!("{catalog}\n[[test]]\nid = 'b'\ninput = 'tests/second.in'\nanswer = 'tests/é space.ans'\norigin = 'custom'\nenabled = true\n"));
+        f.write("problem/tests.toml", &format!("{catalog}\n[[test]]\nid = 'b'\ninput = 'tests/second.in'\nanswer = 'tests/second.ans'\norigin = 'custom'\nenabled = true\n"));
         let config = load_config(&ConfigRequest {
             current_dir: f.0.clone(),
             workspace_root: Some(f.0.clone()),
@@ -780,7 +783,9 @@ fn b08_invalid_float_answer_stays_test_data_error_with_a_validator() {
     run_test(move || async move {
         let f = Fixture::new();
         drop(ready(&f, "printf 1", Some(VALIDATE), None, ""));
-        f.write("problem/tests/é space.ans", "not a number");
+        // Compare spec §5.3/§5.5: only a `special` (or overflowing) answer token
+        // is invalid; an `other` token such as a word is compared textually.
+        f.write("problem/tests/é space.ans", "nan");
         let comparator = Comparator::Float(cpforge::config::FloatComparator {
             abs: Some(1e-6),
             rel: None,
