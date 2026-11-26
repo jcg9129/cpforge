@@ -986,7 +986,7 @@ fn catalog_and_adoption_edits_preserve_dates_and_workflow_status() {
         let w = Workspace::new();
         w.write("problems/p/problem.toml", format!("{BASE}{date}status = 'in-progress'\nsolved_at = '2026-01-01'\ncreated_at = '2025-01-01'\n"));
         w.write("problems/p/owned.txt", b"user source");
-        w.write("problems/p/registered.in", b"input");
+        w.write("problems/p/tests/registered.in", b"input");
         w.write("input", b"new input");
         let original = w.fields()["problem"].to_string();
         for args in [
@@ -997,7 +997,7 @@ fn catalog_and_adoption_edits_preserve_dates_and_workflow_status() {
                 "p",
                 "test",
                 "register",
-                "problems/p/registered.in",
+                "problems/p/tests/registered.in",
                 "--id",
                 "registered",
                 "--no-answer",
