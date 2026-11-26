@@ -1013,6 +1013,36 @@ fn plan_invocation(
             Vec::new(),
         )
     };
+    // Config §9.1.4 under `answer = "file"`, before admission: a refusal
+    // allocates nothing. Preparation repeats the check on the frozen data.
+    if command.kind() == JobKind::Test {
+        if let Some(check) = config
+            .judging()
+            .map_err(|e| Error::Config(e.to_string()))?
+            .filter(|check| {
+                check.kind.value != crate::report::CheckMode::Compare
+                    && check.answer.value == crate::report::AnswerPolicy::File
+            })
+        {
+            let catalog = TestStore::new(selected.as_ref().expect("test selection").dir.clone())
+                .catalog()
+                .map_err(Error::Workspace)?;
+            crate::jobs::plan::validate_answer_presence(
+                check,
+                catalog
+                    .entries
+                    .iter()
+                    .filter(|entry| tests.contains(&entry.id))
+                    .map(|entry| {
+                        (
+                            entry.id.to_string(),
+                            !matches!(entry.answer, crate::tests_store::Answer::Absent),
+                        )
+                    }),
+            )
+            .map_err(Error::Config)?;
+        }
+    }
     let build = named.as_ref().is_none_or(|p| p.needs_build.value)
         && target.as_ref().is_some_and(|t| t.build.is_some());
     let primary = if let Some(named) = &named {

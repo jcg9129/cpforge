@@ -607,7 +607,11 @@ fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<Ro
                     stdout_policy: CapPolicy::Kill,
                     stderr_policy: CapPolicy::Discard,
                     context: Default::default(),
-                    deferred: vec![],
+                    deferred: vec![DeferredValue {
+                        placeholder: Placeholder::Source,
+                        origin: program.origin.clone(),
+                        provenance: program.provenance.clone(),
+                    }],
                     inputs: vec![],
                 },
             })))

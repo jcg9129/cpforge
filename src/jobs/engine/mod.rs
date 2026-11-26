@@ -45,6 +45,7 @@ mod events;
 mod executor;
 mod persistence;
 mod report_value;
+mod role_builds;
 mod spec;
 mod types;
 pub(crate) mod warnings;
@@ -85,14 +86,10 @@ pub enum PlanError {
     InvalidIteration,
     BuildRequired,
     ReportSize,
-    JudgingUnsupported,
 }
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::JudgingUnsupported => f.write_str("judging unsupported in this version"),
-            _ => write!(f, "invalid execution plan: {self:?}"),
-        }
+        write!(f, "invalid execution plan: {self:?}")
     }
 }
 impl std::error::Error for PlanError {}
@@ -209,9 +206,6 @@ impl<'probe> Engine<'probe> {
         // Report timing runs from admission (step 1) to F, as in `new`; the
         // shared verdict state and token are those installed earlier.
         let ready = ready.into();
-        if !super::plan::judging_supported(ready.judging.as_ref().map(|j| j.check.as_ref())) {
-            return Err(PlanError::JudgingUnsupported);
-        }
         cancel.start = ready.started;
         let mut plan = Vec::new();
         let has_build = matches!(&ready.planned_target, Some(PlannedTarget::Build(_)));
@@ -313,6 +307,15 @@ impl<'probe> Engine<'probe> {
                 }
             }
         }
+        let report_shape = if let Some(judging) = &ready.judging {
+            if kind != JobKind::Test {
+                return Err(PlanError::InvalidIteration);
+            }
+            plan = role_builds::plan(judging, &ready.manifest)?;
+            Some(judging.plan.shape)
+        } else {
+            None
+        };
         let mut previous_test = None;
         for execution in &plan {
             if let Some(test) = &execution.test {
@@ -333,14 +336,14 @@ impl<'probe> Engine<'probe> {
         if plan.len() > MAX_EXECUTIONS {
             return Err(PlanError::TooManyExecutions);
         }
-        Ok(Self {
+        let engine = Self {
             ready,
             plan,
             after_test: Vec::new(),
             disabled_hooks: Vec::new(),
             kind,
             comparator,
-            report_shape: None,
+            report_shape,
             keep_going,
             output_events: false,
             capture_enabled: needs_build || kind == JobKind::Run,
@@ -349,7 +352,12 @@ impl<'probe> Engine<'probe> {
             progress: None,
             #[cfg(any(test, feature = "storage-test-hooks"))]
             observer: None,
-        })
+        };
+        // A judged plan must fit the report reservation held since planning.
+        if engine.ready.judging.is_some() {
+            engine.validate_report_reservation()?;
+        }
+        Ok(engine)
     }
 
     /// Attach already prepared hooks to phase H, sharing this job's resources.
@@ -394,6 +402,14 @@ impl<'probe> Engine<'probe> {
         if self.kind != JobKind::Test {
             return Err(PlanError::InvalidIteration);
         }
+        if self
+            .ready
+            .judging
+            .as_ref()
+            .is_some_and(|j| j.plan.shape != shape)
+        {
+            return Err(PlanError::InvalidIteration);
+        }
         self.report_shape = Some(shape);
         self.validate_report_reservation()?;
         Ok(self)
@@ -402,14 +418,22 @@ impl<'probe> Engine<'probe> {
     fn validate_report_reservation(&self) -> Result<(), PlanError> {
         let (tests, aggregates) =
             report_populations(self.kind, &self.plan, self.ready.manifest.entries().len());
-        report::wire::report_reservation(
+        let bytes = report::wire::report_reservation(
             self.plan.len() + self.after_test.len(),
             tests,
             aggregates,
             self.report_shape,
         )
-        .map(|_| ())
-        .map_err(|_| PlanError::ReportSize)
+        .map_err(|_| PlanError::ReportSize)?;
+        if self
+            .ready
+            .judging
+            .as_ref()
+            .is_some_and(|j| bytes > j.report_reservation.bytes())
+        {
+            return Err(PlanError::ReportSize);
+        }
+        Ok(())
     }
 
     pub fn disabled_hooks(
@@ -477,7 +501,7 @@ impl<'probe> Engine<'probe> {
         hooks: &mut dyn PhaseHooks,
     ) -> Arc<FinalizedReport> {
         let Self {
-            ready,
+            mut ready,
             plan,
             after_test,
             disabled_hooks,
@@ -497,6 +521,25 @@ impl<'probe> Engine<'probe> {
         let mut warnings = warnings::admission(&ready.prune_report);
         let mut details = report_details(&ready, capture_enabled, comparator.clone(), kind);
         details.shape = report_shape;
+        for role in &details.roles {
+            if let Some(detail) = role.header_warning() {
+                details.warnings.push(WireWarning {
+                    kind: WarningKind::TestlibHeader {
+                        role: role.role,
+                        detail,
+                    },
+                    message: format!(
+                        "{}: testlib header candidate provenance: {}",
+                        role.role.wire_token(),
+                        match detail {
+                            report::TestlibHeaderDetail::NotIdentified => "not_identified",
+                            report::TestlibHeaderDetail::NotPinned => "not_pinned",
+                            report::TestlibHeaderDetail::Declared => "declared",
+                        }
+                    ),
+                });
+            }
+        }
         if let Some(Hook {
             outcome: HookResult::NotPlanned { reason },
             ..
@@ -514,10 +557,27 @@ impl<'probe> Engine<'probe> {
             validated: None,
         };
         match ready.planned_target {
-            Some(PlannedTarget::Build(pending)) => target.pending = Some(pending),
+            Some(PlannedTarget::Build(pending)) => target.pending = Some(Box::new(pending)),
             Some(PlannedTarget::BuildFree(free)) => target.free = Some(free),
             None => {}
         }
+        let mut judging = ready.judging.take();
+        let mut role_targets: Vec<_> = judging.as_mut().map_or_else(Vec::new, |judging| {
+            judging
+                .roles
+                .iter_mut()
+                .map(|role| {
+                    (
+                        role.captured.role,
+                        TargetState {
+                            pending: role.pending_build.take(),
+                            free: None,
+                            validated: None,
+                        },
+                    )
+                })
+                .collect()
+        });
         let context = Context {
             dir: &ready.dir,
             workspace: &ready.workspace,
@@ -544,24 +604,29 @@ impl<'probe> Engine<'probe> {
         let mut build = None;
         let mut admission_closed = false;
         let mut stopped = false;
+        let mut builds_succeeded = true;
         // Reserve report + replacement temporary before admitting any run.
         let (planned_tests, planned_aggregates) =
             report_populations(kind, &plan, ready.manifest.entries().len());
-        let report_reservation = report::wire::report_reservation(
-            plan.len() + after_test.len(),
-            planned_tests,
-            planned_aggregates,
-            report_shape,
-        )
-        .ok()
-        .and_then(|bytes| ready.budget.reserve(bytes).ok());
+        let report_reservation = if let Some(judging) = judging.take() {
+            Some(judging.report_reservation)
+        } else {
+            report::wire::report_reservation(
+                plan.len() + after_test.len(),
+                planned_tests,
+                planned_aggregates,
+                report_shape,
+            )
+            .ok()
+            .and_then(|bytes| ready.budget.reserve(bytes).ok())
+        };
         let report_refused = report_reservation.is_none();
         let planned_count = (plan.len() + after_test.len()) as u32;
         persistence.configure(planned_count, cancel.token());
         let generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
-                Recipe::Deferred(stage) => Some(stage.as_ref().clone()),
+                Recipe::Deferred(stage) => Some((p.role.clone(), stage.as_ref().clone())),
                 _ => None,
             })
             .collect();
@@ -572,17 +637,23 @@ impl<'probe> Engine<'probe> {
             let earlier_retention_refusal = admission_closed;
             #[cfg(any(test, feature = "storage-test-hooks"))]
             context.phase_point(Point::BeforeAdmission(planned.index));
-            let skip = if admission_closed {
-                Some(SkipReason::AdmissionClosed)
-            } else if planned.depends_on_build
-                && !matches!(
-                    build.as_ref().map(|b: &BuildReport| &b.result),
-                    Some(BuildResult::Succeeded)
-                )
-            {
-                Some(SkipReason::BuildNotSucceeded)
-            } else if cancel.lock().intent.is_some() {
+            let active_target = match planned.role {
+                Role::RoleBuild { role } => {
+                    &mut role_targets
+                        .iter_mut()
+                        .find(|(name, _)| *name == role)
+                        .expect("prepared role build")
+                        .1
+                }
+                _ => &mut target,
+            };
+            // Report §2.1 order: cancelled, build_not_succeeded, admission_closed.
+            let skip = if cancel.lock().intent.is_some() {
                 Some(SkipReason::Cancelled)
+            } else if planned.depends_on_build && !builds_succeeded {
+                Some(SkipReason::BuildNotSucceeded)
+            } else if admission_closed {
+                Some(SkipReason::AdmissionClosed)
             } else if stopped {
                 Some(SkipReason::StopPolicy)
             } else {
@@ -593,7 +664,7 @@ impl<'probe> Engine<'probe> {
             } else {
                 Box::pin(context.execute(
                     planned,
-                    &mut target,
+                    active_target,
                     executor,
                     persistence,
                     report_refused,
@@ -606,10 +677,7 @@ impl<'probe> Engine<'probe> {
                 &report::SkipConditions {
                     job: kind,
                     depends_on_unsucceeded_build: execution.plan.depends_on_build
-                        && !matches!(
-                            build.as_ref().map(|b| &b.result),
-                            Some(BuildResult::Succeeded)
-                        ),
+                        && !builds_succeeded,
                     earlier_retention_refusal,
                     submit_not_succeeded: false,
                     input_not_validated: false,
@@ -632,61 +700,105 @@ impl<'probe> Engine<'probe> {
                 );
             }
             if execution.plan.stage == Stage::Build {
-                let mut post = PostBuild::default();
-                let pending = target.pending.take().expect("one planned build");
-                let id = execution.run.as_ref().map(|_| pending.id().clone());
-                let root = id.as_ref().map(|_| pending.output_root().to_owned());
-                let artifacts: Vec<_> = pending
-                    .required_outputs()
-                    .iter()
-                    .filter_map(|path| {
-                        path.strip_prefix(pending.output_root())
-                            .ok()
-                            .map(|p| p.as_os_str().to_owned())
-                    })
-                    .take(16)
-                    .collect();
-                if let Some(ExecutionRecord::Started(outcome)) = execution.evidence.as_deref() {
-                    match caught(async {
-                        executor
-                            .finish_build(
-                                pending,
-                                build::BuildExecutionOutcome::from(&**outcome),
-                                generated.clone(),
-                                ready.owner.clone(),
+                if let (Role::RoleBuild { role }, Coverage::Skipped { reason }) =
+                    (&execution.plan.role, execution.result.coverage)
+                {
+                    details
+                        .roles
+                        .iter_mut()
+                        .find(|r| r.role == *role)
+                        .expect("role report")
+                        .build = Some(role_builds::skipped(execution.plan.index, reason));
+                    builds_succeeded = false;
+                } else {
+                    let mut post = PostBuild::default();
+                    let pending = active_target.pending.take().expect("prepared build");
+                    let id = execution.run.as_ref().map(|_| pending.id().clone());
+                    let root = id.as_ref().map(|_| pending.output_root().to_owned());
+                    let artifact_count = pending.required_outputs().len();
+                    let artifacts: Vec<_> = pending
+                        .required_outputs()
+                        .iter()
+                        .filter_map(|path| {
+                            path.strip_prefix(pending.output_root())
+                                .ok()
+                                .map(|p| p.as_os_str().to_owned())
+                        })
+                        .take(16)
+                        .collect();
+                    let producer = &execution.plan.role;
+                    let consumers = generated
+                        .iter()
+                        .filter(|(role, _)| match (producer, role) {
+                            (Role::RoleBuild { role: name }, Role::Checker { .. }) => {
+                                *name == report::RoleName::Checker
+                            }
+                            (Role::RoleBuild { role: name }, Role::Validator { .. }) => {
+                                *name == report::RoleName::Validator
+                            }
+                            (
+                                Role::Build,
+                                Role::Checker { .. }
+                                | Role::Validator { .. }
+                                | Role::Interactor { .. },
                             )
-                            .await
-                    })
-                    .await
-                    {
-                        Ok(Ok(completion)) => {
-                            post = completion.post;
-                            target.validated = completion.validated;
+                            | (Role::RoleBuild { .. }, _) => false,
+                            (Role::Build, _) => true,
+                            _ => false,
+                        })
+                        .map(|(_, stage)| stage.clone())
+                        .collect();
+                    if let Some(ExecutionRecord::Started(outcome)) = execution.evidence.as_deref() {
+                        match caught(async {
+                            executor
+                                .finish_build(
+                                    *pending,
+                                    build::BuildExecutionOutcome::from(&**outcome),
+                                    consumers,
+                                    ready.owner.clone(),
+                                )
+                                .await
+                        })
+                        .await
+                        {
+                            Ok(Ok(completion)) => {
+                                post = completion.post;
+                                active_target.validated = completion.validated;
+                            }
+                            // A panic or an unavailable creation thread, as a
+                            // panicking inline validation before.
+                            Ok(Err(_)) | Err(()) => post.invariant = Some(Invariant::BuildEvidence),
                         }
-                        // A panic or an unavailable creation thread, as a
-                        // panicking inline validation before.
-                        Ok(Err(_)) | Err(()) => post.invariant = Some(Invariant::BuildEvidence),
+                    }
+                    let result = report::build_result(&execution.result, &post);
+                    if let BuildResult::InternalError { invariant } = result {
+                        record_internal(&cancel, invariant, InternalLocus::Build);
+                    }
+                    let succeeded = result == BuildResult::Succeeded;
+                    builds_succeeded &= succeeded;
+                    let built = BuildReport {
+                        execution: execution.plan.index,
+                        build_id: id,
+                        output_root: root,
+                        result,
+                        artifacts: if succeeded { artifacts } else { Vec::new() },
+                    };
+                    if let Role::RoleBuild { role } = execution.plan.role {
+                        let role_report = details
+                            .roles
+                            .iter_mut()
+                            .find(|r| r.role == role)
+                            .expect("role report");
+                        role_report.build = Some(role_builds::report(built, artifact_count));
+                    } else {
+                        build = Some(built);
                     }
                 }
-                let result = report::build_result(&execution.result, &post);
-                if let BuildResult::InternalError { invariant } = result {
-                    record_internal(&cancel, invariant, InternalLocus::Build);
-                }
-                let succeeded = result == BuildResult::Succeeded;
-                build = Some(BuildReport {
-                    execution: execution.plan.index,
-                    build_id: id,
-                    output_root: root,
-                    result,
-                    artifacts: if succeeded { artifacts } else { Vec::new() },
-                });
             }
-            if let Some(test) = execution
-                .plan
-                .test
-                .as_ref()
-                .filter(|_| kind == JobKind::Test)
-            {
+
+            if let Some(test) = execution.plan.test.as_ref().filter(|_| {
+                kind == JobKind::Test && matches!(execution.plan.role, Role::Test { .. })
+            }) {
                 let test = test.clone();
                 let check = context.check(
                     &execution,
@@ -829,11 +941,15 @@ impl<'probe> Engine<'probe> {
             }
             executions.push(execution);
         }
+        if report_shape.is_some() {
+            role_builds::skipped_tests(&details.roles, &executions, &mut tests);
+        }
         let primary: Vec<_> = executions.iter().map(|e| e.result.clone()).collect();
         let test_verdicts: Vec<_> = tests.iter().filter_map(|t| t.verdict.clone()).collect();
         let mut result = {
             let mut state = cancel.lock();
             let result = report::job_verdict(&report::JobInput {
+                roles: &details.roles,
                 scoring: crate::report::Scoring::PassFail,
                 kind,
                 build: build.as_ref().map(|b| &b.result),
@@ -1015,6 +1131,7 @@ impl<'probe> Engine<'probe> {
                     .map(|execution| execution.result.clone())
                     .collect();
                 let verdict = report::job_verdict(&report::JobInput {
+                    roles: &[],
                     scoring: crate::report::Scoring::PassFail,
                     kind,
                     build: None,
@@ -1210,7 +1327,7 @@ impl<'probe> Engine<'probe> {
 }
 
 struct TargetState<'probe> {
-    pending: Option<build::PendingBuild<'probe>>,
+    pending: Option<Box<build::PendingBuild<'probe>>>,
     free: Option<build::PreflightedBuildFree>,
     validated: Option<ValidatedBuild>,
 }
@@ -1857,7 +1974,9 @@ fn report_details(
     let target = ready.target.as_ref().filter(|_| capture);
     ReportDetails {
         shape: None,
-        roles: Vec::new(),
+        roles: ready.judging.as_ref().map_or_else(Vec::new, |j| {
+            j.roles.iter().map(|r| r.report.clone()).collect()
+        }),
         problem: ready
             .problem
             .as_ref()
@@ -1888,7 +2007,7 @@ fn report_details(
                 profile: target.profile.as_ref().map(|p| p.value.clone()),
                 build_free: target.build.is_none(),
                 compare: comparator,
-                check: None,
+                check: ready.judging.as_ref().map(|j| j.check.report_config()),
                 io: None,
                 run_deadline: Some((deadline.value.saturating_mul(1000), source)),
                 published_limits: ready
@@ -1899,7 +2018,7 @@ fn report_details(
             }
         }),
         score: None,
-        judge_fingerprint: None,
+        judge_fingerprint: ready.judging.as_ref().and_then(|j| j.judge_fingerprint),
         fingerprints: None,
         fact: (kind == JobKind::Test).then_some(Fact {
             outcome: FactOutcome::NotAttempted {

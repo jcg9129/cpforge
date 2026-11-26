@@ -100,10 +100,34 @@ impl fmt::Display for PlanError {
 }
 impl std::error::Error for PlanError {}
 
-/// The single execution gate for parsed judging. Keep ahead of CLI admission;
-/// capture/planning APIs deliberately remain usable without executing a role.
+/// The single CLI execution gate for parsed judging, before admission.
+/// Prepared plans remain usable through the engine API for role producers.
 pub fn judging_supported(check: Option<&CheckConfig>) -> bool {
     check.is_none_or(|c| !c.has_roles())
+}
+
+/// Phase-3 answer policy check, before CLI admission and again on frozen data.
+pub fn validate_answer_presence(
+    check: &CheckConfig,
+    answers: impl IntoIterator<Item = (String, bool)>,
+) -> Result<(), String> {
+    if check.kind.value == CheckMode::Compare
+        || check.answer.value != crate::report::AnswerPolicy::File
+    {
+        return Ok(());
+    }
+    let missing: Vec<_> = answers
+        .into_iter()
+        .filter_map(|(id, present)| (!present).then_some(id))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "tests without an answer under answer = \"file\": {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 /// Counts, caps and report reservation of a test job, before admission.

@@ -480,46 +480,17 @@ pub fn plan_target<'probe>(
 ) -> Result<PlannedTarget<'probe>, PlanErrors> {
     let probe = inputs.probe;
     let build_bytes = inputs.build_bytes;
-    let TargetPreflight {
-        build,
-        run,
-        recipe,
-        layout,
-    } = preflight_target(
+    let preflight = preflight_target(
         target,
         inputs,
         outputs.as_ref().map(|outputs| outputs.root.as_path()),
     )?;
-    let (run, run_arguments) = run;
-    if let Some(outputs) = outputs {
-        let (Resolution::Resolved(build), arguments) = build.expect("build preflight") else {
-            unreachable!("C2 refuses generated build programs")
-        };
-        Ok(PlannedTarget::Build(PendingBuild {
-            outputs,
-            build,
-            run,
-            recipe,
-            required: layout.expect("allocated layout").required,
-            arguments,
-            build_bytes,
-            probe: ProbeRef(probe),
-        }))
-    } else {
-        let Resolution::Resolved(stage) = run else {
-            unreachable!("build-free stages have no generated program")
-        };
-        Ok(PlannedTarget::BuildFree(PreflightedBuildFree {
-            recipe,
-            stage,
-            arguments: run_arguments,
-        }))
-    }
+    Ok(preflight.into_planned(outputs, build_bytes, probe))
 }
 
-/// Read-only phase-3 validation. This value has no fresh-output capability and
-/// cannot become a pending build. CLI preflight uses prospective job paths;
-/// managed preparation repeats validation against the real captured inputs.
+/// Read-only phase-3 validation, without a fresh-output capability. Managed
+/// preparation supplies that capability to form a pending build. CLI preflight
+/// uses prospective paths; managed preparation validates the captured inputs.
 #[derive(Debug)]
 pub(crate) struct TargetPreflight {
     build: Option<(Resolution, ExpandedArguments)>,
@@ -528,6 +499,45 @@ pub(crate) struct TargetPreflight {
     layout: Option<ArtifactLayout>,
 }
 impl TargetPreflight {
+    pub(crate) fn into_planned<'probe>(
+        self,
+        outputs: Option<FreshBuildOutputs>,
+        build_bytes: u64,
+        probe: &'probe dyn Probe,
+    ) -> PlannedTarget<'probe> {
+        let Self {
+            build,
+            run,
+            recipe,
+            layout,
+        } = self;
+        let (run, run_arguments) = run;
+        if let Some(outputs) = outputs {
+            let (Resolution::Resolved(build), arguments) = build.expect("build preflight") else {
+                unreachable!("C2 refuses generated build programs")
+            };
+            PlannedTarget::Build(PendingBuild {
+                outputs,
+                build,
+                run,
+                recipe,
+                required: layout.expect("allocated layout").required,
+                arguments,
+                build_bytes,
+                probe: ProbeRef(probe),
+            })
+        } else {
+            let Resolution::Resolved(stage) = run else {
+                unreachable!("build-free stages have no generated program")
+            };
+            PlannedTarget::BuildFree(PreflightedBuildFree {
+                recipe,
+                stage,
+                arguments: run_arguments,
+            })
+        }
+    }
+
     pub(crate) fn command_bindings(&self) -> TargetBindings {
         self.recipe.bindings.clone()
     }

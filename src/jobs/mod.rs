@@ -33,6 +33,7 @@ pub mod engine;
 pub mod guard;
 pub mod persist;
 pub mod plan;
+mod role_provenance;
 pub mod roles;
 
 use std::fmt;
@@ -84,7 +85,7 @@ impl fmt::Debug for PrepareJobInputs<'_> {
 
 /// Constructible only after complete freezing and guarded target/role planning.
 /// Judge run layouts and staging recipes name only job-owned frozen inputs;
-/// the engine still refuses these jobs through `plan::judging_supported`.
+/// the CLI refuses these jobs through `plan::judging_supported`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReadyJob<'probe> {
@@ -105,7 +106,7 @@ pub struct ReadyJob<'probe> {
     pub capture_check: CaptureCheck,
     pub capture_report: engine::CaptureReport,
     pub planned_target: PlannedTarget<'probe>,
-    pub judging: Option<Box<roles::ReadyJudging>>,
+    pub judging: Option<Box<roles::ReadyJudging<'probe>>>,
     pub budget: Arc<JobBudget>,
     pub prune_report: AdmissionReport,
 }
@@ -128,7 +129,7 @@ pub struct ReadyExecutionJob<'probe> {
     pub(crate) manifest: FrozenManifest,
     pub(crate) capture_report: Option<engine::CaptureReport>,
     pub(crate) planned_target: Option<PlannedTarget<'probe>>,
-    pub(crate) judging: Option<Box<roles::ReadyJudging>>,
+    pub(crate) judging: Option<Box<roles::ReadyJudging<'probe>>>,
     pub(crate) budget: Arc<JobBudget>,
     pub(crate) prune_report: AdmissionReport,
     pub(crate) cwd_bytes: Option<u64>,

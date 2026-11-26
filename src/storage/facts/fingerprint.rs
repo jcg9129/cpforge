@@ -39,6 +39,26 @@ pub fn source_fingerprint(files: &[SourceFile], target: &TargetPlan) -> io::Resu
     Ok(hash.0.finalize().into())
 }
 
+/// Content evidence for a role, using the workspace file-list encoding only.
+/// Includes sources, support, assets and a prebuilt program, sorted by path.
+pub(crate) fn captured_content_fingerprint(files: &[CapturedSourceCopy]) -> io::Result<[u8; 32]> {
+    let mut hash = HashWriter(Sha256::new());
+    let mut ordered: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let path: PathBuf = file.problem_path.components().iter().collect();
+            (path_bytes(&path), file)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    count(&mut hash, ordered.len() as u64)?;
+    for (path, file) in ordered {
+        bytes(&mut hash, &path)?;
+        contents(&mut hash, &file.copy_path)?;
+    }
+    Ok(hash.0.finalize().into())
+}
+
 /// Hash the selected frozen tests, ordered by id bytes, including the
 /// distinction between an absent answer and a present empty answer.
 pub fn tests_fingerprint(tests: &[FrozenTest]) -> io::Result<[u8; 32]> {

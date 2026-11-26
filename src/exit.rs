@@ -253,6 +253,7 @@ mod tests {
             crate::report::TestVerdict::WrongAnswer,
         ];
         let result = crate::report::job_verdict(&crate::report::JobInput {
+            roles: &[],
             scoring: crate::report::Scoring::PassFail,
             kind: crate::report::JobKind::Test,
             build: None,

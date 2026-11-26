@@ -354,12 +354,13 @@ fn cancellation_during_build_uses_same_token_and_blocks_dependants() {
             report.data().result.cancellation.unwrap().source,
             CancelSource::Console
         );
+        // Report §2.1: cancellation intent outranks the unsucceeded build.
         assert!(
             report.data().executions[1..]
                 .iter()
                 .all(|e| e.result.coverage
                     == Coverage::Skipped {
-                        reason: SkipReason::BuildNotSucceeded
+                        reason: SkipReason::Cancelled
                     })
         );
     });
@@ -1281,6 +1282,7 @@ fn orphan_skip_conditions_preserve_coverage_and_name_execution_locus() {
     assert_eq!(counts.primary.skipped, 1);
     assert_eq!(counts.primary.invalid, 1);
     let result = report::job_verdict(&report::JobInput {
+        roles: &[],
         scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Cmd,
         build: None,

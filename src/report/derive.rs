@@ -567,6 +567,7 @@ pub struct JobInput<'a> {
     pub kind: JobKind,
     pub scoring: Scoring,
     pub build: Option<&'a BuildResult>,
+    pub roles: &'a [super::RoleReport],
     pub primary: &'a [ExecutionResult],
     pub tests: &'a [TestVerdict],
     pub selected_tests: u32,
@@ -604,6 +605,20 @@ pub fn job_verdict(input: &JobInput<'_>) -> JobResult {
             _ => None,
         })
         .or_else(|| {
+            input
+                .roles
+                .iter()
+                .find_map(|r| match r.build.as_ref().map(|b| &b.result) {
+                    Some(super::RoleBuildResult::InternalError { invariant }) => {
+                        Some(InternalFailure {
+                            invariant: *invariant,
+                            locus: InternalLocus::Build,
+                        })
+                    }
+                    _ => None,
+                })
+        })
+        .or_else(|| {
             input.tests.iter().find_map(|test| match test {
                 TestVerdict::InternalError { invariant } => Some(InternalFailure {
                     invariant: *invariant,
@@ -637,6 +652,12 @@ fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
             .iter()
             .any(|e| execution_invariant(e).is_some())
         || matches!(input.build, Some(BuildResult::InternalError { .. }))
+        || input.roles.iter().any(|r| {
+            matches!(
+                r.build.as_ref().map(|b| &b.result),
+                Some(super::RoleBuildResult::InternalError { .. })
+            )
+        })
         || input
             .tests
             .iter()
@@ -663,17 +684,37 @@ fn primary_verdict(input: &JobInput<'_>) -> JobVerdict {
             has_class(token)
         }
     };
-    if matches!(input.build, Some(BuildResult::Infrastructure { .. })) || relevant("infrastructure")
+    if matches!(input.build, Some(BuildResult::Infrastructure { .. }))
+        || input.roles.iter().any(|r| {
+            matches!(
+                r.build.as_ref().map(|b| &b.result),
+                Some(super::RoleBuildResult::Infrastructure { .. })
+            )
+        })
+        || relevant("infrastructure")
     {
         return JobVerdict::Infrastructure;
     }
     if matches!(input.build, Some(BuildResult::Cancelled))
+        || input.roles.iter().any(|r| {
+            matches!(
+                r.build.as_ref().map(|b| &b.result),
+                Some(super::RoleBuildResult::Cancelled)
+            )
+        })
         || relevant("cancelled")
         || input.primary.iter().any(|e| e.coverage.is_cancelled())
     {
         return JobVerdict::Cancelled;
     }
-    if matches!(input.build, Some(BuildResult::Failed { .. })) {
+    if matches!(input.build, Some(BuildResult::Failed { .. }))
+        || input.roles.iter().any(|r| {
+            matches!(
+                r.build.as_ref().map(|b| &b.result),
+                Some(super::RoleBuildResult::Failed { .. })
+            )
+        })
+    {
         return JobVerdict::BuildFailed;
     }
     for (token, verdict) in [

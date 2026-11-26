@@ -276,7 +276,11 @@ fn role_capture_hashes_copies_and_freezes_every_declared_file() {
             .all(|r| r.capture_check == CaptureCheck::Checked)
     );
     assert_eq!(
-        judging.roles[0].outputs.as_ref().unwrap().path(),
+        judging.roles[0]
+            .pending_build
+            .as_ref()
+            .unwrap()
+            .output_root(),
         dir.join("builds/r00000")
     );
     assert!(matches!(
@@ -288,14 +292,18 @@ fn role_capture_hashes_copies_and_freezes_every_declared_file() {
     assert_eq!(capture["roles"][0]["role"], "checker");
     assert_eq!(capture["roles"][0]["files"].as_array().unwrap().len(), 3);
     assert_eq!(capture["roles"][1]["role"], "validator");
+    let engine = engine::Engine::new(
+        ready,
+        engine::JobRequest::Test {
+            comparator: target.compare.value,
+        },
+    )
+    .unwrap();
     assert!(matches!(
-        engine::Engine::new(
-            ready,
-            engine::JobRequest::Test {
-                comparator: target.compare.value
-            }
-        ),
-        Err(engine::PlanError::JudgingUnsupported)
+        engine.plan()[0].role,
+        engine::Role::RoleBuild {
+            role: RoleName::Checker
+        }
     ));
 }
 
@@ -329,7 +337,7 @@ fn profile_arguments_and_staging_use_each_runs_private_directory() {
         assert!(judging.plan.shape.output_file);
         let checker = &judging.roles[0];
         let validator = &judging.roles[1];
-        assert!(checker.outputs.is_none());
+        assert!(checker.pending_build.is_none());
         assert!(checker.build_stage.is_none());
         let run = &checker.runs[0];
         let cwd = dir.join("r00002").join("cwd");
@@ -607,7 +615,7 @@ fn role_stages_preserve_language_artifacts_and_role_entry() {
     let ready = prepare_job(job, frozen, &target, f.inputs(&Tools)).unwrap();
     let role = &ready.judging.as_ref().unwrap().roles[0];
     assert_eq!(
-        role.outputs.as_ref().unwrap().path(),
+        role.pending_build.as_ref().unwrap().output_root(),
         dir.join("builds/r00001")
     );
     let Some(cpforge::config::Artifacts::Dir { required }) = &role.target.artifacts else {
@@ -638,4 +646,234 @@ fn report_headroom_is_reserved_separately_and_budget_failure_starts_nothing() {
     ));
     assert_eq!(budget.usage().reserved, 0);
     assert!(!dir.join("r00000").exists());
+}
+
+#[test]
+fn header_provenance_is_candidate_only_over_every_captured_source() {
+    use cpforge::report::{Header, HeaderReason, RoleProvenance};
+    for (sources, support, source, reason) in [
+        (
+            "['checker.cpp', 'second.cpp']",
+            "['testlib.h']",
+            "#include \"testlib.h\"\n",
+            None,
+        ),
+        ("['checker.cpp']", "[]", "", Some(HeaderReason::None)),
+        (
+            "['checker.cpp']",
+            "['testlib.h', 'other/testlib.h']",
+            "",
+            Some(HeaderReason::Ambiguous),
+        ),
+        (
+            "['checker.cpp']",
+            "['other/testlib.h']",
+            "",
+            Some(HeaderReason::NotBesideSources),
+        ),
+        (
+            "['checker.cpp', 'other/second.cpp']",
+            "['testlib.h']",
+            "",
+            Some(HeaderReason::NotBesideSources),
+        ),
+        (
+            "['checker.cpp']",
+            "['testlib.h']",
+            "#include <testlib.h>\n",
+            Some(HeaderReason::AngleInclude),
+        ),
+        (
+            "['checker.cpp']",
+            "['testlib.h']",
+            " \t#  include \t<testlib.h>\n",
+            Some(HeaderReason::AngleInclude),
+        ),
+        // A conditional quoted include and a source with no include still
+        // have a candidate; no compiler selection is inferred.
+        (
+            "['checker.cpp']",
+            "['testlib.h']",
+            "#if 0\n#include \"testlib.h\"\n#endif\n",
+            None,
+        ),
+        ("['checker.cpp']", "['testlib.h']", "int main() {}\n", None),
+    ] {
+        let f = fixture();
+        f.write("problem/checker.cpp", source);
+        f.write("problem/second.cpp", "");
+        f.write("problem/other/second.cpp", "");
+        f.write("problem/testlib.h", "captured header\n");
+        f.write("problem/other/testlib.h", "other header\n");
+        let (target, check) = config(
+            &f,
+            "python",
+            &format!(
+                "[check]\nkind = 'checker'\nchecker = {{ sources = {sources}, support_files = {support}, language = 'cpp', profile = 'testlib' }}"
+            ),
+        );
+        let job = f.job(1 << 30, PrunePolicy::default());
+        let frozen = job
+            .inputs()
+            .freeze_judged(&f.store(), &[], &target, &check, &f.path("problem"))
+            .unwrap();
+        f.write("problem/checker.cpp", "#include <testlib.h>\n");
+        f.write("problem/testlib.h", "changed original\n");
+        let ready = prepare_job(job, frozen, &target, f.inputs(&Tools)).unwrap();
+        let provenance = &ready.judging.as_ref().unwrap().roles[0].report.provenance;
+        match (provenance, reason) {
+            (
+                RoleProvenance::Built {
+                    header:
+                        Header::Candidate {
+                            path,
+                            sha256,
+                            pinned,
+                        },
+                },
+                None,
+            ) => {
+                assert_eq!(path.head, b"testlib.h");
+                assert_eq!(
+                    *sha256,
+                    <[u8; 32]>::from(Sha256::digest(b"captured header\n"))
+                );
+                assert!(!pinned);
+            }
+            (
+                RoleProvenance::Built {
+                    header: Header::NotIdentified { reason: actual },
+                },
+                Some(expected),
+            ) => assert_eq!(*actual, expected),
+            _ => panic!("unexpected provenance: {provenance:?}"),
+        }
+    }
+}
+
+#[test]
+fn judge_fingerprint_and_role_content_match_the_frozen_encoder_inputs() {
+    use cpforge::report::SeedMode;
+    use cpforge::storage::facts::fingerprint::{
+        JudgeFingerprintBuilt, JudgeFingerprintFile, JudgeFingerprintOrigin, JudgeFingerprintRole,
+        judge_fingerprint,
+    };
+    let f = fixture();
+    let (target, check) = config(
+        &f,
+        "python",
+        "[check]\nkind = 'checker'\nchecker = { sources = ['checker.cpp'], support_files = ['helper.h'], assets = ['data/words'], language = 'cpp', profile = 'testlib' }\n",
+    );
+    let job = f.job(1 << 30, PrunePolicy::default());
+    let frozen = job
+        .inputs()
+        .freeze_judged(&f.store(), &[], &target, &check, &f.path("problem"))
+        .unwrap();
+    let files: Vec<_> = frozen.judging().unwrap().roles[0]
+        .files
+        .files()
+        .iter()
+        .map(|file| JudgeFingerprintFile {
+            path: file.problem_path.components().iter().collect(),
+            copied_bytes: fs::read(&file.copy_path).unwrap(),
+        })
+        .collect();
+    f.write("problem/checker.cpp", "new checker");
+    f.write("problem/helper.h", "new support");
+    f.write("problem/data/words", "new asset");
+    let ready = prepare_job(job, frozen, &target, f.inputs(&Tools)).unwrap();
+    let judging = ready.judging.as_ref().unwrap();
+    let role = &judging.roles[0];
+    let expected = judge_fingerprint(
+        &check.report_config(),
+        &[
+            Some(JudgeFingerprintRole {
+                profile: cpforge::report::JudgeProfile::Testlib,
+                files: files.clone(),
+                origin: JudgeFingerprintOrigin::Built(Box::new(JudgeFingerprintBuilt {
+                    sources: vec!["checker.cpp".into()],
+                    support_files: vec!["helper.h".into()],
+                    assets: vec![Path::new("data").join("words")],
+                    language: "cpp".into(),
+                    entry: None,
+                    build: role.target.build.clone(),
+                    run: role.target.run.clone(),
+                })),
+                deadline_us: None,
+                stdout_cap: None,
+                stderr_cap: None,
+                seed: SeedMode::None,
+            }),
+            None,
+            None,
+        ],
+    )
+    .unwrap();
+    assert_eq!(judging.judge_fingerprint, expected);
+    // Independent file-count/path/content encoder for the role capture digest.
+    let mut files = files;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut hash = Sha256::new();
+    hash.update((files.len() as u64).to_le_bytes());
+    for file in files {
+        let name = file
+            .path
+            .components()
+            .map(|c| c.as_os_str().to_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("/");
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update((file.copied_bytes.len() as u64).to_le_bytes());
+        hash.update(file.copied_bytes);
+    }
+    assert_eq!(
+        role.report.capture.content_sha256,
+        <[u8; 32]>::from(hash.finalize())
+    );
+}
+
+#[test]
+fn prebuilt_source_placeholder_is_recorded_as_deferred() {
+    let f = fixture();
+    let (_, check) = config(
+        &f,
+        "python",
+        "[check]\nvalidator = { program = 'validator.exe', profile = 'simple' }\n",
+    );
+    let cpforge::config::RoleInput::Prebuilt(role) = &check.validator.as_ref().unwrap().input
+    else {
+        panic!()
+    };
+    assert_eq!(role.run.deferred.len(), 1);
+    assert_eq!(
+        role.run.deferred[0].placeholder,
+        cpforge::config::Placeholder::Source
+    );
+    assert_eq!(role.run.deferred[0].origin, role.program.origin);
+}
+
+#[test]
+fn answer_policy_can_be_checked_without_admission() {
+    let f = fixture();
+    let (_, check) = config(
+        &f,
+        "python",
+        "[check]\nkind = 'checker'\nchecker = { program = 'validator.exe', profile = 'simple' }\n",
+    );
+    let error = plan::validate_answer_presence(
+        &check,
+        [("a".into(), false), ("b".into(), true), ("c".into(), false)],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "tests without an answer under answer = \"file\": a, c"
+    );
+    assert!(!f.path(".cpforge/runs").exists());
+    assert!(
+        fs::read_to_string(f.path(".cpforge/job-seq"))
+            .unwrap()
+            .contains("next = '0'")
+    );
 }

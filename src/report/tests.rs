@@ -1405,6 +1405,7 @@ fn orphan_fixtures_propagate_to_internal_job_result() {
         let verdict = test_verdict(&execution, &check);
         assert_eq!(verdict, TestVerdict::InternalError { invariant }, "{name}");
         let result = job_verdict(&JobInput {
+            roles: &[],
             scoring: crate::report::Scoring::PassFail,
             kind: JobKind::Test,
             build: None,
@@ -1420,6 +1421,7 @@ fn orphan_fixtures_propagate_to_internal_job_result() {
     }
     let build = build_result(&skipped(SkipReason::StopPolicy), &PostBuild::default());
     let result = job_verdict(&JobInput {
+        roles: &[],
         scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Build,
         build: Some(&build),
@@ -1814,6 +1816,7 @@ fn job_verdict_fixtures() {
     }
     for row in rows {
         let actual = job_verdict(&JobInput {
+            roles: &[],
             scoring: crate::report::Scoring::PassFail,
             kind: row.kind,
             build: row.build.as_ref(),
@@ -1840,6 +1843,7 @@ fn job_verdict_fixtures() {
         locus: InternalLocus::Execution { index: 2 },
     };
     let actual = job_verdict(&JobInput {
+        roles: &[],
         scoring: crate::report::Scoring::PassFail,
         kind: JobKind::Test,
         build: None,

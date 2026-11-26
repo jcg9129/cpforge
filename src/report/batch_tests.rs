@@ -721,6 +721,7 @@ fn judge_cf_display_and_judged_exits() {
 fn j_b51_all_passed_points_job_is_scored() {
     let tests = [TestVerdict::Passed];
     let input = JobInput {
+        roles: &[],
         kind: JobKind::Test,
         scoring: points(Aggregation::Sum),
         build: None,
@@ -745,6 +746,7 @@ fn j_b51_job_verdicts_and_statuses() {
     let status = |tests: &[TestVerdict], scores: &[Option<Score>], aggregation| {
         let scoring = points(aggregation);
         let verdict = job_verdict(&JobInput {
+            roles: &[],
             kind: JobKind::Test,
             scoring,
             build: None,

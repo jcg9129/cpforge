@@ -1,4 +1,4 @@
-//! Resolve captured judge stages. No role is executed or staged here.
+//! Resolve captured judge stages and freeze their provenance before execution.
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -6,10 +6,10 @@ use super::{
     CaptureCheck, PrepareJobInputs, ReadyError, guard,
     plan::{self, ExecutionRole, TestJobPlan},
 };
-use crate::build::{self, BuildArea, BuildId, FreshBuildOutputs, PlanInputs};
+use crate::build::{self, BuildArea, BuildId, PendingBuild, PlanInputs, PlannedTarget};
 use crate::config::TargetPlan;
 use crate::exec::{self, Context, InvocationDirs, Resolution, ResolvedStage};
-use crate::report::{AnswerPolicy, CheckMode, JudgeProfile, RoleName};
+use crate::report::{JudgeProfile, RoleName};
 use crate::storage::budget::Reservation;
 use crate::storage::inputs::{CapturedRole, FrozenJudging, SourceRole};
 use crate::tests_store::{FrozenAnswer, FrozenManifest};
@@ -31,32 +31,33 @@ pub struct JudgeRun {
 }
 
 #[derive(Debug)]
-pub struct ReadyRole {
+pub struct ReadyRole<'probe> {
     pub captured: CapturedRole,
     pub target: Box<TargetPlan>,
     pub capture_check: CaptureCheck,
-    pub outputs: Option<FreshBuildOutputs>,
+    pub pending_build: Option<Box<PendingBuild<'probe>>>,
+    pub report: crate::report::RoleReport,
     pub build_stage: Option<Box<ResolvedStage>>,
     pub runs: Vec<JudgeRun>,
 }
 
 #[derive(Debug)]
-pub struct ReadyJudging {
+pub struct ReadyJudging<'probe> {
     pub check: Box<crate::config::CheckConfig>,
     pub plan: TestJobPlan,
-    pub roles: Vec<ReadyRole>,
+    pub roles: Vec<ReadyRole<'probe>>,
     /// Held until eventual report publication; independent of run allowances.
     pub report_reservation: Reservation,
     pub judge_fingerprint: Option<[u8; 32]>,
 }
 
-pub(super) fn prepare_roles(
+pub(super) fn prepare_roles<'probe>(
     frozen: FrozenJudging,
     manifest: &FrozenManifest,
     target: &TargetPlan,
     registered: &crate::storage::admission::RegisteredJob,
-    inputs: &PrepareJobInputs<'_>,
-) -> Result<ReadyJudging, ReadyError> {
+    inputs: &PrepareJobInputs<'probe>,
+) -> Result<ReadyJudging<'probe>, ReadyError> {
     let plan = plan::plan_test_job(
         target,
         Some(&frozen.check),
@@ -66,24 +67,16 @@ pub(super) fn prepare_roles(
         &registered.dir,
     )
     .map_err(ReadyError::JudgingPlan)?;
-    // Config §9.1.4: under `answer = "file"` every selected test of a judged
-    // kind needs an answer; the error names all of them.
-    if frozen.check.kind.value != CheckMode::Compare
-        && frozen.check.answer.value == AnswerPolicy::File
-    {
-        let missing: Vec<_> = manifest
-            .entries()
-            .iter()
-            .filter(|test| matches!(test.answer, FrozenAnswer::Absent))
-            .map(|test| test.id.to_string())
-            .collect();
-        if !missing.is_empty() {
-            return Err(ReadyError::Judging(format!(
-                "tests without an answer under answer = \"file\": {}",
-                missing.join(", ")
-            )));
-        }
-    }
+    plan::validate_answer_presence(
+        &frozen.check,
+        manifest.entries().iter().map(|test| {
+            (
+                test.id.to_string(),
+                matches!(test.answer, FrozenAnswer::Present { .. }),
+            )
+        }),
+    )
+    .map_err(ReadyError::Judging)?;
     // Retention, not configuration: refused like the capture manifest's.
     let report_reservation = registered.budget.reserve(plan.report_bytes).map_err(|e| {
         ReadyError::Storage(crate::storage::StorageError::io(
@@ -253,11 +246,19 @@ pub(super) fn prepare_roles(
                 staged,
             });
         }
+        let report = super::role_provenance::snapshot(&captured, &capture_check)
+            .map_err(|e| ReadyError::Judging(e.to_string()))?;
+        let pending_build = match preflight.into_planned(outputs, inputs.build_bytes, inputs.probe)
+        {
+            PlannedTarget::Build(pending) => Some(Box::new(pending)),
+            PlannedTarget::BuildFree(_) => None,
+        };
         roles.push(ReadyRole {
             captured,
             target: role_target,
             capture_check,
-            outputs,
+            pending_build,
+            report,
             build_stage,
             runs,
         });
@@ -275,7 +276,7 @@ pub(super) fn prepare_roles(
 
 fn fingerprint(
     check: &crate::config::CheckConfig,
-    roles: &[ReadyRole],
+    roles: &[ReadyRole<'_>],
 ) -> std::io::Result<Option<[u8; 32]>> {
     use crate::config::RoleInput;
     use crate::report::SeedMode;

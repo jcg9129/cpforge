@@ -2,6 +2,8 @@
 
 #[allow(dead_code)]
 mod ready_support;
+#[path = "ready_support/role_builds.rs"]
+mod role_builds;
 
 use cpforge::config::Comparator;
 use cpforge::exec::NativeProbe;
