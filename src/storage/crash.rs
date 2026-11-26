@@ -34,8 +34,16 @@
 //! `test_add.answer_published`, `test_add.registered` (catalog insertion).
 //! Organisation clock: `CPF_STORAGE_ORG_NOW=YYYY-MM-DDTHH:MM:SS.mmmZ`
 //! overrides the single invocation clock sample for tag/untag/mark/add.
+//! Search bounds: `CPF_STORAGE_SEARCH_ENTRIES` and `CPF_STORAGE_SEARCH_BYTES`
+//! lower E and B. `CPF_STORAGE_SEARCH_IO=<path>` records action number, call,
+//! source path and bytes read as tab-separated rows. Only test builds inspect
+//! these variables or open the recorder. Barriers can leave the read worker
+//! stalled until process exit to exercise cancellation independently of I/O.
 //! Organisation barriers: `org.after_resolve`, `org.before_validation`,
-//! `notes.before_publish`; crash points: `org.edit_validated`,
+//! `notes.before_publish`, `org.read_partial` (after the first half of a
+//! record/notes read), `search.before_action#k` (before counted action k),
+//! `search.read#k` (stall read k), `search.stdout` (stall delivery); crash points:
+//! `org.edit_validated`,
 //! `org.edit_committed` (rename complete, directory not yet synced),
 //! `notes.before_publish`, `notes.published`.
 //! Selecting `file_noclobber.linked` also forces the Linux link fallback in
@@ -143,7 +151,7 @@ pub(crate) fn point(name: &'static str) {
 /// Test drivers exchange one byte over their inherited stdin/stdout pipes;
 /// production builds do not inspect this setting or perform pipe I/O.
 #[inline]
-pub(crate) fn barrier(name: &'static str) {
+pub(crate) fn barrier(name: &str) {
     #[cfg(feature = "storage-test-hooks")]
     {
         use std::io::{Read, Write};

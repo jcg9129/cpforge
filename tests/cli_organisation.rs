@@ -1498,6 +1498,7 @@ fn readers_create_no_lock_and_ignore_a_held_lock() {
     fs::remove_file(workspace.path(".cpforge/lock")).unwrap();
     for args in [
         vec!["ls"],
+        vec!["search", "dp"],
         vec!["ls", "--contests"],
         vec!["status", "--tag", "dp"],
         vec!["notes", "a", "--path"],
@@ -1510,6 +1511,7 @@ fn readers_create_no_lock_and_ignore_a_held_lock() {
     // A Windows lock handle is exclusive; snapshots must skip it while held.
     for args in [
         vec!["ls", "--json"],
+        vec!["search", "dp", "--json"],
         vec!["ls", "--contests", "--json"],
         vec!["status", "--tag", "dp", "--json"],
     ] {
@@ -1923,4 +1925,736 @@ fn date_flags_use_their_own_fields_and_combine_with_and() {
         }
         assert_eq!(snapshot(&workspace.0.0), before);
     }
+}
+
+fn search_doc(workspace: &Workspace, terms: &[&str]) -> serde_json::Value {
+    let mut args = vec!["search"];
+    args.extend_from_slice(terms);
+    args.push("--json");
+    document(&workspace.unchanged(&args, 0))
+}
+fn hit_ids(value: &serde_json::Value) -> Vec<&str> {
+    value["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["problem"].as_str().unwrap())
+        .collect()
+}
+fn reasons(value: &serde_json::Value) -> Vec<&str> {
+    value["incomplete_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn search_hits_unicode_fields_filters_and_no_matches() {
+    let w = fixture_f();
+    w.write("problems/a/notes.md", "cafe\u{301}\r\nonlynotes\n");
+    w.write("problems/b/notes.md", "café\n");
+    w.write("problems/d/notes.md", "needle DP\n");
+    let record = fs::read_to_string(w.path("problems/atcoder-abc400_a/problem.toml")).unwrap();
+    w.write(
+        "problems/atcoder-abc400_a/problem.toml",
+        format!("{record}title = 'Route'\nurl = 'https://example.invalid/problem'\n"),
+    );
+    for (terms, expected) in [
+        (
+            vec!["DP"],
+            vec![
+                "local:a",
+                "atcoder:abc400_a",
+                "local:c",
+                "local:d",
+                "local:g",
+                "local:j",
+                "local:wa",
+            ],
+        ),
+        (vec!["é"], vec!["local:a", "local:b"]),
+        (vec!["e\u{301}"], vec!["local:a", "local:b"]),
+        (vec!["Route", "dp"], vec!["atcoder:abc400_a"]),
+        (vec!["onlynotes"], vec!["local:a"]),
+        (vec!["onlynotes", "--no-notes"], vec![]),
+        (
+            vec!["dp", "--status", "solved"],
+            vec!["atcoder:abc400_a", "local:d"],
+        ),
+        (vec!["rated"], vec![]),
+        (vec!["nothing-here"], vec![]),
+    ] {
+        let value = search_doc(&w, &terms);
+        assert_eq!(hit_ids(&value), expected, "{terms:?}: {value}");
+        // Invalid fields are reported even if the query/filter does not match.
+        assert!(
+            value["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["field"] == "tags")
+        );
+    }
+    let value = search_doc(&w, &["e"]);
+    assert!(hit_ids(&value).contains(&"local:a"));
+    assert!(hit_ids(&value).contains(&"local:b"));
+    let value = search_doc(&w, &["dp"]);
+    let hit = value["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["problem"] == "local:d")
+        .unwrap();
+    assert_eq!(hit["fields"], serde_json::json!(["tags", "notes"]));
+    assert_eq!(hit["notes_lines"], serde_json::json!([1]));
+    let value = search_doc(&w, &["atcoder", "Route", "example.invalid", "dp", "solved"]);
+    assert_eq!(
+        value["hits"][0]["fields"],
+        serde_json::json!(["identity", "title", "url", "tags", "status"])
+    );
+    let output = w.unchanged(&["search", "nothing-here"], 0);
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("no matches\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("invalid_field"));
+    // An absent status is effective `new` for filters, but isn't searched.
+    assert!(
+        search_doc(&w, &["new", "--status", "new"])["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["problem"] != "local:a")
+    );
+    for (filter, value) in [
+        ("--tag", "graphs"),
+        ("--site", "atcoder"),
+        ("--contest", "c1"),
+        ("--created", "2026-11-24"),
+        ("--updated", "2026-11-24"),
+        ("--solved", "2026-11-24"),
+        ("--archived-in", "2026-11-24"),
+    ] {
+        let listing = document(&w.unchanged(&["ls", filter, value, "--json"], 0));
+        let search = search_doc(&w, &[":", filter, value]);
+        let expected = listing["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["problem"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(hit_ids(&search), expected);
+    }
+}
+
+#[test]
+fn search_line_numbers_truncation_and_lossy_notes() {
+    let w = Workspace::new();
+    for count in [16, 20] {
+        w.write("problems/p/notes.md", "needle\r\n".repeat(count));
+        let value = search_doc(&w, &["needle"]);
+        assert_eq!(
+            value["hits"][0]["notes_lines"],
+            serde_json::json!((1..=16).collect::<Vec<_>>())
+        );
+        assert_eq!(value["hits"][0]["notes_lines_dropped"], count - 16);
+        assert_eq!(value["incomplete"], false);
+        let output = w.unchanged(&["search", "needle"], 0);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("search incomplete"));
+    }
+    for size in [65_536, 65_537] {
+        w.write("problems/p/notes.md", vec![b'x'; size]);
+        let value = search_doc(&w, &["x"]);
+        assert_eq!(value["hits"][0]["notes_truncated"], size > 65_536);
+        assert_eq!(
+            reasons(&value),
+            if size > 65_536 {
+                vec!["notes_truncated"]
+            } else {
+                vec![]
+            }
+        );
+    }
+    let mut bytes = vec![b'x'; 65_536];
+    bytes.extend_from_slice(b"needle");
+    w.write("problems/p/notes.md", &bytes);
+    assert!(hit_ids(&search_doc(&w, &["needle"])).is_empty());
+    let mut bytes = vec![b'x'; 65_535];
+    bytes.extend_from_slice("€".as_bytes());
+    w.write("problems/p/notes.md", &bytes);
+    let value = search_doc(&w, &["€"]);
+    assert!(hit_ids(&value).is_empty());
+    assert!(value["findings"].as_array().unwrap().is_empty());
+    w.write("problems/p/notes.md", b"\xffneedle");
+    let value = search_doc(&w, &["needle"]);
+    assert_eq!(hit_ids(&value), ["local:p"]);
+    assert_eq!(value["findings"][0]["kind"], "notes_not_utf8");
+    assert_eq!(value["incomplete"], false);
+    // An earlier replacement must not hide a cut sequence at the cap.
+    bytes[0] = 0xff;
+    w.write("problems/p/notes.md", &bytes);
+    let value = search_doc(&w, &["�"]);
+    assert_eq!(value["findings"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn search_nonregular_and_unreadable_notes_are_visible_and_optional() {
+    let w = Workspace::new();
+    fs::create_dir(w.path("problems/p/notes.md")).unwrap();
+    let value = search_doc(&w, &["nothing"]);
+    assert_eq!(value["findings"][0]["kind"], "notes_not_regular");
+    assert_eq!(reasons(&value), ["unreadable_source"]);
+    let output = w.unchanged(&["search", "nothing"], 0);
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("no matches\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("notes_not_regular"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).lines().last(),
+        Some("search incomplete: unreadable_source")
+    );
+    assert_eq!(
+        search_doc(&w, &["nothing", "--no-notes"])["incomplete"],
+        false
+    );
+    fs::remove_dir(w.path("problems/p/notes.md")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        w.write("target", "needle");
+        symlink(w.path("target"), w.path("problems/p/notes.md")).unwrap();
+        let value = search_doc(&w, &["needle"]);
+        assert_eq!(value["findings"][0]["kind"], "notes_not_regular");
+        assert_eq!(reasons(&value), ["unreadable_source"]);
+        fs::remove_file(w.path("problems/p/notes.md")).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let path =
+            std::ffi::CString::new(w.path("problems/p/notes.md").as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated fixture path, user-only FIFO mode.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let value = search_doc(&w, &["needle"]);
+        assert_eq!(value["findings"][0]["kind"], "notes_not_regular");
+        assert_eq!(reasons(&value), ["unreadable_source"]);
+        fs::remove_file(w.path("problems/p/notes.md")).unwrap();
+        w.write("problems/p/notes.md", "needle");
+        let path = w.path("problems/p/notes.md");
+        let original = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&path).is_err() {
+            let value = search_doc(&w, &["needle"]);
+            assert_eq!(value["findings"][0]["kind"], "notes_unreadable");
+            assert_eq!(reasons(&value), ["unreadable_source"]);
+            // Zero hits: `no matches`, the finding, then the incompleteness line.
+            let output = w.unchanged(&["search", "needle"], 0);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.starts_with("no matches\n"), "{stdout}");
+            assert!(stdout.contains("notes_unreadable"), "{stdout}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).lines().last(),
+                Some("search incomplete: unreadable_source")
+            );
+        }
+        fs::set_permissions(path, original).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        w.write("problems/p/notes.md", "needle");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(w.path("problems/p/notes.md"))
+            .unwrap();
+        // Exclusive sharing denies read handles without requiring elevation.
+        let value = document(&w.run(&["search", "needle", "--json"], 0));
+        assert_eq!(value["findings"][0]["kind"], "notes_unreadable");
+        assert_eq!(reasons(&value), ["unreadable_source"]);
+        assert_eq!(
+            document(&w.run(&["search", "needle", "--no-notes", "--json"], 0))["incomplete"],
+            false
+        );
+        drop(held);
+        // Exercise the contract's deny-read ACL as well as sharing denial.
+        let path = w.path("problems/p/notes.md");
+        let deny = Command::new("icacls")
+            .arg(&path)
+            .args(["/deny", "*S-1-1-0:(R)"])
+            .output()
+            .unwrap();
+        assert!(deny.status.success(), "{deny:?}");
+        let output = w.run(&["search", "needle", "--json"], 0);
+        let optional = w.run(&["search", "needle", "--no-notes", "--json"], 0);
+        let restore = Command::new("icacls")
+            .arg(&path)
+            .args(["/remove:d", "*S-1-1-0"])
+            .output()
+            .unwrap();
+        assert!(restore.status.success(), "{restore:?}");
+        assert_eq!(document(&output)["findings"][0]["kind"], "notes_unreadable");
+        assert_eq!(reasons(&document(&output)), ["unreadable_source"]);
+        assert_eq!(document(&optional)["incomplete"], false);
+        w.write("target", "needle");
+        fs::remove_file(&path).unwrap();
+        std::os::windows::fs::symlink_file(w.path("target"), &path).unwrap();
+        assert_eq!(
+            search_doc(&w, &["needle"])["findings"][0]["kind"],
+            "notes_not_regular"
+        );
+    }
+}
+
+fn search_ten() -> Workspace {
+    let w = Workspace::new();
+    fs::remove_dir_all(w.path("problems")).unwrap();
+    for index in 1..=10 {
+        let mut record = format!("schema = 1\n[problem]\nid = 'local:p{index:02}'\n#");
+        record.push_str(&" ".repeat(1000 - record.len()));
+        w.write(&format!("problems/p{index:02}/problem.toml"), record);
+        w.write(&format!("problems/p{index:02}/notes.md"), "x".repeat(2000));
+    }
+    w
+}
+
+#[test]
+fn search_bounds_and_operation_accounting() {
+    let w = search_ten();
+    let logs = Directory::new();
+    for (entries, bytes, no_notes, count, expected, used_e, used_b) in [
+        (30, 30000, false, 10, vec![], 30, 30000),
+        (24, 30000, false, 7, vec!["entry_limit"], 24, 21000),
+        (5, 30000, false, 0, vec!["entry_limit"], 5, 0),
+        (100, 30000, false, 10, vec![], 30, 30000),
+        (100, 10000, false, 3, vec!["byte_limit"], 18, 10000),
+        (100, 10000, true, 10, vec![], 20, 10000),
+    ] {
+        let used_e: u32 = used_e;
+        let log = logs.path("calls");
+        let _ = fs::remove_file(&log);
+        let before = snapshot(&w.0.0);
+        let mut command = w.command(&["search", "p", "--json"]);
+        if no_notes {
+            command.arg("--no-notes");
+        }
+        let output = command
+            .env("CPF_STORAGE_SEARCH_ENTRIES", entries.to_string())
+            .env("CPF_STORAGE_SEARCH_BYTES", bytes.to_string())
+            .env("CPF_STORAGE_SEARCH_IO", &log)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let value = document(&output);
+        assert_eq!(
+            hit_ids(&value),
+            (1..=count)
+                .map(|i| format!("local:p{i:02}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(reasons(&value), expected);
+        assert_eq!(value["entries"], used_e);
+        assert_eq!(value["bytes_read"], used_b.to_string());
+        let calls = fs::read_to_string(&log).unwrap();
+        let mut charged = std::collections::BTreeSet::new();
+        let mut actual_bytes = 0_u64;
+        for line in calls.lines() {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            let action = columns[0].parse::<u32>().unwrap();
+            assert!((1..=used_e).contains(&action));
+            assert!(matches!(
+                columns[1],
+                "enumerate"
+                    | "enumeration_end"
+                    | "entry"
+                    | "entry_type"
+                    | "open"
+                    | "handle_metadata"
+                    | "read"
+                    | "handle_length"
+            ));
+            if matches!(columns[1], "entry" | "open") {
+                assert!(charged.insert(action));
+            }
+            actual_bytes += columns[3].parse::<u64>().unwrap();
+        }
+        assert_eq!(charged.len(), used_e as usize);
+        assert_eq!(actual_bytes.to_string(), value["bytes_read"]);
+        assert_eq!(snapshot(&w.0.0), before);
+    }
+    // First candidate truncates notes; the second record exceeds B.
+    w.write("problems/p01/notes.md", "x".repeat(65_537));
+    let output = w
+        .command(&["search", "p", "--json"])
+        .env("CPF_STORAGE_SEARCH_BYTES", "66537")
+        .output()
+        .unwrap();
+    assert_eq!(
+        reasons(&document(&output)),
+        ["byte_limit", "notes_truncated"]
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).lines().last(),
+        Some("search incomplete: byte_limit, notes_truncated")
+    );
+}
+
+#[test]
+fn search_growth_never_exceeds_byte_allowance() {
+    let w = search_ten();
+    let mut child = w
+        .command(&["search", "p", "--no-notes", "--json"])
+        .env("CPF_STORAGE_SEARCH_BYTES", "1000")
+        .env("CPF_STORAGE_PAUSE_AT", "search.read#1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    barrier(&mut child, "search.read#1");
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(w.path("problems/p01/problem.toml"))
+        .unwrap();
+    file.write_all(&[b' '; 1000]).unwrap();
+    drop(file);
+    release(&mut child);
+    let value = document(&finished(child, 0));
+    assert_eq!(value["bytes_read"], "1000");
+    assert!(hit_ids(&value).is_empty());
+    assert_eq!(reasons(&value), ["byte_limit"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn search_real_entry_limit_and_collision_inventory() {
+    let w = Workspace::new();
+    fs::remove_dir_all(w.path("problems")).unwrap();
+    fs::create_dir(w.path("problems")).unwrap();
+    for i in 0..100_001 {
+        fs::create_dir(w.path(&format!("problems/p{i}"))).unwrap();
+    }
+    let logs = Directory::new();
+    let log = logs.path("calls");
+    let recorded = |args: &[&str]| {
+        let _ = fs::remove_file(&log);
+        let output = w
+            .command(args)
+            .env("CPF_STORAGE_SEARCH_IO", &log)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        (document(&output), fs::read_to_string(&log).unwrap())
+    };
+    let (value, calls) = recorded(&["search", "x", "--json"]);
+    assert_eq!(reasons(&value), ["entry_limit"]);
+    assert_eq!(value["entries"], 100_000);
+    assert_eq!(value["bytes_read"], "0");
+    assert!(hit_ids(&value).is_empty());
+    assert!(calls.lines().all(|line| !line.contains("\topen\t")));
+    fs::remove_dir_all(w.path("problems")).unwrap();
+    for name in ["P1", "p1"] {
+        w.write(
+            &format!("problems/{name}/problem.toml"),
+            format!("[problem]\nid='local:{name}'\n"),
+        );
+    }
+    let (value, calls) = recorded(&["search", "x", "--json"]);
+    assert_eq!(value["entries"], 2);
+    let kinds = value["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["path"]["utf8"].as_str().unwrap(),
+                f["kind"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            ("problems/P1", "name_collision"),
+            ("problems/p1", "name_collision")
+        ]
+    );
+    let enumerations = calls
+        .lines()
+        .filter(|line| line.split('\t').nth(1) == Some("enumerate"))
+        .count();
+    assert_eq!(enumerations, 1, "{calls}");
+}
+
+#[test]
+fn search_classifies_oversized_records_and_linked_inventory_like_ls() {
+    let w = Workspace::new();
+    let mut record = BASE.to_owned();
+    record.push('#');
+    record.push_str(&" ".repeat(1024 * 1024 + 1 - record.len()));
+    w.write("problems/p/problem.toml", record);
+    let value = search_doc(&w, &["p"]);
+    assert!(hit_ids(&value).is_empty());
+    assert_eq!(value["findings"][0]["kind"], "metadata_malformed");
+    // Classified from the handle length: nothing is read.
+    assert_eq!(value["bytes_read"], "0");
+    let listing = document(&w.unchanged(&["ls", "--json"], 0));
+    assert_eq!(listing["invalid"][0]["kind"], "metadata_malformed");
+    #[cfg(unix)]
+    {
+        w.write(
+            "elsewhere/q/problem.toml",
+            "schema = 1\n[problem]\nid = 'local:q'\n",
+        );
+        fs::remove_dir_all(w.path("problems")).unwrap();
+        std::os::unix::fs::symlink("elsewhere", w.path("problems")).unwrap();
+        w.unchanged(&["ls", "--json"], 8);
+        let value = document(&w.unchanged(&["search", "q", "--json"], 8));
+        assert_eq!(value["document"], "error");
+    }
+}
+
+#[test]
+fn search_never_enumerates_unrequested_contests() {
+    let w = Workspace::new();
+    for i in 0..100_001 {
+        fs::create_dir_all(w.path(&format!("contests/c{i}"))).unwrap();
+    }
+    let logs = Directory::new();
+    let path = logs.path("calls");
+    let output = w
+        .command(&["search", "p", "--json"])
+        .env("CPF_STORAGE_SEARCH_IO", &path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value = document(&output);
+    assert_eq!(value["incomplete"], false);
+    assert!(!fs::read_to_string(path).unwrap().contains("contests"));
+    let value = search_doc(&w, &["p", "--contest", "c1"]);
+    assert_eq!(reasons(&value), ["entry_limit"]);
+    assert_eq!(value["entries"], 100_000);
+    assert_eq!(value["bytes_read"], "0");
+    assert!(hit_ids(&value).is_empty());
+}
+
+#[test]
+fn readers_use_torn_bytes_once_for_metadata_and_notes() {
+    let w = Workspace::new();
+    // Equal lengths: old first half + new second half is malformed TOML.
+    let old = "[problem]\nid = 'local:p'\n#padding padding padding\n";
+    let mut new = vec![b' '; old.len()];
+    new[old.len() / 2] = b'\'';
+    w.write("problems/p/problem.toml", old);
+    let mut child = paused(&w, &["ls", "--json"], "org.read_partial");
+    w.write("problems/p/problem.toml", &new);
+    release(&mut child);
+    assert_eq!(
+        document(&finished(child, 0))["invalid"][0]["kind"],
+        "metadata_malformed"
+    );
+    w.write("problems/p/problem.toml", BASE);
+    // Avoid the metadata partial-read hook; select its second occurrence by
+    // releasing the record read, then rewrite the notes at the next pause.
+    w.write("problems/p/notes.md", "oldoldoldold");
+    let mut child = paused(
+        &w,
+        &["search", "oldold", "newnew", "--json"],
+        "org.read_partial",
+    );
+    release(&mut child);
+    barrier(&mut child, "org.read_partial");
+    w.write("problems/p/notes.md", "newnewnewnew");
+    release(&mut child);
+    let value = document(&finished(child, 0));
+    assert_eq!(hit_ids(&value), ["local:p"]);
+    assert_eq!(value["incomplete"], false);
+}
+
+fn signal_command(w: &Workspace, args: &[&str]) -> Command {
+    let mut command = w.command(args);
+    new_process_group(&mut command);
+    command
+}
+#[cfg(windows)]
+fn new_process_group(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::{Console::AllocConsole, Threading::CREATE_NEW_PROCESS_GROUP};
+    // A console may already be attached. Each child gets a separate group.
+    // SAFETY: no arguments; failure only means a console is already attached.
+    unsafe {
+        AllocConsole();
+    }
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+}
+#[cfg(not(windows))]
+fn new_process_group(_: &mut Command) {}
+fn search_signal(child: &Child) {
+    #[cfg(unix)]
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+        assert_ne!(
+            unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) },
+            0
+        );
+    }
+}
+fn signal_exit(output: &Output) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(output.status.signal(), Some(libc::SIGINT), "{output:?}");
+    }
+    #[cfg(windows)]
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
+}
+
+#[test]
+fn search_cancellation_abandons_worker_and_delivers_finished_candidates() {
+    let w = search_ten();
+    for (point, count) in [("search.before_action#20", 4), ("search.read#5", 0)] {
+        let before = snapshot(&w.0.0);
+        let mut child = signal_command(&w, &["search", "p", "--json"])
+            .env("CPF_STORAGE_PAUSE_AT", point)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        barrier(&mut child, point);
+        let start = std::time::Instant::now();
+        search_signal(&child);
+        let mut line = String::new();
+        BufReader::new(child.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_millis(200));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            hit_ids(&value),
+            (1..=count)
+                .map(|i| format!("local:p{i:02}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(reasons(&value), ["cancelled"]);
+        let output = child.wait_with_output().unwrap();
+        signal_exit(&output);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(snapshot(&w.0.0), before);
+    }
+}
+
+#[test]
+fn search_second_signal_forces_exit_during_stalled_delivery() {
+    let w = search_ten();
+    let signals = Directory::new();
+    let ready = signals.path("ready");
+    let mut child = signal_command(&w, &["search", "p", "--json"])
+        .env("CPF_STORAGE_PAUSE_AT", "search.stdout")
+        .env("CPF_STORAGE_SIGNAL_READY", &ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    barrier(&mut child, "search.stdout");
+    search_signal(&child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !ready.exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(110));
+    let start = std::time::Instant::now();
+    search_signal(&child);
+    let output = child.wait_with_output().unwrap();
+    signal_exit(&output);
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn search_exit_statuses_and_missing_inventory() {
+    let outside = Directory::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
+        .current_dir(&outside.0)
+        .args(["search", "x", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(8));
+    assert_eq!(document(&output)["document"], "error");
+    assert_eq!(document(&output)["command"], "search");
+    let w = Workspace::new();
+    fs::remove_dir_all(w.path("problems")).unwrap();
+    let value = search_doc(&w, &["x"]);
+    assert_eq!(value["incomplete"], false);
+    assert!(hit_ids(&value).is_empty());
+    w.write("contests/broken/contest.toml", "[");
+    for name in ["missing", "broken"] {
+        w.unchanged(&["search", "x", "--contest", name, "--json"], 8);
+    }
+    for (args, code) in [
+        (vec!["search", "x", "--json"], 11),
+        (vec!["search", "--json"], 2),
+    ] {
+        let mut child = w
+            .command(&args)
+            .stdout(closed_pipe())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(code));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(w.path("problems")).unwrap();
+        let path = w.path("problems");
+        let original = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&path).is_err() {
+            w.run(&["search", "x", "--json"], 8);
+        }
+        fs::set_permissions(path, original).unwrap();
+    }
+}
+
+#[test]
+fn cancelled_search_with_broken_delivery_exits_eleven() {
+    let w = search_ten();
+    let mut child = signal_command(&w, &["search", "p", "--json"])
+        .env("CPF_STORAGE_PAUSE_AT", "search.before_action#20")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    barrier(&mut child, "search.before_action#20");
+    drop(child.stdout.take());
+    search_signal(&child);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(11), "{output:?}");
+}
+
+#[test]
+fn search_human_cancellation_reports_only_completed_hits() {
+    let w = search_ten();
+    let before = snapshot(&w.0.0);
+    let mut child = signal_command(&w, &["search", "p"])
+        .env("CPF_STORAGE_PAUSE_AT", "search.before_action#20")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    barrier(&mut child, "search.before_action#20");
+    search_signal(&child);
+    let output = child.wait_with_output().unwrap();
+    signal_exit(&output);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.lines().count(), 4);
+    for i in 1..=4 {
+        assert!(text.contains(&format!("local:p{i:02}")));
+    }
+    assert!(!text.contains("local:p05"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).lines().last(),
+        Some("search incomplete: cancelled")
+    );
+    assert_eq!(snapshot(&w.0.0), before);
 }

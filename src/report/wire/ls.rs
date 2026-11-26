@@ -12,7 +12,7 @@ fn findings(values: &[Finding]) -> Value {
         ])
     })
 }
-fn source(value: &Source) -> Value {
+pub(super) fn source(value: &Source) -> Value {
     let mut bytes = Vec::new();
     for component in value.path.components() {
         if !bytes.is_empty() {

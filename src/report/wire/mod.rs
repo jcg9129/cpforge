@@ -21,9 +21,11 @@ pub mod read;
 mod roles;
 mod run;
 mod schema;
+mod search;
 mod status;
 mod value;
 pub(crate) use ls::encode_ls;
+pub(crate) use search::encode_search;
 pub(crate) use status::{ProblemStatus, encode_status};
 
 pub use artifacts::*;

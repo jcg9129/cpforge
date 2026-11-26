@@ -50,6 +50,7 @@ fn command() -> ExitCode {
     if let Ok(cli) = &parsed {
         let filters = match &cli.command {
             Some(Command::Ls(args)) => Some(&args.filters),
+            Some(Command::Search(args)) => Some(&args.filters),
             Some(Command::Status { filters, .. }) => Some(filters),
             _ => None,
         };

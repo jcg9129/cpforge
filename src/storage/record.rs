@@ -121,10 +121,20 @@ pub(crate) fn read_record_bytes(path: &Path) -> RecordBytes {
         Err(error) => return RecordBytes::Unreadable(error),
     }
     let mut bytes = Vec::new();
-    if let Err(error) = file
-        .take(RECORD_SIZE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-    {
+    #[cfg(feature = "storage-test-hooks")]
+    let file = {
+        let mut file = file;
+        let half = file.metadata().map_or(1, |metadata| {
+            (metadata.len().min(RECORD_SIZE_LIMIT as u64 + 1) / 2).max(1)
+        });
+        if let Err(error) = file.by_ref().take(half).read_to_end(&mut bytes) {
+            return RecordBytes::Unreadable(error);
+        }
+        crate::storage::crash::barrier("org.read_partial");
+        file
+    };
+    let remaining = RECORD_SIZE_LIMIT as u64 + 1 - bytes.len() as u64;
+    if let Err(error) = file.take(remaining).read_to_end(&mut bytes) {
         return RecordBytes::Unreadable(error);
     }
     if bytes.len() > RECORD_SIZE_LIMIT {

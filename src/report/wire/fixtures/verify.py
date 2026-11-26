@@ -535,6 +535,26 @@ def verify():
                 assert counts == expected, path
                 assert all(row["count"] > 0 for row in counts), path
                 assert sum(row["count"] for row in counts) + contest["unresolved"] + contest["invalid"] == contest["members"], path
+        if isinstance(value, dict) and value.get("document") == "search":
+            assert list(value) == ["schema", "document", "platform", "terms", "notes", "hits", "findings", "incomplete", "incomplete_reasons", "entries", "bytes_read"], path
+            assert 1 <= len(value["terms"]) <= 16, path
+            assert all(0 < len(term.encode()) <= 256 for term in value["terms"]), path
+            reasons = ["entry_limit", "byte_limit", "notes_truncated", "unreadable_source", "cancelled"]
+            assert value["incomplete_reasons"] == [r for r in reasons if r in value["incomplete_reasons"]], path
+            assert value["incomplete"] == bool(value["incomplete_reasons"]), path
+            assert 0 <= value["entries"] <= 100000, path
+            assert isinstance(value["bytes_read"], str) and 0 <= int(value["bytes_read"]) <= 67108864, path
+            for hit in value["hits"]:
+                assert list(hit) == ["problem", "origin", "fields", "notes_lines", "notes_lines_dropped", "notes_truncated"], path
+                assert hit["origin"] == "active", path
+                fields = ["identity", "title", "url", "tags", "status", "notes"]
+                assert hit["fields"] == [f for f in fields if f in hit["fields"]], path
+                assert len(hit["notes_lines"]) <= 16 and all(n > 0 for n in hit["notes_lines"]), path
+                assert hit["notes_lines"] == sorted(set(hit["notes_lines"])), path
+                assert "notes" in hit["fields"] or not hit["notes_lines"], path
+            for source in value["findings"]:
+                assert list(source) == ["path", "kind", "field", "message"], path
+                assert list(source["path"]) in [["utf8"], ["bytes_b64"]], path
         for report in [value, value.get("report") if isinstance(value, dict) else None]:
             if isinstance(report, dict) and report.get("document") == "job_report":
                 job_report_members(report, path)

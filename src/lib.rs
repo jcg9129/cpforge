@@ -27,6 +27,7 @@ mod organisation_read;
 pub mod process;
 pub mod progress;
 pub mod report;
+mod search;
 pub mod selection;
 mod status;
 pub mod storage;
@@ -58,7 +59,6 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     if let Some(command) = cli.command.as_ref() {
         let unavailable = match command {
             Command::Fetch(_) => Some("fetch"),
-            Command::Search(_) => Some("search"),
             Command::Stress(args) => {
                 if args.command.is_none() {
                     config_commands::stress_preflight(
@@ -89,6 +89,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     }
     match cli.command {
         Some(Command::Ls(args)) => return list::run(args),
+        Some(Command::Search(args)) => return search::run(args),
         Some(Command::Tag(args)) => {
             return organisation::run(&args.target, organisation::Operation::Tag(&args.tags), None)
                 .map(|()| exit::ExitCode::Success);

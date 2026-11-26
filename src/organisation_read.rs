@@ -12,7 +12,7 @@ use crate::names::{self, Identifier, ProblemIdentity};
 use crate::organisation::{self, Finding};
 use crate::storage::{self, Record};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Source {
     pub path: PathBuf,
     pub kind: &'static str,
@@ -130,7 +130,11 @@ fn entry_name(
     Ok(id)
 }
 
-fn record<T>(path: PathBuf, record: Record<T, String>, contest: bool) -> Result<T, Source> {
+pub(crate) fn record<T>(
+    path: PathBuf,
+    record: Record<T, String>,
+    contest: bool,
+) -> Result<T, Source> {
     let (kind, message) = match record {
         Record::Valid(value) => return Ok(value),
         Record::Missing => ("metadata_missing", "record missing".into()),
