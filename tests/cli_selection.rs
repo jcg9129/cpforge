@@ -518,6 +518,9 @@ fn unknown_kind_and_unconfigured_problem_are_selectable() {
 enum TreeEntry {
     Directory,
     File(Vec<u8>),
+    // A held workspace lock: Windows refuses reads of its locked range, so it
+    // is compared by length and modification time, which any write changes.
+    Locked(u64, std::time::SystemTime),
     Link(PathBuf),
 }
 
@@ -538,6 +541,8 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {
             TreeEntry::Directory
         } else if metadata.file_type().is_symlink() {
             TreeEntry::Link(fs::read_link(&path).unwrap())
+        } else if relative == Path::new(".cpforge").join("lock") {
+            TreeEntry::Locked(metadata.len(), metadata.modified().unwrap())
         } else {
             TreeEntry::File(fs::read(&path).unwrap())
         };
