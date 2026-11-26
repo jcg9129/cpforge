@@ -43,11 +43,21 @@ pub(crate) fn inspect_problem(
     root: &Path,
     name: &Identifier,
 ) -> Result<(Resolution, String), StorageError> {
+    let (resolution, detail, _) =
+        inspect_problem_for(root, name, Some(&ProblemIdentity::local(name.clone())))?;
+    Ok((resolution, detail))
+}
+
+fn inspect_problem_for(
+    root: &Path,
+    name: &Identifier,
+    expected: Option<&ProblemIdentity>,
+) -> Result<(Resolution, String, Option<ProblemIdentity>), StorageError> {
     let directory = storage::checked_path(root, Path::new("problems"), false)?;
     let listing = match fs::read_dir(&directory) {
         Ok(listing) => listing,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((Resolution::Create, String::new()));
+            return Ok((Resolution::Create, String::new(), None));
         }
         Err(error) => return Err(StorageError::io(directory, error)),
     };
@@ -101,7 +111,15 @@ pub(crate) fn inspect_problem(
             }
         }
     }
-    Ok((names::resolve_add(name, &entries), detail))
+    let identity = entries.first().and_then(|entry| match &entry.metadata {
+        ProblemMetadata::Valid { identity } => ProblemIdentity::parse(identity).ok(),
+        _ => None,
+    });
+    Ok((
+        names::resolve_problem(name, expected, &entries),
+        detail,
+        identity,
+    ))
 }
 
 /// A validated existing problem. Its identity is bound to its directory spelling.
@@ -251,13 +269,33 @@ fn reference_identity(reference: &str) -> Result<ProblemIdentity, SelectionError
 /// Look up a reference without taking a lock. `root` is the canonical workspace
 /// root. Mutating callers use this same lookup while holding their guard.
 pub fn lookup(root: &Path, name: &str) -> Result<Problem, SelectionError> {
-    let identity = reference_identity(name)?;
-    let (resolution, detail) = inspect_problem(root, identity.name())?;
+    if let Some((contest, label)) = name.split_once('/') {
+        return lookup_label(root, contest, label).map_err(|reason| {
+            SelectionError::InvalidReference {
+                reference: name.into(),
+                reason,
+            }
+        });
+    }
+    let requested = reference_identity(name)?;
+    let expected = name.contains(':').then_some(&requested);
+    let (resolution, detail, identity) = inspect_problem_for(root, requested.name(), expected)
+        .map_err(|error| SelectionError::InvalidReference {
+            reference: name.into(),
+            reason: error.to_string(),
+        })?;
     match resolution {
-        Resolution::Create => Err(SelectionError::NotFound { identity }),
+        Resolution::Create => Err(SelectionError::NotFound {
+            identity: requested,
+        }),
         Resolution::Exists => Ok(Problem {
-            dir: canonical(&root.join("problems").join(identity.name().as_str()))?,
-            identity,
+            dir: canonical(&root.join("problems").join(requested.name().as_str())).map_err(
+                |error| SelectionError::InvalidReference {
+                    reference: name.into(),
+                    reason: error.to_string(),
+                },
+            )?,
+            identity: identity.expect("valid bound problem"),
         }),
         Resolution::NameCollision { reason, entries } => Err(SelectionError::Collision {
             reason,
@@ -265,9 +303,94 @@ pub fn lookup(root: &Path, name: &str) -> Result<Problem, SelectionError> {
                 .into_iter()
                 .map(|entry| root.join("problems").join(entry))
                 .collect(),
-            detail,
+            detail: format!("reference {name:?}{detail}"),
         }),
     }
+}
+
+/// `<contest>/<label>` (storage §5.7): exactly one record carries the label
+/// (exact spelling) and its `id` resolves as an identity reference. A label
+/// never falls back to a problem name or to another contest.
+fn lookup_label(root: &Path, contest: &str, label: &str) -> Result<Problem, String> {
+    crate::add::validate_label(label).map_err(|reason| format!("invalid label: {reason}"))?;
+    let document = read_contest(root, contest).map_err(|error| error.to_string())?;
+    let id = document
+        .get("problem")
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+        .find(|record| record.get("label").and_then(Item::as_str) == Some(label))
+        .and_then(|record| record.get("id").and_then(Item::as_str))
+        .ok_or_else(|| {
+            let path = root.join("contests").join(contest).join("contest.toml");
+            format!("{} has no record with label {label:?}", path.display())
+        })?;
+    lookup(root, id).map_err(|error| error.to_string())
+}
+
+/// Validate remote contest binding after schema and field classification.
+/// Local contests have no `[contest]` table, regardless of their directory name.
+pub(crate) fn contest_binding(document: &DocumentMut, name: &Identifier) -> Result<(), String> {
+    if let Some(contest) = document.get("contest") {
+        let id = contest
+            .get("id")
+            .and_then(Item::as_str)
+            .expect("validated contest identity");
+        let identity = names::ContestIdentity::parse(id).expect("validated contest identity");
+        identity
+            .check_binding(name)
+            .map_err(|reason| format!("{reason:?}: {id} does not match directory {name}"))?;
+    }
+    Ok(())
+}
+
+/// Shared lock-free, exact-spelling contest lookup for labels and bulk readers.
+fn read_contest(root: &Path, reference: &str) -> Result<DocumentMut, SelectionError> {
+    let invalid = |reason: String| SelectionError::InvalidReference {
+        reference: reference.into(),
+        reason,
+    };
+    let name = Identifier::new(reference).map_err(|error| invalid(error.to_string()))?;
+    let directory = storage::checked_path(root, Path::new("contests"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(invalid("unknown contest".into()));
+        }
+        Err(error) => return Err(StorageError::io(&directory, error).into()),
+    };
+    let mut matches = Vec::new();
+    for entry in listing {
+        let entry = entry.map_err(|error| StorageError::io(&directory, error))?;
+        if names::collides_with_native(name.as_str(), &entry.file_name()) {
+            matches.push(entry.file_name());
+        }
+    }
+    match matches.as_slice() {
+        [] => return Err(invalid("unknown contest".into())),
+        [entry] if entry == OsStr::new(name.as_str()) => {}
+        [_] => return Err(invalid(format!("DifferentSpelling: {matches:?}"))),
+        _ => return Err(invalid(format!("SeveralEntries: {matches:?}"))),
+    }
+    let dir = directory.join(name.as_str());
+    let metadata = fs::symlink_metadata(&dir).map_err(|error| StorageError::io(&dir, error))?;
+    if storage::is_link(&metadata) {
+        return Err(invalid(format!("LinkInPath: {}", dir.display())));
+    }
+    if !metadata.is_dir() {
+        return Err(invalid(format!("NotADirectory: {}", dir.display())));
+    }
+    let path = dir.join("contest.toml");
+    let document = record_result(storage::read_user_record(&path, 1, |document| {
+        crate::add::contest_members(document)?;
+        Ok::<_, String>(document.clone())
+    }))
+    .map_err(|reason| SelectionError::State {
+        path: path.clone(),
+        reason,
+    })?;
+    contest_binding(&document, &name).map_err(|reason| SelectionError::State { path, reason })?;
+    Ok(document)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -574,70 +697,25 @@ pub(crate) fn select_many(
             identity: selected.identity,
         }]);
     };
-    let (contest, explicit) = if let Some(contest) = reference.strip_prefix("contest:") {
-        (contest, true)
+    let contest = if let Some(contest) = reference.strip_prefix("contest:") {
+        contest
     } else {
         match lookup(root, reference) {
             Ok(problem) => return Ok(vec![problem]),
-            Err(SelectionError::NotFound { .. }) if !reference.contains(':') => (reference, false),
+            Err(SelectionError::NotFound { .. }) if !reference.contains([':', '/']) => reference,
             Err(error) => return Err(error.into()),
         }
     };
-    let name = Identifier::new(contest)
-        .map_err(|e| Error::Workspace(format!("invalid contest name {contest:?}: {e}")))?;
-    let not_found = || {
-        Error::Workspace(if explicit {
-            format!("no contest named {name}")
-        } else {
-            format!("no problem or contest named {name}")
+    let document = read_contest(root, contest)
+        .map_err(|error| Error::Workspace(format!("reference {reference:?}: {error}")))?;
+    document
+        .get("problem")
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flatten()
+        .map(|record| {
+            lookup(root, record["id"].as_str().expect("validated member")).map_err(Error::from)
         })
-    };
-    let directory = storage::checked_path(root, Path::new("contests"), false)?;
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(not_found()),
-        Err(e) => return Err(Error::Workspace(format!("{}: {e}", directory.display()))),
-    };
-    let mut matches = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| Error::Workspace(e.to_string()))?;
-        if names::collides_with_native(name.as_str(), &entry.file_name()) {
-            matches.push(entry.file_name());
-        }
-    }
-    if matches.is_empty() {
-        return Err(not_found());
-    }
-    if matches.as_slice() != [OsString::from(name.as_str())] {
-        return Err(Error::Workspace(format!(
-            "contest {name} is ambiguous or differently spelled: {matches:?}"
-        )));
-    }
-    let path = storage::checked_path(
-        root,
-        &directory.join(name.as_str()).join("contest.toml"),
-        false,
-    )?;
-    let record = storage::read_user_record(&path, 1, |document| {
-        crate::add::contest_members(document)?;
-        let mut ids = Vec::new();
-        if let Some(records) = document.get("problem").and_then(Item::as_array_of_tables) {
-            for record in records {
-                ids.push(
-                    record
-                        .get("id")
-                        .and_then(Item::as_str)
-                        .expect("validated member")
-                        .to_owned(),
-                );
-            }
-        }
-        Ok::<_, String>(ids)
-    });
-    let ids =
-        record_result(record).map_err(|e| Error::Workspace(format!("{}: {e}", path.display())))?;
-    ids.iter()
-        .map(|id| lookup(root, id).map_err(Error::from))
         .collect()
 }
 
@@ -651,6 +729,8 @@ mod tests {
         for bytes in [
             b"schema = 1\n".as_slice(),
             b"schema = 1\ncurrent_problem = 'local:A'\n",
+            b"schema = 1\ncurrent_problem = 'atcoder:abc400_a'\n",
+            b"schema = 1\ncurrent_problem = 'cses:1068'\n",
         ] {
             assert!(matches!(classify_state(bytes), Record::Valid(_)));
         }

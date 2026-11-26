@@ -288,29 +288,208 @@ fn native_spelling_eq(left: &OsStr, right: &OsStr) -> bool {
     }
 }
 
-/// CLI-foundation identity: `local:` followed by an [`Identifier`].
+/// A site name: 1–32 lowercase ASCII letters, digits or hyphens, starting
+/// with a letter. Grammar validity does not imply that an adapter exists.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ProblemIdentity(Identifier);
+pub struct Site(String);
+
+impl Site {
+    pub fn new(site: &str) -> Result<Self, IdentityError> {
+        if site.is_empty()
+            || site.len() > 32
+            || !site.as_bytes()[0].is_ascii_lowercase()
+            || !site
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(IdentityError::InvalidSite(site.to_owned()));
+        }
+        Ok(Self(site.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Site {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Site {
+    type Err = IdentityError;
+
+    fn from_str(site: &str) -> Result<Self, Self::Err> {
+        Self::new(site)
+    }
+}
+
+/// A remote problem identity. Its directory is derived without sanitising.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RemoteIdentity {
+    site: Site,
+    native: String,
+    directory: Identifier,
+}
+
+impl RemoteIdentity {
+    pub fn parse(identity: &str) -> Result<Self, IdentityError> {
+        let (site, native) = identity
+            .split_once(':')
+            .ok_or(IdentityError::MissingSeparator)?;
+        let site = Site::new(site)?;
+        let (grammar, valid) = match site.as_str() {
+            "atcoder" => (
+                "[a-z0-9][a-z0-9_-]{0,55}",
+                (1..=56).contains(&native.len())
+                    && native
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    && native.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-')
+                    }),
+            ),
+            "cses" => (
+                "[1-9][0-9]{0,6}",
+                (1..=7).contains(&native.len())
+                    && native
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| matches!(b, b'1'..=b'9'))
+                    && native.bytes().all(|b| b.is_ascii_digit()),
+            ),
+            "local" => return Err(IdentityError::LocalNotRemote),
+            // No native-id grammar is defined for another site. Do not infer
+            // one from the directory grammar or accept an unvalidated identity.
+            _ => return Err(IdentityError::UnknownSite(site.to_string())),
+        };
+        if !valid {
+            return Err(IdentityError::InvalidRemoteNative {
+                site: site.to_string(),
+                grammar,
+            });
+        }
+        let directory =
+            Identifier::new(format!("{site}-{native}")).map_err(IdentityError::InvalidNative)?;
+        Ok(Self {
+            site,
+            native: native.to_owned(),
+            directory,
+        })
+    }
+
+    pub fn site(&self) -> &Site {
+        &self.site
+    }
+
+    pub fn native(&self) -> &str {
+        &self.native
+    }
+
+    pub fn directory(&self) -> &Identifier {
+        &self.directory
+    }
+}
+
+impl fmt::Display for RemoteIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.site, self.native)
+    }
+}
+
+impl FromStr for RemoteIdentity {
+    type Err = IdentityError;
+
+    fn from_str(identity: &str) -> Result<Self, Self::Err> {
+        Self::parse(identity)
+    }
+}
+
+/// A remote contest identity. Gate 2 supports AtCoder contests only; CSES
+/// exposes the problemset and sections, not contests (sites §8.5).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ContestIdentity(RemoteIdentity);
+
+impl ContestIdentity {
+    pub fn parse(identity: &str) -> Result<Self, IdentityError> {
+        let remote = RemoteIdentity::parse(identity)?;
+        if remote.site().as_str() != "atcoder" {
+            return Err(IdentityError::UnsupportedContestSite(
+                remote.site().to_string(),
+            ));
+        }
+        Ok(Self(remote))
+    }
+
+    pub fn directory(&self) -> &Identifier {
+        self.0.directory()
+    }
+
+    pub fn check_binding(&self, name: &Identifier) -> Result<(), CollisionReason> {
+        if self.directory() == name {
+            Ok(())
+        } else {
+            Err(CollisionReason::IdentityMismatch)
+        }
+    }
+}
+
+impl fmt::Display for ContestIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for ContestIdentity {
+    type Err = IdentityError;
+
+    fn from_str(identity: &str) -> Result<Self, Self::Err> {
+        Self::parse(identity)
+    }
+}
+
+/// An exact local or remote problem identity, bound to its derived directory.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ProblemIdentity {
+    Local(Identifier),
+    Remote(RemoteIdentity),
+}
 
 impl ProblemIdentity {
     pub fn local(name: Identifier) -> Self {
-        Self(name)
+        Self::Local(name)
     }
 
+    /// Directory name, including the site prefix for remote problems.
     pub fn name(&self) -> &Identifier {
-        &self.0
+        match self {
+            Self::Local(name) => name,
+            Self::Remote(remote) => remote.directory(),
+        }
+    }
+
+    pub fn check_binding(&self, name: &Identifier) -> Result<(), CollisionReason> {
+        if self.name() == name {
+            Ok(())
+        } else {
+            Err(CollisionReason::IdentityMismatch)
+        }
     }
 
     pub fn parse(identity: &str) -> Result<Self, IdentityError> {
         let (site, native) = identity
             .split_once(':')
             .ok_or(IdentityError::MissingSeparator)?;
-        if site != "local" {
-            return Err(IdentityError::InvalidSite(site.to_owned()));
+        if site == "local" {
+            Identifier::new(native)
+                .map(Self::Local)
+                .map_err(IdentityError::InvalidNative)
+        } else {
+            RemoteIdentity::parse(identity).map(Self::Remote)
         }
-        Identifier::new(native)
-            .map(Self)
-            .map_err(IdentityError::InvalidNative)
     }
 }
 
@@ -324,7 +503,10 @@ impl FromStr for ProblemIdentity {
 
 impl fmt::Display for ProblemIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "local:{}", self.0)
+        match self {
+            Self::Local(name) => write!(f, "local:{name}"),
+            Self::Remote(remote) => write!(f, "{remote}"),
+        }
     }
 }
 
@@ -332,17 +514,33 @@ impl fmt::Display for ProblemIdentity {
 pub enum IdentityError {
     MissingSeparator,
     InvalidSite(String),
+    UnknownSite(String),
+    UnsupportedContestSite(String),
+    LocalNotRemote,
     InvalidNative(NameError),
+    InvalidRemoteNative { site: String, grammar: &'static str },
 }
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingSeparator => f.write_str("identity must contain ':'"),
-            Self::InvalidSite(site) => {
-                write!(f, "identity site must be exactly 'local', got {site:?}")
+            Self::InvalidSite(site) => write!(
+                f,
+                "invalid identity site {site:?}: expected 1–32 lowercase ASCII letters, digits or hyphens, starting with a letter"
+            ),
+            Self::UnknownSite(site) => write!(
+                f,
+                "unknown identity site {site:?}: no native-id grammar is defined"
+            ),
+            Self::LocalNotRemote => f.write_str("site \"local\" is not a remote site"),
+            Self::UnsupportedContestSite(site) => {
+                write!(f, "site {site:?} does not support contest identities")
             }
             Self::InvalidNative(error) => write!(f, "invalid identity name: {error}"),
+            Self::InvalidRemoteNative { site, grammar } => {
+                write!(f, "invalid identity name for {site}: expected {grammar}")
+            }
         }
     }
 }
@@ -417,6 +615,16 @@ pub enum Resolution {
 /// The first matching rule from storage §2.1 decides. A syntactically invalid
 /// identity supplied as `Valid` is treated as malformed metadata (§9).
 pub fn resolve_add(name: &Identifier, entries: &[ProblemEntry]) -> Resolution {
+    resolve_problem(name, Some(&ProblemIdentity::local(name.clone())), entries)
+}
+
+/// Existing-reader lookup accepts any bound identity for a bare directory name.
+/// Creation and explicit identity references supply the exact expected identity.
+pub fn resolve_problem(
+    name: &Identifier,
+    expected: Option<&ProblemIdentity>,
+    entries: &[ProblemEntry],
+) -> Resolution {
     let key = collision_key(name.as_str());
     let matches: Vec<_> = entries
         .iter()
@@ -445,7 +653,12 @@ pub fn resolve_add(name: &Identifier, entries: &[ProblemEntry]) -> Resolution {
                 ProblemMetadata::TooNew => CollisionReason::MetadataTooNew,
                 ProblemMetadata::Valid { identity } => match ProblemIdentity::parse(identity) {
                     Err(_) => CollisionReason::MetadataMalformed,
-                    Ok(identity) if identity.name() != name => CollisionReason::IdentityMismatch,
+                    Ok(identity)
+                        if identity.check_binding(name).is_err()
+                            || expected.is_some_and(|expected| *expected != identity) =>
+                    {
+                        CollisionReason::IdentityMismatch
+                    }
                     Ok(_) => return Resolution::Exists,
                 },
             },
@@ -807,7 +1020,7 @@ mod tests {
             ("local", IdentityError::MissingSeparator),
             ("Local:a", IdentityError::InvalidSite("Local".into())),
             (":a", IdentityError::InvalidSite("".into())),
-            ("remote:a", IdentityError::InvalidSite("remote".into())),
+            ("remote:a", IdentityError::UnknownSite("remote".into())),
             ("local:", IdentityError::InvalidNative(NameError::Empty)),
             (
                 "local:a:b",
@@ -820,6 +1033,179 @@ mod tests {
         ] {
             assert_eq!(ProblemIdentity::parse(text), Err(error.clone()), "{text:?}");
             assert!(!error.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn remote_identity_contract_tables() {
+        let longest = "a".repeat(56);
+        for (text, directory) in [
+            ("atcoder:abc400_a".to_owned(), "atcoder-abc400_a".to_owned()),
+            ("atcoder:a".to_owned(), "atcoder-a".to_owned()),
+            (format!("atcoder:{longest}"), format!("atcoder-{longest}")),
+            ("cses:1".to_owned(), "cses-1".to_owned()),
+            ("cses:1068".to_owned(), "cses-1068".to_owned()),
+            ("cses:9999999".to_owned(), "cses-9999999".to_owned()),
+            ("atcoder:0_-9".to_owned(), "atcoder-0_-9".to_owned()),
+        ] {
+            let identity: ProblemIdentity = text.parse().unwrap();
+            let remote: RemoteIdentity = text.parse().unwrap();
+            assert_eq!(identity.to_string(), text);
+            assert_eq!(remote.to_string(), text);
+            assert_eq!(remote.native(), text.split_once(':').unwrap().1);
+            assert_eq!(identity.name().as_str(), directory);
+            assert_eq!(remote.directory(), identity.name());
+            assert_eq!(
+                identity.check_binding(&Identifier::new(directory).unwrap()),
+                Ok(())
+            );
+        }
+        for text in [
+            "atcoder:".to_owned(),
+            "atcoder:ABC400_A".to_owned(),
+            "atcoder:_a".to_owned(),
+            "atcoder:-a".to_owned(),
+            "atcoder:a.b".to_owned(),
+            format!("atcoder:{}", "a".repeat(57)),
+            "cses:0".to_owned(),
+            "cses:01".to_owned(),
+            "cses:12345678".to_owned(),
+            "cses:a".to_owned(),
+            "Atcoder:abc400_a".to_owned(),
+            "1x:a".to_owned(),
+            format!("{}:a", "a".repeat(33)),
+            "atcoder:a:b".to_owned(),
+            "atcoder:a/b".to_owned(),
+            "atcoder:a\\b".to_owned(),
+            "atcoder:é".to_owned(),
+            "cses:1a".to_owned(),
+            "cses:1.2".to_owned(),
+            "cses:".to_owned(),
+        ] {
+            assert!(ProblemIdentity::parse(&text).is_err(), "{text}");
+            assert!(RemoteIdentity::parse(&text).is_err(), "{text}");
+        }
+        let contest: ContestIdentity = "atcoder:abc400".parse().unwrap();
+        assert_eq!(contest.to_string(), "atcoder:abc400");
+        assert_eq!(contest.directory().as_str(), "atcoder-abc400");
+        assert_eq!(
+            contest.check_binding(&Identifier::new("atcoder-abc400").unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            contest.check_binding(&Identifier::new("atcoder-abc401").unwrap()),
+            Err(CollisionReason::IdentityMismatch)
+        );
+        for text in ["local:c", "cses:1068", "atcoder:ABC400", "atcoder:"] {
+            assert!(ContestIdentity::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(
+            RemoteIdentity::parse("local:a"),
+            Err(IdentityError::LocalNotRemote)
+        );
+    }
+
+    #[test]
+    fn site_grammar_is_distinct_from_adapter_support() {
+        for site in [
+            "a".to_owned(),
+            "atcoder".to_owned(),
+            "cses".to_owned(),
+            "local".to_owned(),
+            "x-1-".to_owned(),
+            "a".repeat(32),
+        ] {
+            let parsed: Site = site.parse().unwrap();
+            assert_eq!(parsed.to_string(), site);
+        }
+        for site in [
+            "".to_owned(),
+            "A".to_owned(),
+            "1x".to_owned(),
+            "-x".to_owned(),
+            "a_b".to_owned(),
+            "a.b".to_owned(),
+            "a:b".to_owned(),
+            "é".to_owned(),
+            "a".repeat(33),
+        ] {
+            assert!(Site::new(&site).is_err(), "{site}");
+        }
+        for site in ["other".to_owned(), "x-1".to_owned(), "a".repeat(32)] {
+            assert!(Site::new(&site).is_ok());
+            assert_eq!(
+                ProblemIdentity::parse(&format!("{site}:a")),
+                Err(IdentityError::UnknownSite(site))
+            );
+        }
+    }
+
+    #[test]
+    fn remote_binding_and_noninjective_derivation_never_reuse_another_identity() {
+        for (remote, directory) in [
+            ("atcoder:abc400_a", "atcoder-abc400_a"),
+            ("cses:1068", "cses-1068"),
+        ] {
+            let name = Identifier::new(directory).unwrap();
+            let expected = ProblemIdentity::parse(remote).unwrap();
+            let local = ProblemIdentity::local(name.clone());
+            assert_ne!(expected, local);
+            assert_eq!(expected.name(), local.name());
+            for actual in [
+                remote.to_owned(),
+                local.to_string(),
+                "atcoder:abc400_b".to_owned(),
+                "cses:1068".to_owned(),
+            ] {
+                let identity = ProblemIdentity::parse(&actual).unwrap();
+                let entries = [entry(directory, EntryKind::Directory, valid(&actual))];
+                assert_eq!(
+                    identity.check_binding(&name).is_ok(),
+                    *identity.name() == name
+                );
+                for requested in [None, Some(&expected), Some(&local)] {
+                    let result = resolve_problem(&name, requested, &entries);
+                    if *identity.name() == name && requested.is_none_or(|value| *value == identity)
+                    {
+                        assert_eq!(result, Resolution::Exists);
+                    } else {
+                        assert_eq!(
+                            result,
+                            Resolution::NameCollision {
+                                reason: CollisionReason::IdentityMismatch,
+                                entries: vec![directory.into()]
+                            }
+                        );
+                    }
+                }
+                // `add` rule 6 compares the identity, not just its directory.
+                assert_eq!(
+                    resolve_add(&name, &entries),
+                    resolve_problem(&name, Some(&local), &entries)
+                );
+            }
+            let entries = [entry(directory, EntryKind::Directory, valid(remote))];
+            let differently_spelled = Identifier::new(directory.to_ascii_uppercase()).unwrap();
+            assert!(matches!(
+                resolve_problem(&differently_spelled, Some(&expected), &entries),
+                Resolution::NameCollision {
+                    reason: CollisionReason::DifferentSpelling,
+                    ..
+                }
+            ));
+            let mut several = entries.to_vec();
+            several.push(entry(
+                &directory.to_ascii_uppercase(),
+                EntryKind::Directory,
+                valid(remote),
+            ));
+            assert!(matches!(
+                resolve_problem(&name, Some(&expected), &several),
+                Resolution::NameCollision {
+                    reason: CollisionReason::SeveralEntries,
+                    ..
+                }
+            ));
         }
     }
 

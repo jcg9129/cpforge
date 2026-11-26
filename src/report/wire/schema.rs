@@ -46,11 +46,9 @@ pub(super) fn job(v: &e::JobIdentity, workspace: Option<&Path>) -> Result<Value>
     ]))
 }
 pub(super) fn problem(v: &Problem, workspace: Option<&Path>) -> Result<Value> {
-    let id = v
-        .identity
-        .strip_prefix("local:")
-        .ok_or(Error("invalid problem identity"))?;
-    ident(id)?;
+    // A local or remote identity (S §2.1); its directory name is an Identifier.
+    crate::names::ProblemIdentity::parse(&v.identity)
+        .map_err(|_| Error("invalid problem identity"))?;
     Ok(obj([
         ("identity", s(&v.identity)),
         ("name", ident(&v.name)?),

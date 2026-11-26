@@ -197,8 +197,8 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
     // The engine binding is authoritative; metadata adds only name and kind.
     match (&meta.problem, &v.problem) {
         (Some(meta), Some(binding))
-            if meta.identity.strip_prefix("local:")
-                == Some(binding.id.strip_prefix("local:").unwrap_or(&binding.id))
+            if (meta.identity == binding.id
+                || meta.identity.strip_prefix("local:") == Some(binding.id.as_str()))
                 && meta.dir == binding.dir => {}
         (None, None) => {}
         _ => return Err(Error("problem metadata does not match engine")),

@@ -177,7 +177,10 @@ impl Inspection<'_, '_> {
             if let Some(id) = document["problem"]["id"].as_str() {
                 let identity = ProblemIdentity::parse(id).expect("validated identity");
                 if dir.file_name() != Some(std::ffi::OsStr::new(identity.name().as_str())) {
-                    self.note(&path, "problem identity does not match directory; kept");
+                    self.note(
+                        &path,
+                        "IdentityMismatch: problem identity does not match directory; kept",
+                    );
                 }
             }
             let loaded =
@@ -200,9 +203,18 @@ impl Inspection<'_, '_> {
 
     fn contests(&mut self) -> Result<(), Error> {
         let parent = self.guard.root().join("contests");
+        let mut spellings = BTreeMap::new();
         for dir in self.entries(&parent) {
             if !self.directory(&dir) {
                 continue;
+            }
+            if let Some(name) = dir.file_name().and_then(|name| name.to_str()) {
+                if let Some(previous) = spellings.insert(names::collision_key(name), dir.clone()) {
+                    self.note(
+                        &dir,
+                        format!("spelling collision with {}", previous.display()),
+                    );
+                }
             }
             let path = dir.join("contest.toml");
             let record = storage::read_user_record(&path, 1, |document| {
@@ -212,6 +224,18 @@ impl Inspection<'_, '_> {
             let Some(document) = self.record(&path, record) else {
                 continue;
             };
+            if let Some(name) = dir
+                .file_name()
+                .and_then(|name| Identifier::from_os_str(name).ok())
+            {
+                if let Err(error) = crate::selection::contest_binding(&document, &name) {
+                    self.note(&path, format!("{error}; kept"));
+                    continue;
+                }
+            } else {
+                self.note(&dir, "invalid contest directory name; kept");
+                continue;
+            }
             let mut dangling = false;
             if let Some(members) = document.get("problem").and_then(Item::as_array_of_tables) {
                 for member in members {
@@ -442,7 +466,13 @@ impl Inspection<'_, '_> {
         for path in self.contests.clone() {
             let check = |document: &DocumentMut| {
                 files::check_schema(document)?;
-                crate::add::contest_members(document)
+                crate::add::contest_members(document)?;
+                let name = path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| Identifier::from_os_str(name).ok())
+                    .ok_or("invalid contest directory name")?;
+                crate::selection::contest_binding(document, &name)
             };
             let result = storage::edit_toml(self.guard, &path, check, |document| {
                 if let Some(members) = document

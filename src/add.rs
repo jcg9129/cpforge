@@ -420,7 +420,7 @@ fn read_template(path: &Path) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-fn validate_label(label: &str) -> Result<(), String> {
+pub(crate) fn validate_label(label: &str) -> Result<(), String> {
     let valid = (1..=16).contains(&label.len())
         && label
             .bytes()
@@ -433,6 +433,16 @@ fn validate_label(label: &str) -> Result<(), String> {
 }
 
 pub(crate) fn contest_members(document: &DocumentMut) -> Result<(), String> {
+    if let Some(contest) = document.get("contest") {
+        if !contest.is_table_like() {
+            return Err("contest must be a table ([contest])".into());
+        }
+        let id = contest
+            .get("id")
+            .and_then(Item::as_str)
+            .ok_or("[contest] id must be a string")?;
+        names::ContestIdentity::parse(id).map_err(|error| error.to_string())?;
+    }
     let Some(item) = document.get("problem") else {
         return Ok(());
     };
@@ -461,7 +471,7 @@ pub(crate) fn contest_members(document: &DocumentMut) -> Result<(), String> {
     Ok(())
 }
 
-fn check_contest(document: &DocumentMut) -> Result<(), String> {
+fn check_contest(document: &DocumentMut, name: &Identifier) -> Result<(), String> {
     // The edit primitive has already bounded and parsed this fresh baseline.
     // Check the schema directly so rendering cannot change the byte-size check.
     if let Some(item) = document.get("schema") {
@@ -477,7 +487,8 @@ fn check_contest(document: &DocumentMut) -> Result<(), String> {
             ));
         }
     }
-    contest_members(document).map_err(|reason| format!("malformed: {reason}"))
+    contest_members(document).map_err(|reason| format!("malformed: {reason}"))?;
+    crate::selection::contest_binding(document, name)
 }
 
 fn append_member(document: &mut DocumentMut, id: &str, label: Option<&str>) -> Result<(), String> {
@@ -562,9 +573,12 @@ fn add_membership(
     }
     record_result(record)
         .map_err(|reason| Error::Workspace(format!("{} is {reason}", path.display())))?;
-    let published = storage::edit_toml_replay(guard, &path, check_contest, |document| {
-        append_member(document, id, label)
-    })
+    let published = storage::edit_toml_replay(
+        guard,
+        &path,
+        |document| check_contest(document, contest),
+        |document| append_member(document, id, label),
+    )
     .map_err(|error| Error::Workspace(format!("{}: {error}", path.display())))?;
     publication_warnings(report, &path, &published);
     crash::point("add.member_added");

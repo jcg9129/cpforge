@@ -751,6 +751,21 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
     let mut report = passing();
     report.details.problem.as_mut().unwrap().identity = "local:b".into();
     assert!(encode_report_data(&report).is_err());
+    // A remote identity is a `pident` (S §2.1); the binding carries it whole.
+    let mut report = passing();
+    let problem = report.details.problem.as_mut().unwrap();
+    problem.identity = "atcoder:abc400_a".into();
+    problem.name = "atcoder-abc400_a".into();
+    problem.dir = "problems/atcoder-abc400_a".into();
+    report.problem = Some(crate::exec::ProblemBinding {
+        dir: "problems/atcoder-abc400_a".into(),
+        id: "atcoder:abc400_a".into(),
+    });
+    assert!(encode_report_data(&report).is_ok());
+    // Outside the native grammar: refused even when the binding agrees.
+    report.details.problem.as_mut().unwrap().identity = "atcoder:ABC400_A".into();
+    report.problem.as_mut().unwrap().id = "atcoder:ABC400_A".into();
+    assert!(encode_report_data(&report).is_err());
 }
 
 #[test]

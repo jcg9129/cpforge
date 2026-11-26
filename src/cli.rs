@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = Color::Auto)]
     pub color: Color,
 
-    /// Select a problem for this invocation (<name> or local:<name>).
+    /// Select a problem (<name>, local:<name>, site:native or <contest>/<label>).
     #[arg(long, global = true)]
     pub problem: Option<String>,
 
@@ -142,8 +142,8 @@ pub enum Command {
     },
     /// Compare current files with the last completed run (read-only).
     Status {
-        /// A problem (<name> or local:<name>) or a contest (contest:<name>,
-        /// or a bare name that names no problem).
+        /// A problem (<name>, local:<name>, site:native or <contest>/<label>),
+        /// or a contest (contest:<name>, or a bare name naming no problem).
         #[arg(conflicts_with = "all")]
         reference: Option<String>,
         /// Every problem of the workspace.
@@ -185,7 +185,7 @@ pub enum Command {
     },
     /// Change the saved problem selection.
     Switch {
-        /// Existing problem name or local:<name> identity.
+        /// Existing problem name, identity, or <contest>/<label> reference.
         reference: String,
     },
     /// Add a local problem, optionally to a contest.
@@ -498,17 +498,10 @@ fn status_name(value: &str) -> Result<String, String> {
 }
 /// `local` or the general site grammar (storage §2.1).
 fn site_name(value: &str) -> Result<String, String> {
-    if value == "local"
-        || (1..=32).contains(&value.len())
-            && value.as_bytes()[0].is_ascii_lowercase()
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        Ok(value.to_owned())
-    } else {
-        Err("expected local or a site of 1–32 lowercase ASCII letters, digits or -, starting with a letter".into())
-    }
+    // `local` satisfies the general grammar; one definition lives in `names`.
+    crate::names::Site::new(value)
+        .map(|_| value.to_owned())
+        .map_err(|_| "expected local or a site of 1–32 lowercase ASCII letters, digits or -, starting with a letter".into())
 }
 fn identifier(value: &str) -> Result<String, String> {
     crate::names::Identifier::new(value)

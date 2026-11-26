@@ -2411,10 +2411,12 @@ fn report_details(
             .as_ref()
             .zip(ready.report.as_ref())
             .map(|(problem, report)| Problem {
-                identity: format!(
-                    "local:{}",
-                    problem.id.strip_prefix("local:").unwrap_or(&problem.id)
-                ),
+                // Bindings carry the full identity; a bare name is a local problem.
+                identity: if problem.id.contains(':') {
+                    problem.id.clone()
+                } else {
+                    format!("local:{}", problem.id)
+                },
                 name: report.problem_name.clone(),
                 kind: report.problem_kind.clone(),
                 dir: problem.dir.clone(),
