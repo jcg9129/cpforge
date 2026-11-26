@@ -142,6 +142,12 @@ pub enum Point {
     #[cfg(feature = "storage-test-hooks")]
     BeforeCwdMeasure(u32),
     #[cfg(feature = "storage-test-hooks")]
+    FileIo {
+        execution: u32,
+        point: &'static str,
+        size: usize,
+    },
+    #[cfg(feature = "storage-test-hooks")]
     BeforeCwdClear(u32),
     BeforeCheck(u32),
     AfterCheckAdmission(u32),
@@ -182,7 +188,7 @@ pub struct Engine<'probe> {
 
 #[cfg(any(test, feature = "storage-test-hooks"))]
 #[derive(Clone)]
-struct Observation(Arc<Observer>);
+pub(crate) struct Observation(pub(crate) Arc<Observer>);
 #[cfg(any(test, feature = "storage-test-hooks"))]
 impl std::fmt::Debug for Observation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -632,6 +638,7 @@ impl<'probe> Engine<'probe> {
             testlib: &testlib,
             staged: &staged,
             runs: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            frozen_outputs: Default::default(),
             dir: &ready.dir,
             workspace: &ready.workspace,
             problem: ready.problem.as_ref(),
@@ -1529,6 +1536,7 @@ struct Context<'a> {
     testlib: &'a std::collections::BTreeMap<u32, report::Scoring>,
     staged: &'a std::collections::BTreeMap<u32, Vec<crate::jobs::roles::StagedFile>>,
     runs: std::cell::RefCell<std::collections::BTreeMap<u32, RunId>>,
+    frozen_outputs: std::cell::RefCell<std::collections::BTreeMap<u32, u64>>,
     /// Set while this job's post-run cwd walker runs (at most one).
     cwd_walker: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -1601,6 +1609,11 @@ impl Context<'_> {
                             .and_then(|c| c.strip_prefix('r'))
                             .and_then(|n| n.parse::<u32>().ok())
                         {
+                            // Only the fixed `output` copies a solution capture; copy
+                            // its frozen length, never what the file holds now.
+                            if file.destination == directory.join("cwd").join("output") {
+                                file.bytes = self.frozen_outputs.borrow().get(&index).copied();
+                            }
                             if let Some(run) = self.runs.borrow().get(&index) {
                                 *source =
                                     components.fold(self.dir.join(run.as_str()), |p, c| p.join(c));
@@ -1738,7 +1751,6 @@ impl Context<'_> {
             } else {
                 amount.and_then(|amount| reserve(self.budget, amount))
             };
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let input_reservation = if stage_input.is_some() {
                 Some(
                     self.budget
@@ -1747,7 +1759,6 @@ impl Context<'_> {
             } else {
                 None
             };
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let reservations =
                 reservations.filter(|_| input_reservation.as_ref().is_none_or(Result::is_ok));
             if let Some((streams, meta)) = reservations {
@@ -1768,6 +1779,10 @@ impl Context<'_> {
                             reservation: input_reservation.and_then(Result::ok),
                             owner: self.owner.clone(),
                             state: state.clone(),
+                            #[cfg(feature = "storage-test-hooks")]
+                            observation: self.observer.cloned(),
+                            #[cfg(feature = "storage-test-hooks")]
+                            execution: plan.index,
                         })
                     }),
                     reservation: streams,
@@ -1883,6 +1898,18 @@ impl Context<'_> {
         } else {
             None
         };
+        if matches!(plan.role, Role::Test { .. }) {
+            if let Some(ExecutionRecord::Started(root)) = record.as_deref() {
+                let bytes = match &root.output_file {
+                    Some(report::OutputFile::Collected { bytes, .. }) => Some(*bytes),
+                    None => root.stdout.as_ref().map(|capture| capture.stored),
+                    _ => None,
+                };
+                if let Some(bytes) = bytes {
+                    self.frozen_outputs.borrow_mut().insert(plan.index, bytes);
+                }
+            }
+        }
         let writable = writable && metadata.is_some();
         #[cfg(feature = "storage-test-hooks")]
         self.point(Point::BeforeRecordEnqueue(plan.index));
@@ -1922,6 +1949,7 @@ impl Context<'_> {
                 record.clone(),
                 scratch,
                 &self.cwd_walker,
+                executor,
                 self.testlib.get(&plan.index).map(|scoring| {
                     Box::new(judge_files::ReportRequest {
                         directory: directory.clone(),

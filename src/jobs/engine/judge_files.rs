@@ -75,12 +75,26 @@ impl Scratch {
                     "staging cancelled",
                 ));
             }
+            #[cfg(feature = "storage-test-hooks")]
+            if staged.bytes.is_some() {
+                crate::storage::crash::barrier("judge.before_output_copy");
+                if let (Some(source), Ok(suffix)) =
+                    (&staged.source, std::env::var("CPF_FILE_IO_GROW_STDOUT"))
+                {
+                    OpenOptions::new()
+                        .append(true)
+                        .open(source)?
+                        .write_all(suffix.as_bytes())?;
+                }
+            }
             let mut source = staged.source.as_deref().map(open_regular).transpose()?;
-            let bytes = source
-                .as_ref()
-                .map(|f| f.metadata().map(|m| m.len()))
-                .transpose()?
-                .unwrap_or(0);
+            let bytes = staged.bytes.map(Ok).unwrap_or_else(|| {
+                source
+                    .as_ref()
+                    .map(|f| f.metadata().map(|m| m.len()))
+                    .transpose()
+                    .map(|n| n.unwrap_or(0))
+            })?;
             let reservation = budget
                 .reserve(bytes)
                 .map_err(|e| io::Error::other(e.to_string()))?;
@@ -369,14 +383,27 @@ pub(super) struct Finished {
     pub(super) cwd: Result<(), RunNote>,
 }
 
+/// Work for steps (1)-(2); whoever takes it from the shared slot runs it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+type Work = Box<dyn FnOnce() + Send>;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn take(slot: &std::sync::Mutex<Option<Work>>) -> Option<Work> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 /// Execution §2.1 steps (1)–(2), after cleanup: extract eligible APPES
 /// reports, read frozen diagnostics and remove staged copies on a credited
-/// worker. The caller then measures `cwd/` (step 3).
+/// worker within the post-run step's 5 s deadline. The caller then measures
+/// `cwd/` (step 3).
 pub(super) async fn finish(
     owner: JobOwner,
     record: Option<Arc<ExecutionRecord>>,
     scratch: Option<Scratch>,
     walking: &Arc<AtomicBool>,
+    executor: &mut dyn super::Executor,
     request: Option<Box<ReportRequest>>,
 ) -> Finished {
     let eligible = request
@@ -405,8 +432,8 @@ pub(super) async fn finish(
     {
         use std::sync::atomic::Ordering;
         // An earlier post-run worker of this job is blocked past its deadline:
-        // never stack another credited thread on the same stalled filesystem.
-        // The scratch is then dropped here without I/O and stays accounted.
+        // never stack another thread on the same stalled filesystem. The
+        // scratch is then dropped here without I/O and stays accounted.
         if walking
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -415,33 +442,72 @@ pub(super) async fn finish(
         }
         let walking = super::cwd::Walking(walking.clone());
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        // Removal is attempted even after cancellation: the wait uses its own
-        // token. The credited worker owns the lease and reservations if the
-        // caller stops waiting.
-        crate::supervisor::post_run(&CancelToken::new(), deadline, move || {
-            let _walking = walking;
+        let (send, receive) = std::sync::mpsc::channel();
+        // The work owns the walker mark, the lease and the reservations, so a
+        // thread that outlives the deadline keeps them until it returns.
+        let slot = Arc::new(std::sync::Mutex::new(Some(Box::new(move || {
+            #[cfg(feature = "storage-test-hooks")]
+            crate::storage::crash::barrier("judge.finish");
             let _owner = owner;
             let evidence = request.filter(|_| eligible).map(|r| r.extract());
             let stderr = diagnostic(record.as_deref()).ok().flatten();
             let mut scratch = scratch;
             let kept_bytes = scratch.as_mut().map_or(0, Scratch::clear);
             let kept = scratch.is_some_and(|s| s.copies.iter().any(|c| !c.removed));
-            Finished {
+            // Clear the walker mark before publishing, so the caller's cwd step
+            // never sees this finished work as a still running walker.
+            drop(walking);
+            let _ = send.send(Finished {
                 evidence,
                 stderr,
                 kept_bytes,
                 kept,
                 cwd: Ok(()),
+            });
+        }) as Work)));
+        let worker = slot.clone();
+        // Removal is attempted even after cancellation: the wait uses its own
+        // token, bounded by the deadline.
+        let note = match crate::supervisor::post_run(&CancelToken::new(), deadline, move || {
+            if let Some(work) = take(&worker) {
+                work();
             }
         })
         .await
-        .unwrap_or_else(unfinished)
+        {
+            Ok(()) => RunNote::CwdUnmeasuredIo,
+            Err(note) => note,
+        };
+        if let Ok(finished) = receive.try_recv() {
+            return finished;
+        }
+        match take(&slot) {
+            // No worker took the work: its credit or thread was refused (a
+            // panic takes it first). Evidence and removal are required (E
+            // §2.1) and must not turn into a removal failure or a lost
+            // diagnostic, so the job's creation thread does them, under the
+            // same deadline and with the same timeout outcome.
+            Some(work) if note == RunNote::CwdUnmeasuredIo => {
+                match executor.finish_judge(work, deadline).await {
+                    Ok(()) => receive
+                        .try_recv()
+                        .unwrap_or_else(|_| unfinished(RunNote::CwdUnmeasuredIo)),
+                    Err(note) => unfinished(note),
+                }
+            }
+            // Never started by the deadline: drop it here without I/O.
+            Some(work) => {
+                drop(work);
+                unfinished(note)
+            }
+            None => unfinished(note),
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         // Production refuses judged execution on these platforms; inline
         // executors can still exercise the evidence adapters.
-        let _ = (owner, walking, unfinished);
+        let _ = (owner, walking, executor, unfinished);
         let evidence = request.filter(|_| eligible).map(|r| r.extract());
         let stderr = diagnostic(record.as_deref()).ok().flatten();
         let mut scratch = scratch;

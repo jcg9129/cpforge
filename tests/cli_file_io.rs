@@ -50,7 +50,18 @@ impl Fixture {
     }
 
     fn invoke(&self, args: &[&str], status: i32) -> Output {
-        let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
+        self.invoke_with_env(args, status, &[])
+    }
+
+    fn invoke_with_env(&self, args: &[&str], status: i32, settings: &[(&str, &str)]) -> Output {
+        let output = self.command(args, settings).output().unwrap();
+        assert_eq!(output.status.code(), Some(status), "{args:?}: {output:?}");
+        output
+    }
+
+    fn command(&self, args: &[&str], settings: &[(&str, &str)]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cpf"));
+        command
             .current_dir(&self.0)
             .env("HOME", self.path("user"))
             .env("USERPROFILE", self.path("user"))
@@ -59,13 +70,18 @@ impl Fixture {
             .env_remove("CPF_STORAGE_CRASH_AT")
             .env_remove("CPF_STORAGE_PAUSE_AT")
             .env_remove("CPF_HOOK_DEPTH")
+            .env_remove("CPF_FILE_IO_FAULTS")
+            .env_remove("CPF_FILE_IO_READ_SIZE")
+            .env_remove("CPF_FILE_IO_READ_CHUNK")
+            .env_remove("CPF_FILE_IO_LISTING_POSITION")
+            .env_remove("CPF_FILE_IO_GROW_STDOUT")
+            .env_remove("CPF_FILE_IO_LOG")
+            .env_remove("CPF_FILE_IO_UNVERIFIED")
+            .envs(settings.iter().copied())
             .stdin(Stdio::null())
             .args(["--problem", "A"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(status), "{args:?}: {output:?}");
-        output
+            .args(args);
+        command
     }
 
     fn run(&self, args: &[&str], status: i32) -> Output {
@@ -551,6 +567,7 @@ const FILE_SOLUTION: &str = r#"#include <fstream>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 int main() {
     std::ifstream staged("in.txt");
@@ -584,6 +601,34 @@ int main() {
     if (action == "case-unreadable") { write("OUT.TXT", "42\n"); chmod("OUT.TXT", 0000); return 0; }
     if (action == "unreadable") { write("out.txt", "42\n"); chmod("out.txt", 0000); return 0; }
     if (action == "cwd-unreadable") { write("out.txt", "42\n"); chmod(".", 0000); return 0; }
+    if (action == "many") {
+        // Four inodes keep link counts below even HFS+'s per-file limit.
+        // Hard links avoid allocating 65,537 separate inodes in CI.
+        for (unsigned i = 0; i < 4; ++i) write("seed" + std::to_string(i), "");
+        pid_t workers[4]{};
+        for (unsigned worker = 0; worker < 4; ++worker) {
+            workers[worker] = fork();
+            if (workers[worker] < 0) return 24;
+            if (workers[worker] == 0) {
+                for (unsigned i = worker; i < 65533; i += 4) {
+                    if (link(("seed" + std::to_string(worker)).c_str(), ("e" + std::to_string(i)).c_str())) _exit(23);
+                }
+                _exit(0);
+            }
+        }
+        for (pid_t worker : workers) {
+            int status = 0;
+            if (waitpid(worker, &status, 0) != worker || !WIFEXITED(status) || WEXITSTATUS(status)) return 25;
+        }
+        return 0;
+    }
+    if (action == "replace-cwd") {
+        write("out.txt", "42\n");
+        std::filesystem::rename("../cwd", "../old");
+        std::filesystem::create_directory("../cwd");
+        write("../cwd/out.txt", "wrong\n");
+        return 0;
+    }
     if (action == "size") { unsigned n; input >> n; write("out.txt", std::string(n, 'x')); return 0; }
     if (action == "empty") { write("out.txt", ""); return 0; }
     if (action == "input-only") { std::cout << "42\n"; return 0; }
@@ -624,6 +669,14 @@ impl Fixture {
     }
 
     fn test_report(&self, status: i32) -> Option<(PathBuf, serde_json::Value)> {
+        self.test_report_with_env(status, &[])
+    }
+
+    fn test_report_with_env(
+        &self,
+        status: i32,
+        settings: &[(&str, &str)],
+    ) -> Option<(PathBuf, serde_json::Value)> {
         if cfg!(windows) {
             let output = self.run(&["test", "--json"], 10);
             let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -631,7 +684,7 @@ impl Fixture {
             assert_eq!(doc["refusal"]["class"], "infrastructure");
             return None;
         }
-        let output = self.invoke(&["test", "--json"], status);
+        let output = self.invoke_with_env(&["test", "--json"], status, settings);
         let doc: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         cpforge::report::wire::read::read_json(&output.stdout).unwrap();
         assert_eq!(doc["outcome"], "finished", "{doc}");
@@ -1477,5 +1530,610 @@ int main() {{
             Some("collected"),
         );
         assert_collected(&job, test_entry(&doc, "one"), b"42\n");
+    });
+}
+
+// F-25: collection/removal use the held directory even after cwd is replaced.
+#[test]
+fn renamed_cwd_collects_and_clears_through_the_original_handle() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("input = 'in.txt', output = 'out.txt'", "");
+        fixture.cases(&[("one", "replace-cwd", Some("42\n"))]);
+        let Some((job, doc)) = fixture.test_report(0) else {
+            return;
+        };
+        assert_job(
+            &doc,
+            serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+        );
+        assert_test(
+            &doc,
+            "one",
+            "passed",
+            "passed",
+            "exited_zero",
+            Some("collected"),
+        );
+        let test = test_entry(&doc, "one");
+        assert_collected(&job, test, b"42\n");
+        let execution = &doc["executions"][test["executions"]["first"].as_u64().unwrap() as usize];
+        let run = job.join(execution["run"].as_str().unwrap());
+        assert!(!run.join("old").join("in.txt").exists());
+        assert!(!run.join("old").join("out.txt").exists());
+        assert_eq!(
+            fs::read(run.join("cwd").join("out.txt")).unwrap(),
+            b"wrong\n"
+        );
+        assert!(
+            doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["kind"] == "io_scratch" && w["detail"] == "not_measured")
+        );
+    });
+}
+
+// F-30, real variant: absence makes the bounded listing independent of order.
+#[test]
+fn directory_listing_cuts_off_after_65536_entries() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("output = 'out.txt'", "[config.run]\ndeadline_s = 90\n");
+        fixture.cases(&[("many", "many", Some("42\n"))]);
+        let Some((_, doc)) = fixture.test_report(1) else {
+            return;
+        };
+        assert_job(
+            &doc,
+            serde_json::json!({"input":null,"output":"out.txt","stdin":"test_input"}),
+        );
+        assert_test(
+            &doc,
+            "many",
+            "wrong_answer",
+            "output_rejected",
+            "exited_zero",
+            Some("too_many_entries"),
+        );
+        assert_eq!(
+            test_entry(&doc, "many")["check"]["reason"],
+            "output_dir_too_large"
+        );
+    });
+}
+
+// F-09 and F-13: a read stream can grow beyond fstat or fail independently of it.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn injected_growth_read_and_extraction_errors_keep_bounded_evidence() {
+    run_test(move || async move {
+        for (settings, output, verdict, check, status) in [
+            (
+                vec![("CPF_FILE_IO_READ_SIZE", "8192")],
+                "too_large",
+                "output_budget",
+                "output_rejected",
+                1,
+            ),
+            (
+                vec![
+                    ("CPF_FILE_IO_FAULTS", "file_io.read=EIO@2"),
+                    ("CPF_FILE_IO_READ_CHUNK", "1"),
+                ],
+                "not_collected",
+                "infrastructure",
+                "check_error",
+                10,
+            ),
+            (
+                vec![
+                    ("CPF_FILE_IO_FAULTS", "file_io.write=ENOSPC@2"),
+                    ("CPF_FILE_IO_READ_CHUNK", "1"),
+                ],
+                "not_collected",
+                "infrastructure",
+                "check_error",
+                10,
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.executable_problem(
+                "input = 'in.txt', output = 'out.txt'",
+                "[config.run]\nstdout_cap = 4096\n",
+            );
+            fixture.cases(&[("one", "size 4000", Some("42\n"))]);
+            let Some((job, doc)) = fixture.test_report_with_env(status, &settings) else {
+                continue;
+            };
+            assert_job(
+                &doc,
+                serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+            );
+            assert_test(
+                &doc,
+                "one",
+                verdict,
+                check,
+                if output == "too_large" {
+                    "output_budget"
+                } else {
+                    "exited_zero"
+                },
+                Some(output),
+            );
+            let test = test_entry(&doc, "one");
+            let execution =
+                &doc["executions"][test["executions"]["first"].as_u64().unwrap() as usize];
+            assert_eq!(execution["summary"]["class"]["kind"], "exited_zero");
+            assert!(
+                !job.join(execution["run"].as_str().unwrap())
+                    .join("out")
+                    .join("output")
+                    .exists()
+            );
+            if output == "too_large" {
+                assert_eq!(test["class"]["stream"], "output_file");
+                assert_eq!(test["class"]["streams"], serde_json::json!(["output_file"]));
+                assert_eq!(test["output_file"]["bytes"], "4097");
+                assert_eq!(test["output_file"]["budget"], "4096");
+                assert_eq!(test["check"]["reason"], "output_too_large");
+            } else {
+                assert_eq!(test["output_file"]["reason"], "io");
+                assert!(test["output_file"]["os_error"].is_i64());
+                #[cfg(unix)]
+                assert_eq!(
+                    test["output_file"]["os_error"],
+                    if settings[0].1.contains("EIO") {
+                        libc::EIO
+                    } else {
+                        libc::ENOSPC
+                    }
+                );
+                assert_eq!(test["check"]["os_error"], test["output_file"]["os_error"]);
+            }
+        }
+    });
+}
+
+// F-20's staging failure: it is setup infrastructure, with no child started.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn staging_enospc_never_starts_the_solution() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("input = 'in.txt', output = 'out.txt'", "");
+        fixture.cases(&[("one", "echo", Some("42\n"))]);
+        let Some((job, doc)) = fixture.test_report_with_env(
+            10,
+            &[("CPF_FILE_IO_FAULTS", "file_io.staging.write=ENOSPC")],
+        ) else {
+            return;
+        };
+        assert_job(
+            &doc,
+            serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+        );
+        let test = test_entry(&doc, "one");
+        assert_eq!(test["verdict"]["kind"], "infrastructure");
+        assert_eq!(test["class"]["kind"], "infrastructure");
+        assert_eq!(test["check"]["kind"], "not_admitted");
+        assert_eq!(test["output_file"]["kind"], "not_attempted");
+        let executions = doc["executions"].as_array().unwrap();
+        for (index, execution) in executions.iter().enumerate() {
+            assert_eq!(
+                execution["coverage"]["kind"],
+                if index + 1 == executions.len() {
+                    "not_started"
+                } else {
+                    "started"
+                }
+            );
+        }
+        let execution = executions.last().unwrap();
+        assert_eq!(execution["coverage"]["reason"]["kind"], "setup");
+        let run = job.join(execution["run"].as_str().unwrap());
+        assert!(!run.join("cwd").join("in.txt").exists());
+        assert!(!run.join("cwd").join("out.txt").exists());
+    });
+}
+
+// F-23: unverified containment is a note and does not prevent comparison.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn unverified_cleanup_still_collects_and_passes() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("input = 'in.txt', output = 'out.txt'", "");
+        fixture.cases(&[("one", "echo", Some("42\n"))]);
+        let Some((job, doc)) = fixture.test_report_with_env(0, &[("CPF_FILE_IO_UNVERIFIED", "1")])
+        else {
+            return;
+        };
+        assert_job(
+            &doc,
+            serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+        );
+        assert_test(
+            &doc,
+            "one",
+            "passed",
+            "passed",
+            "exited_zero",
+            Some("collected"),
+        );
+        assert_collected(&job, test_entry(&doc, "one"), b"42\n");
+        let warning = doc["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["kind"] == "cleanup_unverified")
+            .unwrap();
+        assert_eq!(warning["runs"], 1);
+        assert_eq!(warning["message"], "cleanup not verified");
+    });
+}
+
+// E §2.1: the checker's `output` is the frozen capture (stdout, or the
+// extracted `out/output`), even when that file grows after the freeze.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn checker_output_uses_frozen_length_even_when_the_source_grows() {
+    run_test(move || async move {
+        for (io, action, judged, target) in [
+            (
+                "input = 'in.txt'",
+                "input-only",
+                "stdout",
+                serde_json::json!({"input":"in.txt","output":null,"stdin":"null_device"}),
+            ),
+            (
+                "input = 'in.txt', output = 'out.txt'",
+                "echo",
+                "output",
+                serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.executable_problem(io, "[check]\nkind = 'checker'\nchecker = { sources = ['checker.cpp'], language = 'cpp', profile = 'simple' }\n");
+            fixture.write(
+                "problems/A/checker.cpp",
+                r#"#include <fstream>
+#include <iterator>
+#include <string>
+int main(int, char** argv) {
+    std::ifstream file(argv[2]);
+    std::string bytes((std::istreambuf_iterator<char>(file)), {});
+    return bytes == "42\n" ? 0 : 1;
+}
+"#,
+            );
+            fixture.cases(&[("one", action, Some("42\n"))]);
+            let Some((job, doc)) = fixture
+                .test_report_with_env(0, &[("CPF_FILE_IO_GROW_STDOUT", "appended after freeze")])
+            else {
+                continue;
+            };
+            assert_job(&doc, target);
+            assert_test(
+                &doc,
+                "one",
+                "passed",
+                "passed",
+                "exited_zero",
+                (judged == "output").then_some("collected"),
+            );
+            let test = test_entry(&doc, "one");
+            let solution =
+                &doc["executions"][test["executions"]["first"].as_u64().unwrap() as usize];
+            if judged == "output" {
+                assert_eq!(test["output_file"]["bytes"], "3");
+            } else {
+                assert_eq!(solution["summary"]["stdout"]["stored"], "3");
+            }
+            // The hook grew the source before the checker copy; the checker
+            // still saw exactly the frozen three bytes.
+            assert_eq!(
+                fs::read(
+                    job.join(solution["run"].as_str().unwrap())
+                        .join("out")
+                        .join(judged)
+                )
+                .unwrap(),
+                b"42\nappended after freeze"
+            );
+        }
+    });
+}
+
+#[cfg(all(feature = "storage-test-hooks", unix))]
+impl Fixture {
+    fn paused_report(
+        &self,
+        point: &str,
+        status: i32,
+        change: impl FnOnce(&Path),
+    ) -> (PathBuf, serde_json::Value, String) {
+        use std::io::{BufRead, BufReader, Read};
+        use std::time::{Duration, Instant};
+        let barriers = self.path("barriers");
+        fs::create_dir(&barriers).unwrap();
+        let log = self.path("operations");
+        let mut child = self
+            .command(
+                &["test", "--json"],
+                &[
+                    ("CPF_STORAGE_PAUSE_AT", point),
+                    ("CPF_STORAGE_BARRIER_DIR", barriers.to_str().unwrap()),
+                    ("CPF_FILE_IO_LOG", log.to_str().unwrap()),
+                ],
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut doc = Vec::new();
+            for line in BufReader::new(stdout).split(b'\n') {
+                let line = line.unwrap();
+                if line.starts_with(b"CPF-PAUSED ") {
+                    let _ = send.send(());
+                } else {
+                    doc.extend(line);
+                    doc.push(b'\n');
+                }
+            }
+            doc
+        });
+        let errors = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            BufReader::new(stderr).read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        // Kill/wait even if an assertion fails, before the fixture deletes cwd.
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(child);
+        receive
+            .recv_timeout(Duration::from_secs(120))
+            .expect("file-I/O barrier not reached");
+        let jobs: Vec<_> = fs::read_dir(self.path(".cpforge/runs"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(jobs.len(), 1);
+        let job = jobs[0].clone();
+        let cwd = fs::read_dir(&job)
+            .unwrap()
+            .map(|e| e.unwrap().path().join("cwd"))
+            .find(|cwd| cwd.join("out.txt").is_file())
+            .expect("solution cwd at barrier");
+        change(&cwd);
+        fs::write(barriers.join(format!("{point}.release")), b"release").unwrap();
+        let until = Instant::now() + Duration::from_secs(45);
+        let exit = loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                break exit;
+            }
+            assert!(
+                Instant::now() < until,
+                "cpf did not finish after barrier release"
+            );
+            // Exit polling, not an ordering or race-timing assumption.
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let errors = errors.join().unwrap();
+        assert_eq!(
+            exit.code(),
+            Some(status),
+            "{}",
+            String::from_utf8_lossy(&errors)
+        );
+        let bytes = reader.join().unwrap();
+        cpforge::report::wire::read::read_json(&bytes).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["result"]["pre_delivery_exit"]["code"], status);
+        (job, doc, fs::read_to_string(log).unwrap())
+    }
+}
+
+// F-11's race: pause after the regular type observation, before openat.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn regular_file_replaced_by_socket_between_type_check_and_open_is_not_infrastructure() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("output = 'out.txt'", "");
+        fixture.cases(&[("one", "echo", Some("42\n"))]);
+        #[cfg(windows)]
+        assert!(fixture.test_report(10).is_none());
+        #[cfg(unix)]
+        {
+            fixture.write(
+                "socket.cpp",
+                r#"#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <cstring>
+int main() {
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un address{}; address.sun_family = AF_UNIX;
+    std::strcpy(address.sun_path, "out.txt");
+    if (unlink("out.txt")) return 1;
+    int result = bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+    close(fd); return result ? 2 : 0;
+}
+"#,
+            );
+            let helper = fixture.path("socket-helper");
+            let compiler = if cfg!(target_os = "macos") {
+                "g++-14"
+            } else {
+                "g++"
+            };
+            let output = Command::new(compiler)
+                .arg(fixture.path("socket.cpp"))
+                .arg("-o")
+                .arg(&helper)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let (_, doc, log) = fixture.paused_report("file_io.open", 1, |cwd| {
+                // Keep the old inode alive so replacement cannot reuse it.
+                let _original = fs::File::open(cwd.join("out.txt")).unwrap();
+                let output = Command::new(&helper).current_dir(cwd).output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+            });
+            assert_job(
+                &doc,
+                serde_json::json!({"input":null,"output":"out.txt","stdin":"test_input"}),
+            );
+            assert_test(
+                &doc,
+                "one",
+                "wrong_answer",
+                "output_rejected",
+                "exited_zero",
+                Some("not_regular"),
+            );
+            assert_eq!(test_entry(&doc, "one")["output_file"]["type"], "other");
+            assert_eq!(
+                test_entry(&doc, "one")["check"]["reason"],
+                "output_not_regular"
+            );
+            assert!(
+                log.contains("file_io.type_check 2 "),
+                "replacement must be re-observed: {log}"
+            );
+        }
+    });
+}
+
+// F-30, stub listing: the exact name on either side of the fixed cutoff.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn injected_listing_order_observes_the_fixed_entry_boundary() {
+    run_test(move || async move {
+        for (position, status, outcome, verdict, check) in [
+            ("65536", 0, "collected", "passed", "passed"),
+            (
+                "65537",
+                1,
+                "too_many_entries",
+                "wrong_answer",
+                "output_rejected",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.executable_problem("output = 'out.txt'", "");
+            fixture.cases(&[("one", "echo", Some("42\n"))]);
+            let Some((job, doc)) =
+                fixture.test_report_with_env(status, &[("CPF_FILE_IO_LISTING_POSITION", position)])
+            else {
+                continue;
+            };
+            assert_job(
+                &doc,
+                serde_json::json!({"input":null,"output":"out.txt","stdin":"test_input"}),
+            );
+            assert_test(&doc, "one", verdict, check, "exited_zero", Some(outcome));
+            if outcome == "collected" {
+                assert_collected(&job, test_entry(&doc, "one"), b"42\n");
+            } else {
+                assert_eq!(
+                    test_entry(&doc, "one")["check"]["reason"],
+                    "output_dir_too_large"
+                );
+            }
+        }
+    });
+}
+
+// F-31/F-33 use engine workers on supported platforms; Windows refuses the
+// identical job command and declaration before allocating any job directory.
+#[cfg(all(feature = "storage-test-hooks", windows))]
+#[test]
+fn file_worker_fault_jobs_refuse_before_admission_on_windows() {
+    let fixture = Fixture::new();
+    for io in ["output = 'out.txt'", "input = 'in.txt', output = 'out.txt'"] {
+        fixture.executable_problem(io, "[config.run]\nstdout_cap = 4096\n");
+        fixture.cases(&[("one", "echo", Some("42\n")), ("two", "echo", Some("42\n"))]);
+        assert!(fixture.test_report(10).is_none());
+    }
+}
+
+// F-21's command/report assertions complement the engine accounting counters.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn failed_io_scratch_removal_warns_and_excludes_the_staged_input_from_measurement() {
+    run_test(move || async move {
+        let fixture = Fixture::new();
+        fixture.executable_problem("input = 'in.txt', output = 'out.txt'", "");
+        fixture.write(
+            "cpforge.toml",
+            "schema = 1\n[build]\ndeadline_s = 90\n[retention]\ncwd_bytes = '3B'\n",
+        );
+        fixture.cases(&[
+            ("kept", "echo", Some("42\n")),
+            ("deleted", "delete", Some("42\n")),
+        ]);
+        let Some((job, doc)) =
+            fixture.test_report_with_env(0, &[("CPF_FILE_IO_FAULTS", "file_io.unlink=EIO")])
+        else {
+            return;
+        };
+        assert_job(
+            &doc,
+            serde_json::json!({"input":"in.txt","output":"out.txt","stdin":"null_device"}),
+        );
+        for id in ["kept", "deleted"] {
+            assert_test(
+                &doc,
+                id,
+                "passed",
+                "passed",
+                "exited_zero",
+                Some("collected"),
+            );
+            let test = test_entry(&doc, id);
+            assert_collected(&job, test, b"42\n");
+            let execution =
+                &doc["executions"][test["executions"]["first"].as_u64().unwrap() as usize];
+            let run = execution["run"].as_str().unwrap();
+            let cwd = job.join(run).join("cwd");
+            assert_eq!(cwd.join("in.txt").exists(), id == "kept");
+            assert_eq!(fs::read(cwd.join("out.txt")).unwrap(), b"42\n");
+            let warnings: Vec<_> = doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["run"] == run && w["kind"] == "io_scratch")
+                .map(|w| w["detail"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                warnings,
+                if id == "kept" {
+                    vec!["staged_input_kept", "output_kept"]
+                } else {
+                    vec!["output_kept"]
+                }
+            );
+        }
+        assert!(
+            !doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["kind"] == "retention" && w["detail"] == "cwd_overflow")
+        );
     });
 }

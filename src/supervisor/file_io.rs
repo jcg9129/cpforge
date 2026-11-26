@@ -64,6 +64,10 @@ mod implementation {
         pub(crate) reservation: Option<Reservation>,
         pub(crate) owner: JobOwner,
         pub(crate) state: FileIoState,
+        #[cfg(feature = "storage-test-hooks")]
+        pub(crate) observation: Option<crate::jobs::engine::Observation>,
+        #[cfg(feature = "storage-test-hooks")]
+        pub(crate) execution: u32,
     }
     #[derive(Debug)]
     pub(crate) struct Scratch {
@@ -143,6 +147,8 @@ mod implementation {
             creation.check()?;
             let directory = crate::supervisor::sys::file_io::Directory::open(&setup.cwd)
                 .map_err(NotStarted::Setup)?;
+            #[cfg(feature = "storage-test-hooks")]
+            let directory = directory.observed(setup.observation, setup.execution);
             let bytes = setup.reservation.as_ref().map_or(0, Reservation::bytes);
             let mut scratch = Scratch {
                 directory,
@@ -220,7 +226,7 @@ mod implementation {
                                 drop(state);
                                 // The physical worker owns partial-copy removal after a logical timeout.
                                 if let OutputFile::Collected { bytes, .. } = &outcome {
-                                    if std::fs::remove_file(&setup.destination).is_ok() {
+                                    if scratch.directory.remove_copy(&setup.destination).is_ok() {
                                         retained.fetch_sub(*bytes, Ordering::AcqRel);
                                     }
                                 }
@@ -274,6 +280,12 @@ mod implementation {
                 }
                 self.frozen = true;
                 return true;
+            }
+            #[cfg(feature = "storage-test-hooks")]
+            if std::env::var_os("CPF_FILE_IO_UNVERIFIED").is_some() {
+                outcome.termination.cleanup = Cleanup::Unverified {
+                    reason: crate::supervisor::UnverifiedReason::ProcUnavailable,
+                };
             }
             if let Some(start) = self.start.take() {
                 let eligible = outcome.status != Termination::Unknown

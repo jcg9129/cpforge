@@ -19,6 +19,10 @@ fn allowance() -> Duration {
 // Counters and thread credits are process-wide. Isolate these fixtures from
 // other unit tests, with a hard wall timeout even if an executor poll blocks.
 fn isolated(name: &str, test: impl FnOnce()) {
+    isolated_settings(name, &[], test);
+}
+
+fn isolated_settings(name: &str, settings: &[(&str, &str)], test: impl FnOnce()) {
     const CHILD: &str = "CPF_CWD_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(name) {
         supervisor::init_process().unwrap();
@@ -32,6 +36,7 @@ fn isolated(name: &str, test: impl FnOnce()) {
             "--nocapture",
         ])
         .env(CHILD, name)
+        .envs(settings.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -585,6 +590,890 @@ fn walk_io_failures_are_diagnostic_and_later_runs_continue() {
                     assert_eq!(next.notes, vec![RunNote::CwdOverflow]);
                     idle().await;
                 }
+            });
+        },
+    );
+}
+
+#[test]
+fn judge_evidence_and_removal_do_not_need_a_post_run_credit() {
+    isolated(
+        "judge_evidence_and_removal_do_not_need_a_post_run_credit",
+        || {
+            run_test(move || async move {
+                let f = Fixture::new();
+                let engine = engine(&f, 1, 4);
+                let directory = engine.ready.dir.join("judge-credit");
+                fs::create_dir_all(directory.join("cwd")).unwrap();
+                fs::write(directory.join("source"), b"abc").unwrap();
+                let mut scratch =
+                    super::super::judge_files::Scratch::new(engine.ready.owner.clone());
+                scratch
+                    .stage(
+                        &[crate::jobs::roles::StagedFile {
+                            source: Some(directory.join("source")),
+                            destination: directory.join("cwd").join("input"),
+                            bytes: None,
+                        }],
+                        &engine.ready.budget,
+                        None,
+                    )
+                    .unwrap();
+                let mut root = root(1);
+                let mut stderr = root.stdout.take().unwrap();
+                stderr.stored = 3;
+                stderr.sink = Some(directory.join("stderr"));
+                fs::write(stderr.sink.as_ref().unwrap(), b"bad trailing bytes").unwrap();
+                root.stderr = Some(stderr);
+                let mut executor = SupervisorExecutor::start().unwrap();
+                let bounds = supervisor::global_bounds().unwrap();
+                let mut held = Vec::new();
+                while let Some(credit) = bounds.thread_credits.try_reserve(1) {
+                    held.push(credit);
+                }
+                let walking = Arc::new(AtomicBool::new(false));
+                let finished = super::super::judge_files::finish(
+                    engine.ready.owner.clone(),
+                    Some(Arc::new(ExecutionRecord::Started(Box::new(root)))),
+                    Some(scratch),
+                    &walking,
+                    &mut executor,
+                    None,
+                )
+                .await;
+                assert!(!walking.load(Ordering::Acquire));
+                assert!(
+                    !finished.kept,
+                    "no failed removal, so no judge_scratch warning"
+                );
+                assert_eq!(finished.kept_bytes, 0);
+                assert_eq!(finished.cwd, Ok(()));
+                assert_eq!(finished.stderr, Some(report::JudgeText::new(b"bad", 1024)));
+                assert!(!directory.join("cwd").join("input").exists());
+                assert_eq!(
+                    super::super::cwd::finish(
+                        engine.ready.owner.clone(),
+                        directory.join("cwd"),
+                        4,
+                        0,
+                        CancelToken::new(),
+                        &walking,
+                        None,
+                        None,
+                        0,
+                    )
+                    .await,
+                    Err(RunNote::CwdUnmeasuredIo)
+                );
+                assert!(!walking.load(Ordering::Acquire));
+                drop(held);
+            });
+        },
+    );
+}
+
+// A stalled filesystem during judge evidence/removal is bounded by the
+// post-run step's 5 s deadline on the credited worker and, when no credit is
+// free, on the job's creation thread alike; the stalled thread keeps the work.
+#[test]
+fn stalled_judge_scratch_is_bounded_with_and_without_a_post_run_credit() {
+    let barriers = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("judge-finish-barriers");
+    isolated_settings(
+        "stalled_judge_scratch_is_bounded_with_and_without_a_post_run_credit",
+        &[
+            ("CPF_STORAGE_PAUSE_AT", "judge.finish"),
+            ("CPF_STORAGE_BARRIER_DIR", barriers.to_str().unwrap()),
+        ],
+        || {
+            let _ = fs::remove_dir_all(&barriers);
+            fs::create_dir_all(&barriers).unwrap();
+            let release = barriers.join("judge.finish.release");
+            run_test(move || async move {
+                for exhausted in [false, true] {
+                    let f = Fixture::new();
+                    let engine = engine(&f, 1, 4);
+                    let directory = engine.ready.dir.join("judge-stall");
+                    fs::create_dir_all(directory.join("cwd")).unwrap();
+                    fs::write(directory.join("source"), b"abc").unwrap();
+                    let staged = directory.join("cwd").join("input");
+                    let mut scratch =
+                        super::super::judge_files::Scratch::new(engine.ready.owner.clone());
+                    scratch
+                        .stage(
+                            &[crate::jobs::roles::StagedFile {
+                                source: Some(directory.join("source")),
+                                destination: staged.clone(),
+                                bytes: None,
+                            }],
+                            &engine.ready.budget,
+                            None,
+                        )
+                        .unwrap();
+                    let mut executor = SupervisorExecutor::start().unwrap();
+                    let bounds = supervisor::global_bounds().unwrap();
+                    let mut held = Vec::new();
+                    if exhausted {
+                        while let Some(credit) = bounds.thread_credits.try_reserve(1) {
+                            held.push(credit);
+                        }
+                    }
+                    let walking = Arc::new(AtomicBool::new(false));
+                    let start = tokio::time::Instant::now();
+                    let finished = tokio::time::timeout(
+                        Duration::from_secs(5) + allowance(),
+                        super::super::judge_files::finish(
+                            engine.ready.owner.clone(),
+                            None,
+                            Some(scratch),
+                            &walking,
+                            &mut executor,
+                            None,
+                        ),
+                    )
+                    .await
+                    .expect("judge evidence/removal wait is bounded");
+                    assert!(start.elapsed() >= Duration::from_secs(5));
+                    // Same outcome as a worker past its deadline: unmeasured,
+                    // staged bytes kept and excluded, no competing cwd step.
+                    assert_eq!(finished.cwd, Err(RunNote::CwdUnmeasuredTimeout));
+                    assert!(finished.kept);
+                    assert_eq!(finished.kept_bytes, 3);
+                    assert!(staged.exists());
+                    assert!(
+                        walking.load(Ordering::Acquire),
+                        "the stalled work keeps the job's single walker mark"
+                    );
+                    fs::write(&release, b"release").unwrap();
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while staged.exists() || walking.load(Ordering::Acquire) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("released work removes its staged copy");
+                    fs::remove_file(&release).unwrap();
+                    drop(held);
+                    drop(executor);
+                    idle().await;
+                }
+            });
+        },
+    );
+}
+
+fn file_engine(f: &Fixture, count: usize, script: &str, input: bool) -> Engine<'static> {
+    file_engine_with_budget(f, count, script, input, 256 << 20)
+}
+
+fn file_engine_with_budget(
+    f: &Fixture,
+    count: usize,
+    script: &str,
+    input: bool,
+    limit: u64,
+) -> Engine<'static> {
+    let ready = ready_with_budget(f, "python", count, &Tools, limit);
+    let mut engine = Engine::new(
+        ready,
+        JobRequest::Test {
+            comparator: Comparator::Tokens,
+        },
+    )
+    .unwrap()
+    .file_io(Some(report::FileIo {
+        input: input.then(|| "in.txt".parse().unwrap()),
+        output: Some("out.txt".parse().unwrap()),
+    }))
+    .unwrap();
+    let Some(PlannedTarget::BuildFree(free)) = &engine.ready.planned_target else {
+        panic!("build-free target")
+    };
+    let mut stage = free.run(engine.ready.dir.join("cwd")).unwrap();
+    let ResolvedCommand::Argv { program, args } = &mut stage.command else {
+        panic!("argv")
+    };
+    program.path = "/bin/sh".into();
+    program.record.chosen_path = program.path.clone();
+    program.record.request = crate::exec::ProgramRequest::Path(program.path.clone());
+    *args = vec!["-c".into(), script.into(), "cpf".into()];
+    stage.stdout.bytes.value = 4096;
+    stage.stderr.bytes.value = 4096;
+    for plan in &mut engine.plan {
+        plan.recipe = Recipe::Resolved(Box::new(stage.clone()));
+    }
+    engine
+}
+
+async fn file_stall(point: &'static str, cancelling: bool) {
+    let f = Fixture::new();
+    let engine = file_engine(&f, 1, "printf 'yes\\n' > out.txt", false);
+    let directory = engine.ready.dir.clone();
+    let budget = engine.ready.budget.clone();
+    let entered = CancelToken::new();
+    let worker_entered = entered.clone();
+    let (send, receiver) = mpsc::channel();
+    let release = Release(send);
+    let receiver = Mutex::new(receiver);
+    let once = AtomicBool::new(false);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let operations = log.clone();
+    let engine = engine.observe(move |event| {
+        if let Point::FileIo {
+            point: operation,
+            size,
+            ..
+        } = event
+        {
+            operations
+                .lock()
+                .unwrap()
+                .push((operation, size, std::thread::current().id()));
+            if operation == point && !once.swap(true, Ordering::AcqRel) {
+                worker_entered.cancel();
+                receiver
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap();
+            }
+        }
+    });
+    let cancel = engine.cancellation();
+    let stamps = Arc::new(supervisor::Milestones::default());
+    let mut executor = SupervisorExecutor::start().unwrap();
+    executor.options.milestones = Some(stamps.clone());
+    let mut persistence = MemoryPersistence::default();
+    let mut hooks = NoHooks;
+    let mut future = Box::pin(engine.run(&mut executor, &mut persistence, &mut hooks));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            _ = entered.cancelled() => {},
+            _ = future.as_mut() => panic!("job ended before file-I/O stall"),
+        }
+    })
+    .await
+    .unwrap();
+    if cancelling {
+        cancel.request_cancel(CancelSource::Api);
+    }
+    let final_report = tokio::time::timeout(Duration::from_secs(10), future.as_mut())
+        .await
+        .unwrap();
+    drop(future);
+    let data = final_report.data();
+    let test = &data.tests[0];
+    assert_eq!(
+        test.output_file,
+        Some(report::OutputFile::NotCollected {
+            reason: report::CollectionFailure::Timeout,
+            os_error: None
+        })
+    );
+    assert_eq!(test.class, Some(RunClass::ExitedZero));
+    assert_eq!(data.executions.len(), 1);
+    assert_eq!(data.executions[0].result.coverage, Coverage::Started);
+    assert_eq!(
+        data.result.counts.primary,
+        report::Cov {
+            planned: 1,
+            started: 1,
+            ..report::Cov::default()
+        }
+    );
+    assert_eq!(
+        data.result.counts.by_class,
+        report::ByClass {
+            exited_zero: 1,
+            ..report::ByClass::default()
+        }
+    );
+    assert_eq!(data.result.counts.tests, 1);
+    assert_eq!(
+        data.details.target.as_ref().unwrap().io,
+        Some(report::FileIo {
+            input: None,
+            output: Some("out.txt".parse().unwrap())
+        })
+    );
+    if cancelling {
+        assert!(matches!(
+            test.check.as_ref().unwrap().kind,
+            report::CheckKind::NotAdmitted {
+                reason: report::CheckNotAdmitted::Cancelled
+            }
+        ));
+        assert_eq!(test.verdict, Some(report::TestVerdict::Cancelled));
+        assert_eq!(data.result.counts.by_verdict.cancelled, 1);
+        assert_eq!(data.details.pre_delivery_exit.code, 6);
+    } else {
+        assert!(matches!(
+            test.check.as_ref().unwrap().kind,
+            report::CheckKind::CheckError { os_error: None }
+        ));
+        assert_eq!(test.verdict, Some(report::TestVerdict::Infrastructure));
+        assert_eq!(data.result.counts.by_verdict.infrastructure, 1);
+        assert_eq!(data.details.pre_delivery_exit.code, 10);
+    }
+    assert!(
+        data.executions[0]
+            .io_warnings
+            .contains(&report::IoScratchDetail::NotMeasured)
+    );
+    let drain = stamps.get(supervisor::Milestone::DrainStart).unwrap();
+    let frozen = stamps.get(supervisor::Milestone::CaptureFrozen).unwrap();
+    assert!(frozen.duration_since(drain) >= Duration::from_secs(5));
+    assert!(frozen.duration_since(drain) <= Duration::from_secs(5) + allowance());
+    assert!(
+        budget.usage().reserved >= 4096,
+        "worker keeps its reservation"
+    );
+    assert!(budget.usage().retained + budget.usage().reserved <= budget.limit());
+    let output = directory.join("r00000").join("out").join("output");
+    if point == "file_io.write" {
+        assert_eq!(fs::metadata(&output).unwrap().len(), 0);
+    }
+    drop(final_report);
+    drop(persistence);
+    drop(executor);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while supervisor::debug_counters().service_pending != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(supervisor::debug_counters().file_io_directories, 1);
+    assert!(matches!(probe(&directory), ProbeOutcome::Held));
+    let before = log.lock().unwrap().clone();
+    drop(release);
+    idle().await;
+    assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+    assert_eq!(
+        budget.usage(),
+        crate::storage::budget::BudgetUsage::default()
+    );
+    assert!(!output.exists());
+    assert!(matches!(probe(&directory), ProbeOutcome::Acquired(_)));
+    let operations = log.lock().unwrap();
+    let worker = before
+        .iter()
+        .find(|(operation, _, _)| *operation == point)
+        .unwrap()
+        .2;
+    // Even after logical transfer, every subsequent operation (including the
+    // partial-copy unlink) runs on the original worker, never cleanup's poller.
+    assert!(
+        operations[before.len()..]
+            .iter()
+            .all(|(_, _, thread)| *thread == worker)
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|(operation, _, _)| *operation == "file_io.partial.unlink")
+    );
+}
+
+// F-31(a)-(c): the run's capture deadline includes a blocked directory read or write.
+#[test]
+fn file_collection_stalls_freeze_and_transfer_at_the_sink_deadline() {
+    isolated(
+        "file_collection_stalls_freeze_and_transfer_at_the_sink_deadline",
+        || {
+            run_test(move || async move {
+                file_stall("file_io.listing.entry", true).await;
+                file_stall("file_io.listing.entry", false).await;
+                file_stall("file_io.write", false).await;
+            });
+        },
+    );
+}
+
+// F-31(d): worker credit refusal is admission infrastructure, before any child.
+#[test]
+fn file_worker_credit_refusal_never_starts_the_solution() {
+    isolated(
+        "file_worker_credit_refusal_never_starts_the_solution",
+        || {
+            run_test(move || async move {
+                let f = Fixture::new();
+                let engine = file_engine(&f, 1, "printf 'yes\\n' > out.txt", false);
+                let mut executor = SupervisorExecutor::start().unwrap();
+                let bounds = supervisor::global_bounds().unwrap();
+                let mut held = Vec::new();
+                while let Some(credit) = bounds.thread_credits.try_reserve(1) {
+                    held.push(credit);
+                }
+                // Leave the two stdout/stderr sink credits free, so the refused
+                // credit is the output-file worker's (capture pipeline admission).
+                held.truncate(held.len().saturating_sub(2));
+                let final_report = engine
+                    .run(
+                        &mut executor,
+                        &mut MemoryPersistence::default(),
+                        &mut NoHooks,
+                    )
+                    .await;
+                let data = final_report.data();
+                assert!(matches!(
+                    data.tests[0].class,
+                    Some(RunClass::Infrastructure { .. })
+                ));
+                assert_eq!(
+                    data.tests[0].verdict,
+                    Some(report::TestVerdict::Infrastructure)
+                );
+                assert_eq!(
+                    data.tests[0].output_file,
+                    Some(report::OutputFile::NotAttempted)
+                );
+                assert!(matches!(
+                    data.tests[0].check.as_ref().unwrap().kind,
+                    report::CheckKind::NotAdmitted { .. }
+                ));
+                assert_eq!(data.executions.len(), 1);
+                assert!(matches!(
+                    data.executions[0].result.coverage,
+                    Coverage::NotStarted {
+                        reason: NotStartedReason::CleanupCapacity | NotStartedReason::Worker
+                    }
+                ));
+                assert_eq!(
+                    data.result.counts.primary,
+                    report::Cov {
+                        planned: 1,
+                        not_started: 1,
+                        ..report::Cov::default()
+                    }
+                );
+                assert_eq!(
+                    data.details.target.as_ref().unwrap().io,
+                    Some(report::FileIo {
+                        input: None,
+                        output: Some("out.txt".parse().unwrap())
+                    })
+                );
+                assert_eq!(data.result.counts.by_class.infrastructure, 1);
+                assert_eq!(data.result.counts.tests, 1);
+                assert_eq!(data.result.counts.by_verdict.infrastructure, 1);
+                assert_eq!(data.details.pre_delivery_exit.code, 10);
+                assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+                drop(held);
+            });
+        },
+    );
+}
+
+// F-25 supplements the command fixture with charge and descriptor quiescence.
+#[test]
+fn renamed_file_io_cwd_releases_the_staged_charge_and_directory() {
+    isolated(
+        "renamed_file_io_cwd_releases_the_staged_charge_and_directory",
+        || {
+            run_test(move || async move {
+                let f = Fixture::new();
+                let engine = file_engine(
+                    &f,
+                    1,
+                    "printf 'yes\\n' > out.txt; mv ../cwd ../old; mkdir ../cwd; printf wrong > ../cwd/out.txt",
+                    true,
+                );
+                let directory = engine.ready.dir.clone();
+                let budget = engine.ready.budget.clone();
+                let before = budget.usage().retained;
+                let mut executor = SupervisorExecutor::start().unwrap();
+                let final_report = engine
+                    .run(
+                        &mut executor,
+                        &mut MemoryPersistence::default(),
+                        &mut NoHooks,
+                    )
+                    .await;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while budget.usage().reserved != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let data = final_report.data();
+                assert_eq!(data.tests[0].verdict, Some(report::TestVerdict::Passed));
+                assert_eq!(
+                    data.executions[0].io_warnings,
+                    [report::IoScratchDetail::NotMeasured]
+                );
+                assert!(!directory.join("r00000").join("old").join("in.txt").exists());
+                assert_eq!(budget.usage().reserved, 0);
+                assert_eq!(
+                    budget.usage().retained,
+                    before + 4,
+                    "only extracted output remains charged"
+                );
+                assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+                drop(final_report);
+                drop(executor);
+                idle().await;
+                assert_eq!(budget.usage().retained, 0);
+            });
+        },
+    );
+}
+
+// F-33: cancellation publishes without waiting for the staged-input writer.
+#[test]
+fn blocked_file_staging_keeps_its_charge_until_the_creation_thread_returns() {
+    isolated(
+        "blocked_file_staging_keeps_its_charge_until_the_creation_thread_returns",
+        || {
+            run_test(move || async move {
+                for release_after_owner in [false, true] {
+                    let f = Fixture::new();
+                    let engine = file_engine(&f, 2, "printf 'yes\\n' > out.txt", true);
+                    let directory = engine.ready.dir.clone();
+                    let budget = engine.ready.budget.clone();
+                    let entered = CancelToken::new();
+                    let worker_entered = entered.clone();
+                    let (send, receiver) = mpsc::channel();
+                    let release = Release(send);
+                    let release_before_return = release.0.clone();
+                    let receiver = Mutex::new(receiver);
+                    let log = Arc::new(Mutex::new(Vec::new()));
+                    let operations = log.clone();
+                    let engine = engine.observe(move |event| {
+                        if !release_after_owner && event == Point::BeforeSnapshot {
+                            // The cancelled record and checks already exist,
+                            // but the job has not returned its report yet.
+                            let _ = release_before_return.send(());
+                        }
+                        if let Point::FileIo { point, .. } = event {
+                            operations
+                                .lock()
+                                .unwrap()
+                                .push((point, std::thread::current().id()));
+                            if point == "file_io.staging.write" {
+                                worker_entered.cancel();
+                                receiver
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_secs(30))
+                                    .unwrap();
+                            }
+                        }
+                    });
+                    let cancel = engine.cancellation();
+                    let mut executor = SupervisorExecutor::start().unwrap();
+                    let mut persistence = MemoryPersistence::default();
+                    let mut hooks = NoHooks;
+                    let mut future =
+                        Box::pin(engine.run(&mut executor, &mut persistence, &mut hooks));
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        tokio::select! {
+                            _ = entered.cancelled() => {},
+                            _ = future.as_mut() => panic!("job finished before staging blocked"),
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    let staged = directory.join("r00000").join("cwd").join("in.txt");
+                    assert!(staged.is_file());
+                    assert!(budget.usage().reserved >= 6);
+                    cancel.request_cancel(CancelSource::Api);
+                    let final_report =
+                        tokio::time::timeout(Duration::from_secs(5), future.as_mut())
+                            .await
+                            .unwrap();
+                    drop(future);
+                    let data = final_report.data();
+                    assert_eq!(data.executions.len(), 2);
+                    assert_eq!(
+                        data.executions[0].result.coverage,
+                        Coverage::NotStarted {
+                            reason: NotStartedReason::CancelledBeforeStart
+                        }
+                    );
+                    assert_eq!(
+                        data.executions[1].result.coverage,
+                        Coverage::Skipped {
+                            reason: SkipReason::Cancelled
+                        }
+                    );
+                    assert_eq!(
+                        data.result.counts.primary,
+                        report::Cov {
+                            planned: 2,
+                            not_started: 1,
+                            skipped: 1,
+                            ..report::Cov::default()
+                        }
+                    );
+                    assert_eq!(data.result.counts.tests, 2);
+                    assert_eq!(data.result.counts.by_class.cancelled, 1);
+                    assert_eq!(data.result.counts.by_class.skipped, 1);
+                    assert_eq!(data.result.counts.by_verdict.cancelled, 1);
+                    assert_eq!(data.result.counts.by_verdict.not_run, 1);
+                    assert_eq!(data.tests[0].class, Some(RunClass::Cancelled));
+                    assert_eq!(data.tests[0].verdict, Some(report::TestVerdict::Cancelled));
+                    assert!(matches!(
+                        data.tests[0].check.as_ref().unwrap().kind,
+                        report::CheckKind::NotAdmitted {
+                            reason: report::CheckNotAdmitted::RunNotEligible
+                        }
+                    ));
+                    for test in &data.tests {
+                        assert_eq!(test.output_file, Some(report::OutputFile::NotAttempted));
+                    }
+                    assert_eq!(
+                        data.details.target.as_ref().unwrap().io,
+                        Some(report::FileIo {
+                            input: Some("in.txt".parse().unwrap()),
+                            output: Some("out.txt".parse().unwrap())
+                        })
+                    );
+                    assert_eq!(data.tests[1].class, None);
+                    assert_eq!(
+                        data.tests[1].verdict,
+                        Some(report::TestVerdict::NotRun {
+                            reason: SkipReason::Cancelled
+                        })
+                    );
+                    assert!(matches!(
+                        data.tests[1].check.as_ref().unwrap().kind,
+                        report::CheckKind::NotAdmitted {
+                            reason: report::CheckNotAdmitted::Cancelled
+                        }
+                    ));
+                    assert_eq!(data.details.pre_delivery_exit.code, 6);
+                    if release_after_owner {
+                        assert!(
+                            staged.is_file(),
+                            "no other worker may touch the staged copy"
+                        );
+                        assert!(budget.usage().reserved >= 6);
+                    }
+                    let before = log.lock().unwrap().clone();
+                    let worker = before.last().unwrap().1;
+                    let mut report_owner = Some(final_report);
+                    if release_after_owner {
+                        drop(report_owner.take());
+                    }
+                    drop(persistence);
+                    drop(executor);
+                    drop(release);
+                    idle().await;
+                    assert!(!staged.exists());
+                    assert_eq!(budget.usage().reserved, 0);
+                    assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+                    assert!(
+                        log.lock().unwrap()[before.len()..]
+                            .iter()
+                            .all(|(_, thread)| *thread == worker)
+                    );
+                    drop(report_owner);
+                    assert_eq!(budget.usage().retained, 0);
+                }
+            });
+        },
+    );
+}
+
+// F-21: kept staged copies remain charged, eventually closing admission. The
+// measurement excludes those copies, and a program-deleted input is released.
+#[test]
+fn failed_io_scratch_unlinks_retain_only_the_copies_still_present() {
+    isolated_settings(
+        "failed_io_scratch_unlinks_retain_only_the_copies_still_present",
+        &[("CPF_FILE_IO_FAULTS", "file_io.unlink=EIO")],
+        || {
+            run_test(move || async move {
+                let probe_fixture = Fixture::new();
+                let probe = file_engine(&probe_fixture, 4, "printf 'yes\\n' > out.txt", true);
+                let baseline = probe.ready.budget.usage();
+                let (tests, aggregates) = report_populations(probe.kind, &probe.plan, 4);
+                let report_bytes =
+                    report::wire::report_reservation(4, tests, aggregates, probe.report_shape)
+                        .unwrap();
+                let input = probe.ready.manifest.entries()[0].input.len;
+                assert_eq!(input, 6);
+                // MemoryPersistence owns each completed run's metadata allowance
+                // until W. Leave room for the third allowance, all its streams,
+                // and exactly two kept staged inputs plus their extracted outputs.
+                let limit =
+                    baseline.retained + report_bytes + 3 * METADATA + 3 * 4096 + 2 * (input + 4);
+                drop(probe);
+                let f = Fixture::new();
+                let mut engine =
+                    file_engine_with_budget(&f, 4, "printf 'yes\\n' > out.txt", true, limit);
+                engine.ready.cwd_bytes = Some(4);
+                assert_eq!(engine.ready.budget.usage(), baseline);
+                let directory = engine.ready.dir.clone();
+                let budget = engine.ready.budget.clone();
+                let peak = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let max_bytes = peak.clone();
+                let observed_budget = budget.clone();
+                let engine = engine.observe(move |_| {
+                    let usage = observed_budget.usage();
+                    let charged = usage.retained + usage.reserved;
+                    assert!(charged <= limit);
+                    max_bytes.fetch_max(charged, Ordering::AcqRel);
+                });
+                let mut executor = SupervisorExecutor::start().unwrap();
+                let final_report = engine
+                    .run(
+                        &mut executor,
+                        &mut MemoryPersistence::default(),
+                        &mut NoHooks,
+                    )
+                    .await;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while budget.usage().reserved != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let data = final_report.data();
+                assert_eq!(
+                    data.details.target.as_ref().unwrap().io,
+                    Some(report::FileIo {
+                        input: Some("in.txt".parse().unwrap()),
+                        output: Some("out.txt".parse().unwrap())
+                    })
+                );
+                assert_eq!(data.executions.len(), 4);
+                for index in 0..2 {
+                    let test = &data.tests[index];
+                    assert_eq!(test.verdict, Some(report::TestVerdict::Passed));
+                    assert_eq!(test.class, Some(RunClass::ExitedZero));
+                    assert!(matches!(
+                        test.check.as_ref().unwrap().kind,
+                        report::CheckKind::Passed
+                    ));
+                    assert!(matches!(
+                        test.output_file,
+                        Some(report::OutputFile::Collected { bytes: 4, .. })
+                    ));
+                    let execution = &data.executions[index];
+                    assert_eq!(execution.result.coverage, Coverage::Started);
+                    assert_eq!(
+                        execution.io_warnings,
+                        [
+                            report::IoScratchDetail::StagedInputKept,
+                            report::IoScratchDetail::OutputKept
+                        ]
+                    );
+                    // A complete measurement within cwd_bytes = 4: only out.txt
+                    // counts; the kept 6-byte staged input would overflow it.
+                    let summary = execution.summary.as_ref().unwrap();
+                    assert_eq!(summary.cwd_overflow_bytes, None);
+                    assert_eq!(summary.notes, Vec::<RunNote>::new());
+                    let cwd = directory
+                        .join(execution.run.as_ref().unwrap().as_str())
+                        .join("cwd");
+                    assert_eq!(fs::metadata(cwd.join("in.txt")).unwrap().len(), input);
+                    assert_eq!(fs::read(cwd.join("out.txt")).unwrap(), b"yes\n");
+                }
+                assert_eq!(
+                    data.executions[2].result.coverage,
+                    Coverage::NotStarted {
+                        reason: NotStartedReason::RetentionBudget
+                    }
+                );
+                assert_eq!(
+                    data.executions[3].result.coverage,
+                    Coverage::Skipped {
+                        reason: SkipReason::AdmissionClosed
+                    }
+                );
+                assert!(matches!(
+                    data.tests[2].class,
+                    Some(RunClass::Infrastructure { .. })
+                ));
+                assert_eq!(
+                    data.tests[2].verdict,
+                    Some(report::TestVerdict::Infrastructure)
+                );
+                assert_eq!(data.tests[3].class, None);
+                assert_eq!(
+                    data.tests[3].verdict,
+                    Some(report::TestVerdict::NotRun {
+                        reason: SkipReason::AdmissionClosed
+                    })
+                );
+                for test in &data.tests[2..] {
+                    assert!(matches!(
+                        test.check.as_ref().unwrap().kind,
+                        report::CheckKind::NotAdmitted {
+                            reason: report::CheckNotAdmitted::RunNotEligible
+                        }
+                    ));
+                    assert_eq!(test.output_file, Some(report::OutputFile::NotAttempted));
+                }
+                assert_eq!(
+                    data.result.counts.primary,
+                    report::Cov {
+                        planned: 4,
+                        started: 2,
+                        not_started: 1,
+                        skipped: 1,
+                        ..report::Cov::default()
+                    }
+                );
+                assert_eq!(data.result.counts.tests, 4);
+                assert_eq!(
+                    data.result.counts.by_class,
+                    report::ByClass {
+                        exited_zero: 2,
+                        infrastructure: 1,
+                        skipped: 1,
+                        ..report::ByClass::default()
+                    }
+                );
+                assert_eq!(data.result.counts.by_verdict.passed, 2);
+                assert_eq!(data.result.counts.by_verdict.infrastructure, 1);
+                assert_eq!(data.result.counts.by_verdict.not_run, 1);
+                assert_eq!(data.details.pre_delivery_exit.code, 10);
+                assert_eq!(budget.usage().retained, baseline.retained + 2 * (input + 4));
+                assert!(peak.load(Ordering::Acquire) <= limit);
+                assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+                drop(final_report);
+                drop(executor);
+                idle().await;
+                assert_eq!(budget.usage().retained, 0);
+
+                let f = Fixture::new();
+                let engine = file_engine(&f, 1, "rm in.txt; printf 'yes\\n' > out.txt", true);
+                let budget = engine.ready.budget.clone();
+                let before = budget.usage().retained;
+                let mut executor = SupervisorExecutor::start().unwrap();
+                let final_report = engine
+                    .run(
+                        &mut executor,
+                        &mut MemoryPersistence::default(),
+                        &mut NoHooks,
+                    )
+                    .await;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while budget.usage().reserved != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    final_report.data().tests[0].verdict,
+                    Some(report::TestVerdict::Passed)
+                );
+                assert_eq!(
+                    final_report.data().executions[0].io_warnings,
+                    [report::IoScratchDetail::OutputKept]
+                );
+                assert_eq!(
+                    budget.usage().retained,
+                    before + 4,
+                    "program-deleted input is not charged"
+                );
             });
         },
     );

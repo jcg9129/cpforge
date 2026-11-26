@@ -19,6 +19,8 @@ pub struct StagedFile {
     /// None means an intentionally empty answer, never a live input path.
     pub source: Option<PathBuf>,
     pub destination: PathBuf,
+    /// Exact frozen capture length; None for immutable captured inputs/assets.
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -168,6 +170,7 @@ pub(super) fn prepare_roles<'probe>(
                 .filter(|f| f.role == SourceRole::Asset)
                 .map(|f| StagedFile {
                     source: Some(f.copy_path.clone()),
+                    bytes: None,
                     destination: f
                         .problem_path
                         .components()
@@ -177,6 +180,7 @@ pub(super) fn prepare_roles<'probe>(
                 .collect();
             staged.push(StagedFile {
                 source: Some(test.input.path.clone()),
+                bytes: None,
                 destination: cwd.join("input"),
             });
             let mut extra: Vec<OsString> = Vec::new();
@@ -198,6 +202,7 @@ pub(super) fn prepare_roles<'probe>(
                         solution.layout.stdout.clone()
                     }),
                     destination: cwd.join("output"),
+                    bytes: None,
                 });
                 // Absent is reachable only under `answer = "none"` (checked above).
                 let answer = match &test.answer {
@@ -206,6 +211,7 @@ pub(super) fn prepare_roles<'probe>(
                 };
                 staged.push(StagedFile {
                     source: answer,
+                    bytes: None,
                     destination: cwd.join("answer"),
                 });
                 extra.extend([

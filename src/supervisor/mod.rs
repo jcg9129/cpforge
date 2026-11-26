@@ -163,3 +163,16 @@ impl ChildEnd {
         sys::into_stdio_for_tests(self.inner)
     }
 }
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    all(test, feature = "storage-test-hooks")
+))]
+pub(crate) mod file_io_listing;
+
+#[cfg(all(
+    feature = "storage-test-hooks",
+    any(target_os = "linux", target_os = "macos")
+))]
+mod file_io_hooks;

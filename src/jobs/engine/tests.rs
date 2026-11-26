@@ -127,6 +127,8 @@ enum Behavior {
 }
 #[derive(Debug, Default)]
 struct Fake {
+    #[cfg(feature = "storage-test-hooks")]
+    listing_position: Option<u64>,
     behavior: VecDeque<Behavior>,
     runs: Vec<RunId>,
     entered: Option<oneshot::Sender<()>>,
@@ -203,6 +205,40 @@ impl Executor for Fake {
                 Behavior::Exit(code) => code,
                 _ => 0,
             });
+            #[cfg(feature = "storage-test-hooks")]
+            if let (Some(position), Some(output)) = (self.listing_position, &spec.output_file) {
+                use crate::supervisor::file_io_listing::Scan;
+                let mut scan = Scan::new(&output.name);
+                for index in 1..=position {
+                    let name = if index == position {
+                        output.name.as_encoded_bytes()
+                    } else {
+                        b"stub-entry"
+                    };
+                    if scan.entry(name, 42) {
+                        break;
+                    }
+                }
+                let listing = scan.finish();
+                // This fake supplies the accepted regular handle after the same
+                // bounded spelling decision used by the native Directory.
+                assert!(!listing.alias);
+                outcome.output_file = Some(if listing.cutoff {
+                    report::OutputFile::TooManyEntries
+                } else {
+                    assert_eq!(listing.inode, Some(42));
+                    use sha2::{Digest, Sha256};
+                    fs::write(spec.directory.join("out").join("output"), b"yes\n").unwrap();
+                    _resources
+                        .retained_bytes
+                        .fetch_add(4, std::sync::atomic::Ordering::AcqRel);
+                    report::OutputFile::Collected {
+                        bytes: 4,
+                        sha256: Sha256::digest(b"yes\n").into(),
+                        path: format!("{}/out/output", spec.run.as_str()),
+                    }
+                });
+            }
             match behavior {
                 Behavior::WaitCancel => {
                     cancel.cancelled().await;
@@ -3293,6 +3329,180 @@ fn file_output_does_not_consume_discarded_stdout() {
         assert_eq!(data.result.counts.primary.started, 1);
         assert_eq!(data.result.counts.by_verdict.passed, 1);
         assert_eq!(data.details.pre_delivery_exit.code, 0);
+    });
+}
+
+// F-20: derive the threshold from the frozen plan and actual frozen bytes,
+// leaving precisely the staged copy out of the first solution's allowances.
+#[test]
+fn staged_input_reservation_refuses_before_any_solution_on_every_platform() {
+    run_test(move || async move {
+        let io = report::FileIo {
+            input: Some("in.txt".parse().unwrap()),
+            output: Some("out.txt".parse().unwrap()),
+        };
+        let probe_fixture = Fixture::new();
+        let probe = test_engine(&probe_fixture, "python", 2)
+            .file_io(Some(io.clone()))
+            .unwrap();
+        let frozen = probe.ready.budget.usage();
+        assert_eq!(frozen.reserved, 0);
+        let target = probe.ready.target.as_ref().unwrap();
+        let streams = 2 * target.run.stdout.bytes.value + target.run.stderr.bytes.value;
+        let (tests, aggregates) = report_populations(
+            probe.kind,
+            &probe.plan,
+            probe.ready.manifest.entries().len(),
+        );
+        let report_bytes = report::wire::report_reservation(
+            probe.plan.len(),
+            tests,
+            aggregates,
+            probe.report_shape,
+        )
+        .unwrap();
+        let job_bytes = frozen.retained + report_bytes + streams + METADATA;
+        assert!(probe.ready.manifest.entries()[0].input.len > 0);
+        drop(probe);
+        let f = Fixture::new();
+        let ready = ready_with_budget(&f, "python", 2, &Tools, job_bytes);
+        assert_eq!(
+            ready.budget.usage(),
+            frozen,
+            "freezing must have succeeded at the computed threshold"
+        );
+        let budget = ready.budget.clone();
+        let engine = Engine::new(
+            ready,
+            JobRequest::Test {
+                comparator: Comparator::Tokens,
+            },
+        )
+        .unwrap()
+        .file_io(Some(io.clone()))
+        .unwrap();
+        let mut fake = Fake::default();
+        let final_report = run(engine, &mut fake).await;
+        let data = final_report.data();
+        assert!(
+            fake.runs.is_empty(),
+            "the first solution must be refused before execution"
+        );
+        assert_eq!(data.details.target.as_ref().unwrap().io.as_ref(), Some(&io));
+        assert_eq!(data.executions.len(), 2);
+        assert_eq!(
+            data.executions[0].result.coverage,
+            Coverage::NotStarted {
+                reason: NotStartedReason::RetentionBudget
+            }
+        );
+        assert_eq!(
+            data.executions[1].result.coverage,
+            Coverage::Skipped {
+                reason: SkipReason::AdmissionClosed
+            }
+        );
+        assert!(matches!(
+            data.tests[0].class,
+            Some(RunClass::Infrastructure { .. })
+        ));
+        assert_eq!(
+            data.tests[0].verdict,
+            Some(report::TestVerdict::Infrastructure)
+        );
+        assert_eq!(data.tests[1].class, None);
+        assert_eq!(
+            data.tests[1].verdict,
+            Some(report::TestVerdict::NotRun {
+                reason: SkipReason::AdmissionClosed
+            })
+        );
+        for test in &data.tests {
+            assert!(matches!(
+                test.check.as_ref().unwrap().kind,
+                report::CheckKind::NotAdmitted {
+                    reason: report::CheckNotAdmitted::RunNotEligible
+                }
+            ));
+            assert_eq!(test.output_file, Some(report::OutputFile::NotAttempted));
+        }
+        assert_eq!(
+            data.result.counts.primary,
+            report::Cov {
+                planned: 2,
+                not_started: 1,
+                skipped: 1,
+                ..report::Cov::default()
+            }
+        );
+        assert_eq!(data.result.counts.tests, 2);
+        assert_eq!(data.result.counts.by_class.infrastructure, 1);
+        assert_eq!(data.result.counts.by_class.skipped, 1);
+        assert_eq!(data.result.counts.by_verdict.infrastructure, 1);
+        assert_eq!(data.result.counts.by_verdict.not_run, 1);
+        assert_eq!(data.details.pre_delivery_exit.code, 10);
+        assert!(budget.usage().retained + budget.usage().reserved <= job_bytes);
+    });
+}
+
+// F-30's stub variant runs without any child or native directory dependency.
+#[cfg(feature = "storage-test-hooks")]
+#[test]
+fn stub_listing_boundary_reconciles_every_test_execution_on_all_platforms() {
+    run_test(move || async move {
+        for position in [65_536, 65_537] {
+            let f = Fixture::new();
+            let io = report::FileIo {
+                input: None,
+                output: Some("out.txt".parse().unwrap()),
+            };
+            let engine = test_engine(&f, "python", 1)
+                .file_io(Some(io.clone()))
+                .unwrap();
+            let mut fake = Fake {
+                listing_position: Some(position),
+                ..Fake::default()
+            };
+            let final_report = run(engine, &mut fake).await;
+            let data = final_report.data();
+            let test = &data.tests[0];
+            assert_eq!(data.details.target.as_ref().unwrap().io.as_ref(), Some(&io));
+            assert_eq!(test.class, Some(RunClass::ExitedZero));
+            assert_eq!(data.executions.len(), 1);
+            assert_eq!(data.executions[0].result.coverage, Coverage::Started);
+            assert_eq!(data.result.counts.primary.planned, 1);
+            assert_eq!(data.result.counts.primary.started, 1);
+            assert_eq!(data.result.counts.primary.not_started, 0);
+            assert_eq!(data.result.counts.primary.skipped, 0);
+            assert_eq!(data.result.counts.primary.transferred, 0);
+            assert_eq!(data.result.counts.primary.admitted, 0);
+            assert_eq!(data.result.counts.primary.invalid, 0);
+            assert_eq!(data.result.counts.tests, 1);
+            if position == 65_536 {
+                assert_eq!(test.verdict, Some(report::TestVerdict::Passed));
+                assert!(matches!(
+                    test.check.as_ref().unwrap().kind,
+                    report::CheckKind::Passed
+                ));
+                assert!(matches!(
+                    test.output_file,
+                    Some(report::OutputFile::Collected { bytes: 4, .. })
+                ));
+                assert_eq!(data.result.counts.by_verdict.passed, 1);
+                assert_eq!(data.details.pre_delivery_exit.code, 0);
+            } else {
+                assert_eq!(test.verdict, Some(report::TestVerdict::WrongAnswer));
+                assert!(matches!(
+                    test.check.as_ref().unwrap().kind,
+                    report::CheckKind::OutputRejected {
+                        reason: report::OutputRejectReason::DirTooLarge
+                    }
+                ));
+                assert_eq!(test.output_file, Some(report::OutputFile::TooManyEntries));
+                assert_eq!(data.result.counts.by_verdict.wrong_answer, 1);
+                assert_eq!(data.details.pre_delivery_exit.code, 1);
+            }
+        }
     });
 }
 

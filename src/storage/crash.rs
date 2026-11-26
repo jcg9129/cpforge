@@ -73,6 +73,16 @@
 //! `CPF_STORAGE_PERSISTENCE_STATS=<path>` records queue credit wait, service
 //! cycle samples and W-to-finished timing after the engine returns.
 //! `persist.write` pauses the persistence worker before a write.
+//! `judge.finish` pauses a judge run's evidence/scratch-removal work (on its
+//! post-run worker, or on the creation thread when no credit was free).
+//! File-I/O workers share this barrier protocol at `file_io.before_listing`,
+//! `file_io.listing`, `file_io.listing.entry`, `file_io.type_check`,
+//! `file_io.open`, `file_io.read`, `file_io.write`, `file_io.staging.write`,
+//! `file_io.after_listing` and `file_io.extracted` (faults and stub controls
+//! are documented in supervisor/file_io_hooks.rs). `judge.before_output_copy`
+//! pauses after the solution's capture length is frozen; with
+//! `CPF_FILE_IO_GROW_STDOUT=<suffix>` that source (the stdout capture or the
+//! extracted `out/output`) grows before the checker copy.
 //! `CPF_STORAGE_CREATION_SOCKET=<Unix socket path>` holds OS creation in
 //! pre_exec: the child writes its native-endian i32 pid, then awaits one byte
 //! from the harness; EOF instead fails pre_exec, so the child exits without exec.

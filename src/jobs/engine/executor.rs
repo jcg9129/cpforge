@@ -286,6 +286,20 @@ pub trait Executor {
         })
     }
 
+    /// Judge evidence and scratch removal (E §2.1 steps 1-2) when no post-run
+    /// worker could be admitted: run on the job's creation thread, waiting no
+    /// later than `deadline` (`cwd_unmeasured_timeout` past it).
+    fn finish_judge(
+        &mut self,
+        work: Box<dyn FnOnce() + Send>,
+        _deadline: tokio::time::Instant,
+    ) -> JobFuture<'_, Result<(), crate::report::RunNote>> {
+        Box::pin(async move {
+            work();
+            Ok(())
+        })
+    }
+
     fn execute(
         &mut self,
         spec: Arc<ExecutionSpec>,
@@ -348,6 +362,25 @@ impl Executor for SupervisorExecutor {
             {
                 Ok(prepared) => prepared,
                 Err(reason) => PreparedRun::failed(start_failure(reason)),
+            }
+        })
+    }
+
+    fn finish_judge(
+        &mut self,
+        work: Box<dyn FnOnce() + Send>,
+        deadline: tokio::time::Instant,
+    ) -> JobFuture<'_, Result<(), crate::report::RunNote>> {
+        Box::pin(async move {
+            use crate::report::RunNote;
+            // Own token: removal is attempted even after cancellation, and the
+            // deadline bounds the wait. Past it the creation thread keeps the
+            // work and its accounting until it returns (or drops it unstarted).
+            let token = CancelToken::new();
+            match tokio::time::timeout_at(deadline, self.creator.prepare(&token, work)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(_)) => Err(RunNote::CwdUnmeasuredIo),
+                Err(_) => Err(RunNote::CwdUnmeasuredTimeout),
             }
         })
     }

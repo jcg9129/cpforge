@@ -1004,10 +1004,13 @@ mod tests {
                     .expect("persistence fixture timed out")
             })
     }
-    pub(super) fn wait_for_worker(owner: &std::sync::Weak<JobLease>) {
+    pub(super) fn wait_for_worker(owner: &std::sync::Weak<JobLease>, budget: &JobBudget) {
         runtime(async {
             tokio::time::timeout(Duration::from_secs(2), async {
-                while owner.upgrade().is_some() {
+                // Arc reaches strong_count == 0 before JobLease::drop runs.
+                // That destructor calls owner_released(), which clears retained
+                // bytes; a failed Weak::upgrade alone does not observe its end.
+                while owner.upgrade().is_some() || budget.usage().retained != 0 {
                     tokio::task::yield_now().await;
                 }
             })
@@ -1078,7 +1081,7 @@ mod tests {
         });
         assert!(start.elapsed() < Duration::from_secs(4));
         drop(service);
-        wait_for_worker(&weak_owner);
+        wait_for_worker(&weak_owner, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1101,7 +1104,7 @@ mod tests {
             Some(PersistError::WorkerUnavailable)
         );
         drop(service);
-        wait_for_worker(&weak_owner);
+        wait_for_worker(&weak_owner, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1215,7 +1218,7 @@ mod controlled_tests {
             );
         });
         drop(service);
-        wait_for_worker(&weak);
+        wait_for_worker(&weak, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1261,7 +1264,7 @@ mod controlled_tests {
             .await
             .unwrap();
         });
-        wait_for_worker(&weak);
+        wait_for_worker(&weak, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1307,7 +1310,7 @@ mod controlled_tests {
             drop(full);
             gate.notify_one();
         });
-        wait_for_worker(&weak);
+        wait_for_worker(&weak, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1338,7 +1341,7 @@ mod controlled_tests {
         drop(service);
         assert_eq!(budget.usage().retained, 1);
         drop(owner);
-        wait_for_worker(&weak);
+        wait_for_worker(&weak, &budget);
         assert_eq!(budget.usage().retained, 0);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -1416,7 +1419,7 @@ mod controlled_tests {
             assert_eq!(error, PersistError::WorkerUnavailable);
         });
         drop(owner);
-        wait_for_worker(&weak);
+        wait_for_worker(&weak, &budget);
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]

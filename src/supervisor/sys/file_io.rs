@@ -9,10 +9,15 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::report::{CollectionFailure, IoScratchDetail, OutputFile, OutputFileType};
+use crate::supervisor::file_io_listing::{Listing, Scan};
 use sha2::{Digest, Sha256};
 
 pub(crate) struct Directory {
     file: File,
+    #[cfg(feature = "storage-test-hooks")]
+    hooks: crate::supervisor::file_io_hooks::Hooks,
+    #[cfg(feature = "storage-test-hooks")]
+    _directory_count: crate::supervisor::file_io_hooks::DirectoryCount,
     #[cfg(test)]
     operations: std::cell::RefCell<Vec<(&'static str, Vec<u8>, i32)>>,
     #[cfg(test)]
@@ -25,17 +30,41 @@ impl std::fmt::Debug for Directory {
 }
 impl Directory {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        #[cfg(feature = "storage-test-hooks")]
+        let hooks = crate::supervisor::file_io_hooks::Hooks::environment();
+        #[cfg(feature = "storage-test-hooks")]
+        hooks.at("file_io.directory", 0)?;
         OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .map(|file| Self {
                 file,
+                #[cfg(feature = "storage-test-hooks")]
+                hooks,
+                #[cfg(feature = "storage-test-hooks")]
+                _directory_count: crate::supervisor::file_io_hooks::DirectoryCount::new(),
                 #[cfg(test)]
                 operations: Default::default(),
                 #[cfg(test)]
                 before_listing: Default::default(),
             })
+    }
+
+    #[cfg(feature = "storage-test-hooks")]
+    pub(crate) fn observed(
+        mut self,
+        observer: Option<crate::jobs::engine::Observation>,
+        execution: u32,
+    ) -> Self {
+        self.hooks.observation = observer.map(|observer| (observer, execution));
+        self
+    }
+
+    pub(crate) fn remove_copy(&self, destination: &Path) -> io::Result<()> {
+        #[cfg(feature = "storage-test-hooks")]
+        self.hooks.at("file_io.partial.unlink", 0)?;
+        std::fs::remove_file(destination)
     }
 
     // The operation log and between-observation/listing hook are local to H;
@@ -50,6 +79,8 @@ impl Directory {
     }
 
     fn stat(&self, name: &CStr) -> io::Result<libc::stat> {
+        #[cfg(feature = "storage-test-hooks")]
+        self.hooks.at("file_io.type_check", 0)?;
         self.observe("fstatat", name, libc::AT_SYMLINK_NOFOLLOW);
         // SAFETY: stat is initialized by a successful fstatat, and both arguments live.
         unsafe {
@@ -68,6 +99,8 @@ impl Directory {
     }
 
     fn open_at(&self, name: &CStr, flags: i32) -> io::Result<File> {
+        #[cfg(feature = "storage-test-hooks")]
+        self.hooks.at("file_io.open", 0)?;
         self.observe("openat", name, flags | libc::O_CLOEXEC | libc::O_NOFOLLOW);
         // SAFETY: H and the terminated component live; ownership of a successful fd moves to File.
         let fd = unsafe {
@@ -89,7 +122,12 @@ impl Directory {
     /// `source`. On failure after creation the partial file is removed here;
     /// the error then says whether a file is still present at the name (only
     /// when that removal failed), so a pre-existing entry is never removed.
-    pub(crate) fn stage(&self, name: &OsStr, source: &Path, bytes: u64) -> Result<(), StageError> {
+    pub(in crate::supervisor) fn stage(
+        &self,
+        name: &OsStr,
+        source: &Path,
+        bytes: u64,
+    ) -> Result<(), StageError> {
         let component = CString::new(name.as_bytes()).map_err(|e| StageError {
             error: e.into(),
             kept: false,
@@ -97,7 +135,14 @@ impl Directory {
         let output = self
             .open_at(&component, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
             .map_err(|error| StageError { error, kept: false })?;
-        fill(output, source, bytes).map_err(|error| StageError {
+        fill(
+            output,
+            source,
+            bytes,
+            #[cfg(feature = "storage-test-hooks")]
+            &self.hooks,
+        )
+        .map_err(|error| StageError {
             error,
             kept: self.remove(name, true).is_err(),
         })
@@ -117,6 +162,9 @@ impl Directory {
                 _ => {}
             }
         }
+        #[cfg(feature = "storage-test-hooks")]
+        self.hooks.at("file_io.unlink", 0)?;
+        self.observe("unlinkat", &name, 0);
         // SAFETY: unlinkat addresses the entry through live H and never follows a link.
         if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } == 0 {
             return Ok(());
@@ -143,11 +191,34 @@ impl Directory {
     // Keep this bounded listing separate from observation and open for deterministic injection.
     #[allow(clippy::unnecessary_cast)] // libc inode widths differ across Unix targets.
     fn listing(&self, name: &OsStr) -> io::Result<Listing> {
+        #[cfg(feature = "storage-test-hooks")]
+        self.hooks.at("file_io.before_listing", 0)?;
         #[cfg(test)]
         if let Some(hook) = self.before_listing.borrow_mut().take() {
             hook();
         }
         self.observe("listing", c".", 0);
+        #[cfg(feature = "storage-test-hooks")]
+        {
+            self.hooks.at("file_io.listing", 0)?;
+            if let Some(position) = self.hooks.listing_position {
+                self.hooks.at("file_io.listing.entry", 0)?;
+                let component = CString::new(name.as_bytes())?;
+                let inode = self.stat(&component)?.st_ino as u64;
+                let mut scan = Scan::new(name);
+                for index in 1..=position {
+                    let bytes = if index == position {
+                        name.as_bytes()
+                    } else {
+                        b"stub-entry"
+                    };
+                    if scan.entry(bytes, inode) {
+                        break;
+                    }
+                }
+                return Ok(scan.finish());
+            }
+        }
         let fd = self.open_at(c".", libc::O_RDONLY | libc::O_DIRECTORY)?;
         let fd = fd.into_raw_fd();
         // SAFETY: fd is exclusively owned here and handed to DIR on success.
@@ -170,10 +241,10 @@ impl Directory {
             }
         }
         let dir = Entries(dir);
-        let mut result = Listing::default();
-        let key = crate::names::collision_key(name.to_str().expect("validated name"));
-        let mut count = 0;
+        let mut scan = Scan::new(name);
         loop {
+            #[cfg(feature = "storage-test-hooks")]
+            self.hooks.at("file_io.listing.entry", 0)?;
             // SAFETY: DIR is exclusively owned and the entry is consumed before the next call.
             let entry = unsafe {
                 set_errno(0);
@@ -182,7 +253,7 @@ impl Directory {
             if entry.is_null() {
                 let error = io::Error::last_os_error();
                 return if error.raw_os_error() == Some(0) {
-                    Ok(result)
+                    Ok(scan.finish())
                 } else {
                     Err(error)
                 };
@@ -191,20 +262,8 @@ impl Directory {
             // and d_name is NUL-terminated.
             let entry = unsafe { &*entry };
             let bytes = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) }.to_bytes();
-            if bytes == b"." || bytes == b".." {
-                continue;
-            }
-            count += 1;
-            if count > 65_536 {
-                result.cutoff = true;
-                return Ok(result);
-            }
-            if bytes == name.as_bytes() {
-                result.inode = Some(entry.d_ino as u64);
-                return Ok(result);
-            }
-            if let Ok(text) = std::str::from_utf8(bytes) {
-                result.alias |= crate::names::collision_key(text) == key;
+            if scan.entry(bytes, entry.d_ino as u64) {
+                return Ok(scan.finish());
             }
         }
     }
@@ -233,6 +292,10 @@ impl Directory {
                 Ok(l) => l,
                 Err(e) => return failure(e),
             };
+            #[cfg(feature = "storage-test-hooks")]
+            if let Err(e) = self.hooks.at("file_io.after_listing", 0) {
+                return failure(e);
+            }
             let Some(inode) = listing.inode else {
                 return if listing.cutoff {
                     OutputFile::TooManyEntries
@@ -293,7 +356,15 @@ impl Directory {
                     budget,
                 };
             }
-            return extract(file, budget, destination, retained, warnings);
+            return extract(
+                file,
+                budget,
+                destination,
+                retained,
+                warnings,
+                #[cfg(feature = "storage-test-hooks")]
+                &self.hooks,
+            );
         }
         OutputFile::NotCollected {
             reason: CollectionFailure::Unstable,
@@ -306,13 +377,6 @@ impl Directory {
 pub(crate) struct StageError {
     pub(crate) error: io::Error,
     pub(crate) kept: bool,
-}
-
-#[derive(Default)]
-struct Listing {
-    inode: Option<u64>,
-    alias: bool,
-    cutoff: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -344,8 +408,25 @@ fn io_failure(e: io::Error) -> OutputFile {
     }
 }
 
-fn fill(mut output: File, source: &Path, bytes: u64) -> io::Result<()> {
+fn fill(
+    mut output: File,
+    source: &Path,
+    bytes: u64,
+    #[cfg(feature = "storage-test-hooks")] hooks: &crate::supervisor::file_io_hooks::Hooks,
+) -> io::Result<()> {
+    #[cfg(feature = "storage-test-hooks")]
+    hooks.at(
+        "file_io.staging.read",
+        bytes.min(usize::MAX as u64) as usize,
+    )?;
     let mut input = File::open(source)?.take(bytes);
+    #[cfg(feature = "storage-test-hooks")]
+    {
+        hooks.at(
+            "file_io.staging.write",
+            bytes.min(usize::MAX as u64) as usize,
+        )?;
+    }
     if io::copy(&mut input, &mut output)? != bytes {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
@@ -368,16 +449,30 @@ fn extract(
     destination: &Path,
     retained: &AtomicU64,
     warnings: &mut Vec<IoScratchDetail>,
+    #[cfg(feature = "storage-test-hooks")] hooks: &crate::supervisor::file_io_hooks::Hooks,
 ) -> OutputFile {
     let mut copy = BoundedCopy {
         written: 0,
         created: false,
     };
     let outcome = copy
-        .run(source, budget, destination, retained)
+        .run(
+            source,
+            budget,
+            destination,
+            retained,
+            #[cfg(feature = "storage-test-hooks")]
+            hooks,
+        )
         .unwrap_or_else(io_failure);
     if copy.created && !matches!(outcome, OutputFile::Collected { .. }) {
-        match std::fs::remove_file(destination) {
+        #[cfg(feature = "storage-test-hooks")]
+        let removed = hooks
+            .at("file_io.partial.unlink", 0)
+            .and_then(|()| std::fs::remove_file(destination));
+        #[cfg(not(feature = "storage-test-hooks"))]
+        let removed = std::fs::remove_file(destination);
+        match removed {
             Ok(()) => {
                 retained.fetch_sub(copy.written, Ordering::AcqRel);
             }
@@ -399,7 +494,10 @@ impl BoundedCopy {
         budget: u64,
         destination: &Path,
         retained: &AtomicU64,
+        #[cfg(feature = "storage-test-hooks")] hooks: &crate::supervisor::file_io_hooks::Hooks,
     ) -> io::Result<OutputFile> {
+        #[cfg(feature = "storage-test-hooks")]
+        hooks.at("file_io.destination", 0)?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -411,7 +509,11 @@ impl BoundedCopy {
             let len = (budget - self.written).min(buffer.len() as u64) as usize;
             // At the cap, probe into memory only; the retained file never exceeds its reservation.
             let n = loop {
-                match source.read(&mut buffer[..len.max(1)]) {
+                #[cfg(feature = "storage-test-hooks")]
+                let result = hooks.read(&mut source, &mut buffer[..len.max(1)]);
+                #[cfg(not(feature = "storage-test-hooks"))]
+                let result = source.read(&mut buffer[..len.max(1)]);
+                match result {
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                     result => break result?,
                 }
@@ -427,7 +529,13 @@ impl BoundedCopy {
             }
             let mut pending = &buffer[..n];
             while !pending.is_empty() {
-                let n = match output.write(pending) {
+                #[cfg(feature = "storage-test-hooks")]
+                let write = hooks
+                    .at("file_io.write", pending.len())
+                    .and_then(|()| output.write(pending));
+                #[cfg(not(feature = "storage-test-hooks"))]
+                let write = output.write(pending);
+                let n = match write {
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     result => result?,
                 };
@@ -442,6 +550,8 @@ impl BoundedCopy {
         }
         output.flush()?;
         close(output)?;
+        #[cfg(feature = "storage-test-hooks")]
+        hooks.at("file_io.extracted", 0)?;
         let run = destination
             .parent()
             .and_then(Path::parent)

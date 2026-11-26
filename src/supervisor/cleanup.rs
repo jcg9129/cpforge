@@ -411,6 +411,11 @@ pub struct Counters {
         any(target_os = "linux", target_os = "macos")
     ))]
     pub owned_resources: usize,
+    #[cfg(all(
+        feature = "storage-test-hooks",
+        any(target_os = "linux", target_os = "macos")
+    ))]
+    pub file_io_directories: usize,
     pub slots_in_use: usize,
     pub credits_in_use: usize,
     /// Includes slot-free creation, post-run cwd and persistence workers.
@@ -427,6 +432,11 @@ pub fn debug_counters() -> Counters {
             any(target_os = "linux", target_os = "macos")
         ))]
         owned_resources: super::test_hooks::owned_resources(),
+        #[cfg(all(
+            feature = "storage-test-hooks",
+            any(target_os = "linux", target_os = "macos")
+        ))]
+        file_io_directories: super::file_io_hooks::directories(),
         slots_in_use: bounds.slots_in_use.load(Ordering::Acquire),
         credits_in_use: bounds.thread_credits.used.load(Ordering::Acquire),
         service_pending: bounds.pending.load(Ordering::Acquire),
