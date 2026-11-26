@@ -1961,11 +1961,11 @@ fn file_io_portable_name_limits_and_controls_have_no_derived_errors() {
     for platform in [Platform::Linux, Platform::Macos, Platform::Windows] {
         let at_limit = format!("{}a", "é".repeat(127));
         let good = layer(
-            &format!("[config]\nio = {{ input = '{at_limit}' }}"),
+            &format!("[problem]\nid = 'local:p'\n[config]\nio = {{ input = '{at_limit}' }}"),
             LayerKind::Problem,
             platform,
         );
-        assert!(good.diagnostics.is_empty());
+        assert!(good.diagnostics.is_empty(), "{:?}", good.diagnostics);
         for value in [
             format!("{at_limit}b"),
             "x\u{7f}".into(),
