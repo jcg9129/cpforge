@@ -163,7 +163,9 @@ pub fn encode_record(v: &Record<'_>) -> Result<Vec<u8>> {
             v.spec
                 .path
                 .as_deref()
-                .map(|v| rel(v, 18))
+                // `<rid>/spec.json` (18 bytes), or for a stress iteration run
+                // `iterations/<irid>/spec.json` with an irid of <= 41 bytes.
+                .map(|v| rel(v, if v.starts_with("iterations") { 62 } else { 18 }))
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
