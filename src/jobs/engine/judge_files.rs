@@ -1,7 +1,7 @@
-//! Judge preparation and frozen capture diagnostics. No simple-profile result
-//! is read from cwd; all evidence is outside it before scratch measurement.
+//! Judge preparation, bounded extraction and frozen capture diagnostics.
+//! Evidence leaves cwd before scratch removal and measurement.
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -229,9 +229,136 @@ fn diagnostic(record: Option<&ExecutionRecord>) -> io::Result<Option<JudgeText>>
     Ok(Some(text))
 }
 
+/// Only testlib checkers request an APPES report. Validators read status only.
+#[derive(Debug)]
+pub(super) struct ReportRequest {
+    pub(super) directory: std::path::PathBuf,
+    pub(super) budget: Arc<JobBudget>,
+    pub(super) scoring: crate::report::Scoring,
+    pub(super) policies: [crate::supervisor::Exceed; 2],
+}
+impl ReportRequest {
+    fn eligible(&self, record: Option<&ExecutionRecord>) -> bool {
+        let Some(record) = record else { return false };
+        let input = record.input(false, self.policies);
+        matches!(
+            crate::report::classify_run(&input),
+            crate::report::RunClass::ExitedZero | crate::report::RunClass::NonzeroExit { .. }
+        ) && !matches!(input.cleanup, crate::supervisor::Cleanup::Unverified { .. })
+    }
+
+    fn extract(&self) -> Box<super::JudgeEvidence> {
+        use crate::report::{JudgeRead, JudgeReason as R, JudgeReport};
+        let mut evidence = Box::new(super::JudgeEvidence {
+            read: JudgeRead::Io { os_error: None },
+            report: JudgeReport {
+                path: None,
+                bytes: 0,
+                encoding: None,
+            },
+            message: None,
+        });
+        let path = self.directory.join("cwd").join("report");
+        let reject = |error: &io::Error| match error.kind() {
+            io::ErrorKind::NotFound => Some(R::ReportMissing),
+            io::ErrorKind::PermissionDenied => Some(R::ReportUnreadable),
+            io::ErrorKind::InvalidInput if error.raw_os_error().is_none() => {
+                Some(R::ReportNotRegular)
+            }
+            // A link (O_NOFOLLOW) or a socket, which cannot be opened.
+            #[cfg(unix)]
+            _ if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENXIO)) => {
+                Some(R::ReportNotRegular)
+            }
+            #[cfg(target_os = "macos")]
+            _ if error.raw_os_error() == Some(libc::EOPNOTSUPP) => Some(R::ReportNotRegular),
+            _ => None,
+        };
+        let mut bytes = Vec::new();
+        let read = open_regular(&path).and_then(|file| file.take(65_537).read_to_end(&mut bytes));
+        evidence.report.bytes = bytes.len() as u64;
+        if let Err(error) = read {
+            evidence.read = reject(&error).map_or(
+                JudgeRead::Io {
+                    os_error: error.raw_os_error(),
+                },
+                JudgeRead::Invalid,
+            );
+            return evidence;
+        }
+        if bytes.len() > 65_536 {
+            evidence.read = JudgeRead::Invalid(R::ReportTooLarge);
+            return evidence;
+        }
+        // Reservation survives every partial write, including a failed copy.
+        let Ok(reservation) = self.budget.reserve(bytes.len() as u64) else {
+            return evidence;
+        };
+        let mut retained = RetainedReport {
+            reservation,
+            bytes: 0,
+        };
+        let extracted = retain_report(&self.directory.join("judge"), &bytes, &mut retained.bytes);
+        match extracted {
+            Err(error) => {
+                evidence.read = JudgeRead::Io {
+                    os_error: error.raw_os_error(),
+                }
+            }
+            Ok(frozen) => {
+                let run = self
+                    .directory
+                    .file_name()
+                    .expect("run directory")
+                    .to_string_lossy();
+                evidence.report.path = Some(format!("{run}/judge/report"));
+                let (read, encoding, message) = super::testlib::parse(&frozen, self.scoring);
+                evidence.read = read;
+                evidence.report.encoding = encoding;
+                evidence.message = message;
+            }
+        }
+        evidence
+    }
+}
+/// Publish the extracted copy by exclusive creation, counting every byte
+/// written, and return the bytes read back from it.
+fn retain_report(judge: &Path, bytes: &[u8], written: &mut u64) -> io::Result<Vec<u8>> {
+    fs::create_dir(judge)?;
+    let mut output = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(judge.join("report"))?;
+    let mut pending = bytes;
+    while !pending.is_empty() {
+        let n = output.write(pending)?;
+        if n == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        *written += n as u64;
+        pending = &pending[n..];
+    }
+    // All interpretation uses the retained copy, never cwd again.
+    output.rewind()?;
+    let mut frozen = Vec::new();
+    output.take(65_537).read_to_end(&mut frozen)?;
+    Ok(frozen)
+}
+struct RetainedReport {
+    reservation: Reservation,
+    bytes: u64,
+}
+impl Drop for RetainedReport {
+    fn drop(&mut self) {
+        let _ = self.reservation.commit(self.bytes);
+    }
+}
+
 /// Judge evidence and scratch outcome of one finished run.
 #[derive(Debug)]
 pub(super) struct Finished {
+    pub(super) evidence: Option<Box<super::JudgeEvidence>>,
     pub(super) stderr: Option<JudgeText>,
     /// Staged bytes still in `cwd/`, excluded from its measurement.
     pub(super) kept_bytes: u64,
@@ -242,19 +369,33 @@ pub(super) struct Finished {
     pub(super) cwd: Result<(), RunNote>,
 }
 
-/// Execution §2.1 steps (1)–(2) for a judge run, after its cleanup result: a
-/// simple judge has no artefact in `cwd/` to extract, so its frozen stderr
-/// diagnostic is read and its staged copies are removed, on a credited
-/// post-run worker. The caller then measures `cwd/` (step 3).
+/// Execution §2.1 steps (1)–(2), after cleanup: extract eligible APPES
+/// reports, read frozen diagnostics and remove staged copies on a credited
+/// worker. The caller then measures `cwd/` (step 3).
 pub(super) async fn finish(
     owner: JobOwner,
     record: Option<Arc<ExecutionRecord>>,
     scratch: Option<Scratch>,
     walking: &Arc<AtomicBool>,
+    request: Option<Box<ReportRequest>>,
 ) -> Finished {
+    let eligible = request
+        .as_ref()
+        .is_some_and(|r| r.eligible(record.as_deref()));
     let bytes = scratch.as_ref().map_or(0, Scratch::bytes);
     let staged = scratch.as_ref().is_some_and(|s| !s.copies.is_empty());
     let unfinished = |note| Finished {
+        evidence: eligible.then(|| {
+            Box::new(super::JudgeEvidence {
+                read: crate::report::JudgeRead::Io { os_error: None },
+                report: crate::report::JudgeReport {
+                    path: None,
+                    bytes: 0,
+                    encoding: None,
+                },
+                message: None,
+            })
+        }),
         stderr: None,
         kept_bytes: bytes,
         kept: staged,
@@ -280,11 +421,13 @@ pub(super) async fn finish(
         crate::supervisor::post_run(&CancelToken::new(), deadline, move || {
             let _walking = walking;
             let _owner = owner;
+            let evidence = request.filter(|_| eligible).map(|r| r.extract());
             let stderr = diagnostic(record.as_deref()).ok().flatten();
             let mut scratch = scratch;
             let kept_bytes = scratch.as_mut().map_or(0, Scratch::clear);
             let kept = scratch.is_some_and(|s| s.copies.iter().any(|c| !c.removed));
             Finished {
+                evidence,
                 stderr,
                 kept_bytes,
                 kept,
@@ -299,11 +442,13 @@ pub(super) async fn finish(
         // Production refuses judged execution on these platforms; inline
         // executors can still exercise the evidence adapters.
         let _ = (owner, walking, unfinished);
+        let evidence = request.filter(|_| eligible).map(|r| r.extract());
         let stderr = diagnostic(record.as_deref()).ok().flatten();
         let mut scratch = scratch;
         let kept_bytes = scratch.as_mut().map_or(0, Scratch::clear);
         let kept = scratch.is_some_and(|s| s.copies.iter().any(|c| !c.removed));
         Finished {
+            evidence,
             stderr,
             kept_bytes,
             kept,

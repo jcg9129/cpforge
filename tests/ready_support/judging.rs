@@ -173,14 +173,14 @@ fn caps_are_phase_three_exit_seven_in_required_precedence() {
     }
     assert!(plan::judging_supported(Some(&compare)));
     assert!(plan::judging_supported(Some(&check)));
-    // Only the simple profile is open: a testlib checker or validator stays refused.
+    // Both batch profiles are open; interactors remain refused.
     for declaration in [
         "[check]\nkind = 'checker'\nchecker = { program = 'validator.exe', profile = 'testlib' }",
         "[check]\nvalidator = { program = 'validator.exe', profile = 'testlib' }",
         "[check]\nkind = 'checker'\nchecker = { sources = ['checker.py'], language = 'python', profile = 'simple' }\nvalidator = { program = 'validator.exe', profile = 'testlib' }",
     ] {
-        let (_, refused) = config(&f, "python", declaration);
-        assert!(!plan::judging_supported(Some(&refused)), "{declaration}");
+        let (_, supported) = config(&f, "python", declaration);
+        assert!(plan::judging_supported(Some(&supported)), "{declaration}");
     }
     assert!(!job.exists());
     assert!(!f.path(".cpforge/runs").exists());

@@ -61,6 +61,19 @@ jobs:
           java -version
           javac -version
           "$cpp" --version
+      - name: Keep testlib fixtures out of crate archives
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="$(cargo package --list --allow-dirty --locked)"
+          # Guard against a vacuous pass on an empty or unexpected listing.
+          grep -qx 'Cargo.toml' <<< "$files"
+          grep -qx 'tests/job_engine_linux.rs' <<< "$files"
+          if grep -E '^tests/fixtures/testlib/|(^|/)testlib\.h$' <<< "$files"; then
+            echo 'testlib fixtures must not ship' >&2
+            exit 1
+          fi
       - run: cargo fmt --all --check
       - name: Forbid Tokio process ownership
         shell: bash

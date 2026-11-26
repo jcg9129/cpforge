@@ -103,13 +103,7 @@ impl std::error::Error for PlanError {}
 /// The single CLI execution gate for parsed judging, before admission.
 /// Prepared plans remain usable through the engine API for role producers.
 pub fn judging_supported(check: Option<&CheckConfig>) -> bool {
-    check.is_none_or(|c| {
-        c.kind.value != CheckMode::Interactive
-            && c.checker
-                .iter()
-                .chain(c.validator.iter())
-                .all(|role| role.profile.value == crate::report::JudgeProfile::Simple)
-    })
+    check.is_none_or(|c| c.kind.value != CheckMode::Interactive)
 }
 
 /// Phase-3 answer policy check, before CLI admission and again on frozen data.

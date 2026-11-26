@@ -42,12 +42,16 @@ fn input(execution: &ExecutionReport, profile: r::JudgeProfile) -> r::JudgeInput
             .summary
             .as_ref()
             .is_some_and(|s| s.notes.contains(&r::RunNote::CleanupUnverified)),
-        // A simple judge never reads an APPES report.
-        read: r::JudgeRead::Invalid(r::JudgeReason::ReportMissing),
+        read: execution
+            .judge_evidence
+            .as_ref()
+            .map_or(r::JudgeRead::Invalid(r::JudgeReason::ReportMissing), |e| {
+                e.read.clone()
+            }),
     }
 }
 
-fn own_result(judge: &r::JudgeInput) -> Option<r::JudgeResult> {
+fn own_result(judge: &r::JudgeInput, scoring: r::Scoring) -> Option<r::JudgeResult> {
     if judge.execution.coverage != Coverage::Started {
         return None;
     }
@@ -64,6 +68,11 @@ fn own_result(judge: &r::JudgeInput) -> Option<r::JudgeResult> {
         }
         _ => {}
     }
+    if matches!(judge.read, r::JudgeRead::Io { .. }) {
+        return Some(r::JudgeResult::NotRead {
+            reason: r::JudgeNotRead::ExtractionFailed,
+        });
+    }
     // The same table derives the judge's own outcome, independently of a
     // diagnostic solution failure (B16) or cancellation before admission (B13).
     let solution = r::ExecutionResult {
@@ -75,7 +84,7 @@ fn own_result(judge: &r::JudgeInput) -> Option<r::JudgeResult> {
         validator: None,
         solution: &solution,
         checker: Some(judge),
-        scoring: r::Scoring::PassFail,
+        scoring,
         admission: r::CheckAdmission::NoIntent,
         answer_present: true,
         comparison: &r::Comparison::NotRun,
@@ -199,14 +208,24 @@ pub(super) fn finish_test(
             role: r::JudgeRole::Checker,
             execution: execution.plan.index,
             profile: input.profile,
-            result: own_result(input),
-            message: None,
+            result: own_result(input, config.scoring),
+            message: execution
+                .judge_evidence
+                .as_ref()
+                .and_then(|e| e.message.clone()),
             stderr: execution.judge_stderr.clone(),
-            report: None,
+            report: execution.judge_evidence.as_ref().map(|e| e.report.clone()),
         })
         .into_iter()
         .collect();
-    let score = r::test_score(config.scoring, &verdict, None).ok().flatten();
+    let raw = match &check.kind {
+        r::CheckKind::Judged { outcome } => match outcome.as_ref() {
+            r::JudgedCheck::Scored { raw, .. } => Some(*raw),
+            _ => None,
+        },
+        _ => None,
+    };
+    let score = r::test_score(config.scoring, &verdict, raw).ok().flatten();
     TestReport {
         frozen: test,
         first_execution: runs[0].plan.index,

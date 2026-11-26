@@ -49,6 +49,7 @@ mod persistence;
 mod report_value;
 mod role_builds;
 mod spec;
+mod testlib;
 mod types;
 pub(crate) mod warnings;
 
@@ -587,7 +588,22 @@ impl<'probe> Engine<'probe> {
             .flat_map(|r| &r.runs)
             .map(|r| (r.execution, r.staged.clone()))
             .collect();
+        let testlib: std::collections::BTreeMap<_, _> = judging
+            .as_ref()
+            .into_iter()
+            .flat_map(|j| {
+                let scoring = j.check.report_config().scoring;
+                j.roles
+                    .iter()
+                    .filter(|role| {
+                        role.captured.role == report::RoleName::Checker
+                            && role.captured.spec.profile.value == report::JudgeProfile::Testlib
+                    })
+                    .flat_map(move |role| role.runs.iter().map(move |run| (run.execution, scoring)))
+            })
+            .collect();
         let context = Context {
+            testlib: &testlib,
             staged: &staged,
             runs: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             dir: &ready.dir,
@@ -1457,6 +1473,7 @@ struct Context<'a> {
     events: &'a Events,
     output_events: bool,
     cwd_bytes: Option<u64>,
+    testlib: &'a std::collections::BTreeMap<u32, report::Scoring>,
     staged: &'a std::collections::BTreeMap<u32, Vec<crate::jobs::roles::StagedFile>>,
     runs: std::cell::RefCell<std::collections::BTreeMap<u32, RunId>>,
     /// Set while this job's post-run cwd walker runs (at most one).
@@ -1780,18 +1797,26 @@ impl Context<'_> {
             invariant: Some(Invariant::RecordMissing),
         };
         let mut summary = None;
-        // Simple roles consume only frozen capture and status: there is no cwd
-        // result file to extract. Remove staged scratch before measuring cwd.
+        // Extract judge evidence before removing staged scratch and measuring cwd.
         let judge = if matches!(plan.role, Role::Checker { .. } | Role::Validator { .. }) {
             judge_files::finish(
                 self.owner.clone(),
                 record.clone(),
                 scratch,
                 &self.cwd_walker,
+                self.testlib.get(&plan.index).map(|scoring| {
+                    Box::new(judge_files::ReportRequest {
+                        directory: directory.clone(),
+                        budget: self.budget.clone(),
+                        scoring: *scoring,
+                        policies,
+                    })
+                }),
             )
             .await
         } else {
             judge_files::Finished {
+                evidence: None,
                 stderr: None,
                 kept_bytes: 0,
                 kept: false,
@@ -1877,6 +1902,7 @@ impl Context<'_> {
         }
         ExecutionReport {
             judge_stderr: judge.stderr,
+            judge_evidence: judge.evidence,
             judge_scratch_kept: judge.kept,
             plan,
             run: Some(run),
@@ -1985,6 +2011,7 @@ impl Context<'_> {
 fn skipped(plan: PlannedExecution, reason: SkipReason) -> ExecutionReport {
     ExecutionReport {
         judge_stderr: None,
+        judge_evidence: None,
         judge_scratch_kept: false,
         plan,
         run: None,

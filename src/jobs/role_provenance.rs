@@ -9,6 +9,12 @@ use crate::report::{
 };
 use crate::storage::inputs::{CapturedRole, SourceRole};
 
+// Tested candidate only; see docs/testlib-profile.md.
+const TESTLIB_SHA256: [u8; 32] = [
+    0xd9, 0x2c, 0xa8, 0xa6, 0xb3, 0x69, 0x0d, 0x34, 0xd5, 0xc5, 0x6c, 0x93, 0x94, 0xd9, 0x97, 0x98,
+    0x13, 0x0e, 0x21, 0xcb, 0x00, 0x96, 0xdb, 0x81, 0x7d, 0x91, 0xe2, 0x65, 0xf8, 0xd9, 0x58, 0xc3,
+];
+
 pub(super) fn snapshot(role: &CapturedRole, check: &CaptureCheck) -> io::Result<RoleReport> {
     let files = role.files.files();
     // The program occupies the source slot in the prebuilt capture (§4.4).
@@ -108,9 +114,7 @@ fn header(role: &CapturedRole) -> io::Result<Header> {
             128,
         ),
         sha256: candidate.sha256,
-        // No tested-header pin is present in this repository yet. A captured
-        // candidate remains unpinned until that profile supplies its digest.
-        pinned: false,
+        pinned: candidate.sha256 == TESTLIB_SHA256,
     })
 }
 
@@ -144,5 +148,36 @@ fn angle_include(mut source: impl Read) -> io::Result<bool> {
                 position = Some(index + 1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    use std::path::Path;
+
+    /// The pin, its record in the profile document and the CI copy agree.
+    #[test]
+    fn pin_matches_profile_document_and_vendored_header() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hex = String::new();
+        for byte in super::TESTLIB_SHA256 {
+            write!(hex, "{byte:02x}").unwrap();
+        }
+        let document =
+            std::fs::read_to_string(root.join("docs").join("testlib-profile.md")).unwrap();
+        assert!(document.contains(&format!("`{hex}`")), "{hex}");
+        let header = std::fs::read(
+            root.join("tests")
+                .join("fixtures")
+                .join("testlib")
+                .join("testlib.h"),
+        )
+        .unwrap();
+        assert_eq!(
+            <[u8; 32]>::from(Sha256::digest(header)),
+            super::TESTLIB_SHA256
+        );
     }
 }

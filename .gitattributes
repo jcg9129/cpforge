@@ -1,0 +1,2 @@
+# Vendored CI fixtures stay byte-identical on every checkout (hash-pinned).
+tests/fixtures/testlib/** -text

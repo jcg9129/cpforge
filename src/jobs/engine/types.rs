@@ -223,6 +223,14 @@ impl ArtifactRef {
     }
 }
 
+/// Extracted testlib evidence, frozen before cwd measurement.
+#[derive(Clone, Debug)]
+pub struct JudgeEvidence {
+    pub read: report::JudgeRead,
+    pub report: report::JudgeReport,
+    pub message: Option<report::JudgeText>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionReport {
     pub plan: PlannedExecution,
@@ -236,6 +244,7 @@ pub struct ExecutionReport {
     pub result: ExecutionResult,
     pub evidence: Option<Arc<ExecutionRecord>>,
     pub judge_stderr: Option<report::JudgeText>,
+    pub judge_evidence: Option<Box<JudgeEvidence>>,
     pub judge_scratch_kept: bool,
 }
 
