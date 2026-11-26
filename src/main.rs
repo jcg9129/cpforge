@@ -1,5 +1,9 @@
 use clap::{Parser, error::ErrorKind};
-use cpforge::{cli::Cli, error::Error, exit::ExitCode};
+use cpforge::{
+    cli::{Cli, Command},
+    error::Error,
+    exit::ExitCode,
+};
 
 // The Rust runtime reopens closed standard descriptors before `main`; a
 // constructor therefore records a closed stdout first.
@@ -42,11 +46,27 @@ fn main() -> std::process::ExitCode {
     }
 }
 fn command() -> ExitCode {
+    let parsed = Cli::try_parse().map_err(Error::from);
+    if let Ok(cli) = &parsed {
+        let filters = match &cli.command {
+            Some(Command::Ls(args)) => Some(&args.filters),
+            Some(Command::Status { filters, .. }) => Some(filters),
+            _ => None,
+        };
+        // The contract treats empty TZ as unset; jiff instead treats it as UTC.
+        // Normalize only date-filter invocations, before supervisor workers start.
+        if filters.is_some_and(|filters| filters.has_dates())
+            && std::env::var_os("TZ").is_some_and(|value| value.is_empty())
+        {
+            // SAFETY: startup and argument parsing have not spawned any threads.
+            unsafe { std::env::remove_var("TZ") };
+        }
+    }
     if let Err(error) = cpforge::supervisor::init_process() {
         eprintln!("cpf: error: cannot initialize process supervisor: {error}");
         return ExitCode::Internal;
     }
-    let result = Cli::try_parse().map_err(Error::from).and_then(cpforge::run);
+    let result = parsed.and_then(cpforge::run);
     match result {
         Ok(code) => code,
         Err(error) => {

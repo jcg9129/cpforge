@@ -1,5 +1,7 @@
 //! Portable organisation commands, including real-process edit and crash seams.
 #![cfg(feature = "storage-test-hooks")]
+#[path = "support/local_days.rs"]
+mod local_days;
 mod storage_support;
 
 use std::collections::BTreeMap;
@@ -42,6 +44,7 @@ impl Workspace {
             .arg(self.path("user.toml"))
             .args(args)
             .env("CPF_STORAGE_ORG_NOW", NOW)
+            .env("TZ", "UTC0")
             .env("HOME", &self.0.0)
             .env("USERPROFILE", &self.0.0)
             .env("XDG_CONFIG_HOME", &self.0.0)
@@ -1166,7 +1169,7 @@ fn problem_ids(output: &Output, json: bool) -> Vec<String> {
 #[test]
 fn shared_filters_keep_candidate_order_and_validated_values() {
     let workspace = fixture_f();
-    let table = [
+    let mut table = vec![
         (
             vec!["--status", "new"],
             vec!["local:a", "local:b", "local:i"],
@@ -1255,6 +1258,47 @@ fn shared_filters_keep_candidate_order_and_validated_values() {
         ),
         (vec!["--status", "removed-custom-value"], vec![]),
     ];
+    for flag in ["--created", "--updated", "--solved", "--archived-in"] {
+        for range in [
+            "2026-11-24",
+            "2026-11-24..",
+            "..2026-11-24",
+            "2026-11-20..2026-11-24",
+        ] {
+            table.push((
+                vec![flag, range],
+                vec!["local:a", "atcoder:abc400_a", "local:b"],
+            ));
+        }
+        for range in ["..2026-11-23", "2026-11-25..", "2026-11-20..2026-11-23"] {
+            table.push((vec![flag, range], vec![]));
+        }
+        table.push((
+            vec![flag, "2026-11-24", "--tag", "dp"],
+            vec!["local:a", "atcoder:abc400_a"],
+        ));
+        table.push((
+            vec![flag, "2026-11-24", "--status", "solved"],
+            vec!["atcoder:abc400_a"],
+        ));
+    }
+    table.push((
+        vec![
+            "--created",
+            "2026-11-24",
+            "--updated",
+            "..2026-11-24",
+            "--solved",
+            "2026-11-24..",
+            "--archived-in",
+            "2026-11-20..2026-11-24",
+            "--contest",
+            "c1",
+            "--site",
+            "local",
+        ],
+        vec!["local:a"],
+    ));
     for (filters, expected) in table {
         for prefix in [vec!["ls"], vec!["status", "--all"], vec!["status"]] {
             for json in [false, true] {
@@ -1274,6 +1318,15 @@ fn shared_filters_keep_candidate_order_and_validated_values() {
                             .iter()
                             .any(|source| source["field"] == "status")
                     );
+                    for field in ["created_at", "updated_at", "solved_at", "archived_at"] {
+                        assert!(
+                            doc["invalid"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|source| source["field"] == field)
+                        );
+                    }
                 }
             }
         }
@@ -1539,5 +1592,335 @@ fn closed_pipe() -> Stdio {
             drop(File::from_raw_handle(reader));
             Stdio::from(File::from_raw_handle(writer))
         }
+    }
+}
+
+fn assert_local_day(workspace: &Workspace, zone: &std::ffi::OsStr, stored: &str, day: &str) {
+    workspace.write(
+        "problems/p/problem.toml",
+        format!("{BASE}solved_at = '{stored}'\n"),
+    );
+    let before = snapshot(&workspace.0.0);
+    for command in ["ls", "status"] {
+        for json in [false, true] {
+            let mut args = vec![command, "--solved", day];
+            if json {
+                args.push("--json");
+            }
+            let output = workspace.command(&args).env("TZ", zone).output().unwrap();
+            assert!(output.status.success(), "{zone:?} {args:?}: {output:?}");
+            assert_eq!(
+                problem_ids(&output, json),
+                ["local:p"],
+                "{stored}: {args:?}"
+            );
+            assert!(output.stderr.is_empty(), "{output:?}");
+            if command == "ls" && json {
+                let expected = if stored.len() == 10 {
+                    format!("{stored}T00:00:00.000Z")
+                } else {
+                    stored.to_owned()
+                };
+                assert_eq!(document(&output)["problems"][0]["solved_at"], expected);
+            }
+        }
+        // Neither neighbouring local day also contains this value.
+        let date: jiff::civil::Date = day.parse().unwrap();
+        for other in [date.yesterday(), date.tomorrow()] {
+            let Ok(other) = other else { continue };
+            let other = other.to_string();
+            let output = workspace
+                .command(&[command, "--solved", other.as_str(), "--json"])
+                .env("TZ", zone)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                problem_ids(&output, true).is_empty(),
+                "{zone:?} {stored} in {other}: {output:?}"
+            );
+        }
+    }
+    assert_eq!(snapshot(&workspace.0.0), before);
+}
+
+#[test]
+fn tz_posix_boundaries_gaps_folds_dates_and_domain_edges_end_to_end() {
+    let workspace = Workspace::new();
+    for &(rule, stored, day) in local_days::POSIX_CASES {
+        assert_local_day(&workspace, rule.as_ref(), stored, day);
+    }
+    for (range, expected) in [("..1970-01-01", vec!["local:p"]), ("1970-01-01", vec![])] {
+        for command in ["ls", "status"] {
+            let output = workspace
+                .command(&[command, "--solved", range, "--json"])
+                .env("TZ", "<-12>12")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(problem_ids(&output, true), expected);
+        }
+    }
+}
+
+#[test]
+fn tzif_paths_use_historical_rules_and_the_future_footer_end_to_end() {
+    let workspace = Workspace::new();
+    for &(name, stored, day) in local_days::TZIF_CASES {
+        let mut path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("timezones");
+        for component in name.split('/') {
+            path.push(component);
+        }
+        assert_local_day(&workspace, path.as_os_str(), stored, day);
+    }
+    #[cfg(unix)]
+    {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("timezones")
+            .join("Europe")
+            .join("Berlin");
+        let prefixed = format!(":{}", path.display());
+        for (stored, day) in [
+            ("2026-11-24T23:30:00.000Z", "2026-11-25"),
+            ("2026-07-01T22:30:00.000Z", "2026-07-02"),
+            ("2026-07-01T21:59:59.999Z", "2026-07-01"),
+        ] {
+            assert_local_day(&workspace, path.as_os_str(), stored, day);
+            assert_local_day(&workspace, prefixed.as_ref(), stored, day);
+        }
+    }
+}
+
+#[test]
+fn invalid_tz_warns_once_and_falls_back_to_utc_only_with_date_filters() {
+    let workspace = Workspace::new();
+    workspace.write("problems/p/problem.toml", format!("{BASE}created_at = '2026-11-24T23:30:00.000Z'\nsolved_at = '2026-11-24T23:30:00.000Z'\n"));
+    let before = snapshot(&workspace.0.0);
+    for command in ["ls", "status"] {
+        for json in [false, true] {
+            let mut args = vec![command, "--created", "2026-11-24", "--solved", "2026-11-24"];
+            if json {
+                args.push("--json");
+            }
+            let output = workspace
+                .command(&args)
+                .env("TZ", "Nowhere/Invalid")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(problem_ids(&output, json), ["local:p"]);
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(stderr.lines().count(), 1, "{stderr}");
+            assert!(
+                stderr.contains("warning")
+                    && stderr.contains("Nowhere/Invalid")
+                    && stderr.contains("UTC"),
+                "{stderr}"
+            );
+        }
+        let output = workspace
+            .command(&[command, "--tag", "dp"])
+            .env("TZ", "Nowhere/Invalid")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+    let output = workspace
+        .command(&["ls", "--contests"])
+        .env("TZ", "Nowhere/Invalid")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(snapshot(&workspace.0.0), before);
+}
+
+#[test]
+fn invalid_date_ranges_fail_before_discovery_or_workspace_lookup() {
+    let outside = Directory::new();
+    for range in [
+        "2026-11-25..2026-11-24",
+        "..",
+        "",
+        "2026-02-29",
+        "2026-11-24T10:00Z",
+    ] {
+        for command in ["ls", "status"] {
+            for flag in ["--created", "--updated", "--solved", "--archived-in"] {
+                let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
+                    .current_dir(&outside.0)
+                    .args([command, flag, range])
+                    .env("TZ", "Nowhere/Invalid")
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(2), "{output:?}");
+                assert!(output.stdout.is_empty());
+                assert!(
+                    !String::from_utf8_lossy(&output.stderr).contains("warning"),
+                    "{output:?}"
+                );
+                assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct HostTimeZone(String);
+
+#[cfg(windows)]
+impl HostTimeZone {
+    fn save() -> Self {
+        use windows_sys::Win32::System::Time::{
+            DYNAMIC_TIME_ZONE_INFORMATION, GetDynamicTimeZoneInformation, TIME_ZONE_ID_INVALID,
+        };
+        let mut info = DYNAMIC_TIME_ZONE_INFORMATION::default();
+        // SAFETY: info is valid writable storage for this system call.
+        assert_ne!(
+            unsafe { GetDynamicTimeZoneInformation(&mut info) },
+            TIME_ZONE_ID_INVALID
+        );
+        let output = Command::new("tzutil").arg("/g").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut name = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        if info.DynamicDaylightTimeDisabled && !name.ends_with("_dstoff") {
+            name.push_str("_dstoff");
+        }
+        Self(name)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HostTimeZone {
+    fn drop(&mut self) {
+        // tzutil enables the required time-zone privilege in its own process.
+        // Restore the host zone and disabled-DST setting even during unwinding.
+        let restored = Command::new("tzutil")
+            .args(["/s", self.0.as_str()])
+            .status();
+        if !std::thread::panicking() {
+            assert!(
+                restored.is_ok_and(|status| status.success()),
+                "restore host time zone"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_system_zone_and_dst_disabled_match_the_contract() {
+    let _restore = HostTimeZone::save();
+    let workspace = Workspace::new();
+    let berlin = jiff::tz::TimeZone::tzif(
+        "Europe/Berlin",
+        include_bytes!("fixtures/timezones/Europe/Berlin"),
+    )
+    .unwrap();
+    for (name, disabled) in [
+        ("W. Europe Standard Time", false),
+        ("W. Europe Standard Time_dstoff", true),
+    ] {
+        let output = Command::new("tzutil").args(["/s", name]).output().unwrap();
+        assert!(output.status.success(), "{name}: {output:?}");
+        for &(rule, stored, expected) in local_days::POSIX_CASES {
+            if rule != local_days::CET || stored.len() == 10 {
+                continue;
+            }
+            let day = if disabled && stored == "2026-07-01T22:30:00.000Z" {
+                "2026-07-01"
+            } else {
+                expected
+            };
+            if !disabled {
+                let instant: jiff::Timestamp = stored.parse().unwrap();
+                assert_eq!(berlin.to_datetime(instant).date().to_string(), day);
+            }
+            workspace.write(
+                "problems/p/problem.toml",
+                format!("{BASE}solved_at = '{stored}'\n"),
+            );
+            for command in ["ls", "status"] {
+                for empty in [false, true] {
+                    let mut child = workspace.command(&[command, "--solved", day, "--json"]);
+                    if empty {
+                        child.env("TZ", "");
+                    } else {
+                        child.env_remove("TZ");
+                    }
+                    let output = child.output().unwrap();
+                    assert!(output.status.success(), "{name}: {output:?}");
+                    assert_eq!(problem_ids(&output, true), ["local:p"]);
+                    assert!(output.stderr.is_empty(), "{output:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn date_flags_use_their_own_fields_and_combine_with_and() {
+    let workspace = Workspace::new();
+    workspace.write("problems/p/problem.toml", format!("{BASE}created_at = '2026-11-24T23:30:00Z'\nupdated_at = '2026-11-24'\nsolved_at = '2026-11-25T23:30:00.000Z'\narchived_at = '2026-11-26T23:30:00.000Z'\n"));
+    for (filters, expected) in [
+        (vec!["--created", "2026-11-25"], vec!["local:p"]),
+        (vec!["--updated", "2026-11-24"], vec!["local:p"]),
+        (vec!["--solved", "2026-11-26"], vec!["local:p"]),
+        (vec!["--archived-in", "2026-11-27"], vec!["local:p"]),
+        (vec!["--created", "2026-11-24"], vec![]),
+        (vec!["--updated", "2026-11-25"], vec![]),
+        (vec!["--solved", "2026-11-25"], vec![]),
+        (vec!["--archived-in", "2026-11-26"], vec![]),
+        (
+            vec![
+                "--created",
+                "2026-11-25",
+                "--updated",
+                "2026-11-24",
+                "--solved",
+                "2026-11-26",
+                "--archived-in",
+                "2026-11-27",
+            ],
+            vec!["local:p"],
+        ),
+        (
+            vec![
+                "--created",
+                "2026-11-25",
+                "--updated",
+                "2026-11-25",
+                "--solved",
+                "2026-11-26",
+                "--archived-in",
+                "2026-11-27",
+            ],
+            vec![],
+        ),
+    ] {
+        let before = snapshot(&workspace.0.0);
+        for prefix in [vec!["ls"], vec!["status", "--all"], vec!["status"]] {
+            for json in [false, true] {
+                let mut args = prefix.clone();
+                args.extend_from_slice(&filters);
+                if json {
+                    args.push("--json");
+                }
+                let output = workspace
+                    .command(&args)
+                    .env("TZ", local_days::CET)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                assert_eq!(problem_ids(&output, json), expected, "{args:?}");
+            }
+        }
+        assert_eq!(snapshot(&workspace.0.0), before);
     }
 }

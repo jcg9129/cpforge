@@ -325,6 +325,13 @@ pub struct Filters {
     pub archived_in: Option<String>,
 }
 impl Filters {
+    pub fn has_dates(&self) -> bool {
+        self.created.is_some()
+            || self.updated.is_some()
+            || self.solved.is_some()
+            || self.archived_in.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.status.is_empty()
             && self.tag.is_empty()

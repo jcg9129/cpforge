@@ -2,3 +2,5 @@
 tests/fixtures/testlib/** -text
 # Golden judge-fact vectors are compared byte for byte on every OS.
 tests/fixtures/judge_facts/** -text
+# Pinned TZif fixtures are hash-listed in their README and loaded byte for byte.
+tests/fixtures/timezones/** -text

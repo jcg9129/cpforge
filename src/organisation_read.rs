@@ -260,25 +260,6 @@ pub(crate) fn field_sources(path: PathBuf, findings: Vec<Finding>) -> Vec<Source
         .collect()
 }
 
-/// Local-day date filters are refused until their time zone backend lands:
-/// the range has already passed its grammar check (2 otherwise), and the
-/// refusal names the command and the flag. A date filter is never accepted
-/// and silently ignored.
-pub(crate) fn supported(command: &str, filters: &Filters) -> Result<(), Error> {
-    let flag = [
-        ("created", &filters.created),
-        ("updated", &filters.updated),
-        ("solved", &filters.solved),
-        ("archived-in", &filters.archived_in),
-    ]
-    .into_iter()
-    .find_map(|(flag, value)| value.is_some().then_some(flag));
-    match flag {
-        Some(flag) => Err(crate::unavailable_command(&format!("{command} --{flag}"))),
-        None => Ok(()),
-    }
-}
-
 pub(crate) fn validate_contests(
     filters: &Filters,
     contests: &[Contest],
@@ -314,7 +295,12 @@ fn site_match(filters: &Filters, identity: &str) -> bool {
                 .is_some_and(|(actual, _)| actual == site)
         })
 }
-pub(crate) fn matches(filters: &Filters, problem: &Problem, contests: &[Contest]) -> bool {
+pub(crate) fn matches(
+    filters: &Filters,
+    problem: &Problem,
+    contests: &[Contest],
+    zone: &jiff::tz::TimeZone,
+) -> bool {
     let identity = problem.selected.identity.to_string();
     (filters.status.is_empty()
         || problem
@@ -324,6 +310,7 @@ pub(crate) fn matches(filters: &Filters, problem: &Problem, contests: &[Contest]
             filters,
             organisation::tags(problem.fields().and_then(|fields| fields.get("tags"))),
         )
+        && crate::organisation_dates::matches(filters, problem.fields(), zone)
         && site_match(filters, &identity)
         && (filters.contest.is_empty()
             || contests.iter().any(|contest| {

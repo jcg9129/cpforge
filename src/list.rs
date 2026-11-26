@@ -27,7 +27,6 @@ fn deliver(args: ListArgs) -> Result<ExitCode, Error> {
     if args.archived {
         return Err(crate::unavailable_command("ls --archived"));
     }
-    read::supported("ls", &args.filters)?;
     let mut delivery = transport::Delivery::stdout();
     if args.json {
         delivery.preflight()?;
@@ -72,6 +71,7 @@ fn deliver(args: ListArgs) -> Result<ExitCode, Error> {
 }
 
 fn inspect(args: &ListArgs) -> Result<(Vec<u8>, String), Error> {
+    let zone = crate::organisation_dates::zone(&args.filters);
     let root = crate::workspace_commands::root()?;
     let (problems, mut problem_invalid) = read::problems(&root)?;
     let (mut contests, mut contest_invalid) = read::contests(&root)?;
@@ -106,7 +106,7 @@ fn inspect(args: &ListArgs) -> Result<(Vec<u8>, String), Error> {
     } else {
         problems
             .iter()
-            .filter(|problem| read::matches(&args.filters, problem, &contests))
+            .filter(|problem| read::matches(&args.filters, problem, &contests, &zone))
             .collect::<Vec<_>>()
     };
     // Invalid source entries are never filtered out. Problem failures only

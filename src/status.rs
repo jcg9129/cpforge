@@ -31,7 +31,6 @@ pub(crate) fn run(
     config_path: Option<PathBuf>,
     filters: &crate::cli::Filters,
 ) -> Result<ExitCode, Error> {
-    crate::organisation_read::supported("status", filters)?;
     if !json {
         return inspect(reference, all, false, problem, config_path, filters);
     }
@@ -111,6 +110,7 @@ fn statuses(
     config_path: Option<PathBuf>,
     filters: &crate::cli::Filters,
 ) -> Result<Vec<ProblemStatus>, Error> {
+    let zone = crate::organisation_dates::zone(filters);
     let cwd = std::env::current_dir().map_err(|e| Error::Workspace(e.to_string()))?;
     let root = crate::workspace_commands::root()?;
     let all = all || (!filters.is_empty() && reference.is_none() && problem.is_none());
@@ -147,7 +147,7 @@ fn statuses(
     candidates
         .iter()
         .filter(|candidate| {
-            let matched = crate::organisation_read::matches(filters, candidate, &contests);
+            let matched = crate::organisation_read::matches(filters, candidate, &contests, &zone);
             if !matched {
                 for finding in crate::organisation::findings(candidate.fields()) {
                     eprintln!(

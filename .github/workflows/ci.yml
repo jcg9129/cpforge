@@ -115,6 +115,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
         with:
           components: rustfmt, clippy
+      # Every release target supports linker-free checking from this runner.
+      - run: rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo check --workspace --all-targets --all-features --locked --target x86_64-unknown-linux-gnu
+      - run: cargo check --workspace --all-targets --all-features --locked --target aarch64-unknown-linux-gnu
+      - run: cargo check --workspace --all-targets --all-features --locked --target aarch64-apple-darwin
+      - run: cargo check --workspace --all-targets --all-features --locked --target x86_64-apple-darwin
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
