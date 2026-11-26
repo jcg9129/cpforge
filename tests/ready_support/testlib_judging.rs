@@ -460,7 +460,9 @@ fn aggregation_and_empty_selection() {
                     &format!("problem/tests/{id}.in"),
                     &format!("{}\n", index + 1),
                 );
-                manifest.push_str(&format!("[[test]]\nid = '{id}'\ninput = 'tests/{id}.in'\nanswer = 'tests/a.ans'\norigin = 'custom'\nenabled = true\n"));
+                // Each entry needs its own answer file: two entries may not share a path (storage §8.1).
+                f.write(&format!("problem/tests/{id}.ans"), "ok\n");
+                manifest.push_str(&format!("[[test]]\nid = '{id}'\ninput = 'tests/{id}.in'\nanswer = 'tests/{id}.ans'\norigin = 'custom'\nenabled = true\n"));
             }
             f.write("problem/tests.toml", &manifest);
             let report = run(*reload(&f, &["a", "b", "c"])).await;
