@@ -82,7 +82,7 @@ mod implementation {
             if self.preparing && self.reservation.is_some() {
                 self.clear_input();
             }
-            if let Some(reservation) = self.reservation.take() {
+            if let Some(mut reservation) = self.reservation.take() {
                 let _ = reservation.commit(self.bytes);
             }
         }
