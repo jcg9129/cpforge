@@ -29,6 +29,8 @@ fn absent(error: &crate::storage::StorageError) -> bool {
     matches!(&error.kind, ErrorKind::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound)
 }
 
+// The two test-hook arguments exist only with the storage-test-hooks feature.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn finish(
     owner: JobOwner,
     path: PathBuf,

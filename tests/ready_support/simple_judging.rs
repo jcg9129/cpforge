@@ -555,8 +555,9 @@ fn b01_cancel_before_validator_and_b04_b12_b15_cancel_during_each_role() {
             let cancel = e.cancellation();
             let mut executor = SupervisorExecutor::start().unwrap();
             let mut persistence = MemoryPersistence::default();
+            let mut hooks = NoHooks;
             let (report, ()) = tokio::join!(
-                e.run(&mut executor, &mut persistence, &mut NoHooks),
+                e.run(&mut executor, &mut persistence, &mut hooks),
                 async move {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while !marker.exists() {
