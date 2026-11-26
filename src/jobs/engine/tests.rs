@@ -3510,6 +3510,19 @@ fn stub_listing_boundary_reconciles_every_test_execution_on_all_platforms() {
     });
 }
 
+// Worker credits can return before the last JobLease destructor clears the
+// retained bytes. Observe the guaranteed release itself, with a deadline.
+#[cfg(feature = "storage-test-hooks")]
+async fn released_budget(budget: &crate::storage::budget::JobBudget) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while budget.usage() != crate::storage::budget::BudgetUsage::default() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup did not release job accounting");
+}
+
 #[cfg(all(
     feature = "storage-test-hooks",
     any(target_os = "linux", target_os = "macos")

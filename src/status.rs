@@ -29,12 +29,14 @@ pub(crate) fn run(
     json: bool,
     problem: Option<&str>,
     config_path: Option<PathBuf>,
+    filters: &crate::cli::Filters,
 ) -> Result<ExitCode, Error> {
+    crate::organisation_read::supported("status", filters)?;
     if !json {
-        return inspect(reference, all, false, problem, config_path);
+        return inspect(reference, all, false, problem, config_path, filters);
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        inspect(reference, all, true, problem, config_path)
+        inspect(reference, all, true, problem, config_path, filters)
     })) {
         Ok(result) => result,
         Err(payload) => {
@@ -50,12 +52,13 @@ fn inspect(
     json: bool,
     problem: Option<&str>,
     config_path: Option<PathBuf>,
+    filters: &crate::cli::Filters,
 ) -> Result<ExitCode, Error> {
     let mut delivery = transport::Delivery::stdout();
     if json {
         delivery.preflight()?;
     }
-    let statuses = match statuses(reference, all, problem, config_path) {
+    let statuses = match statuses(reference, all, problem, config_path, filters) {
         Ok(statuses) => statuses,
         Err(error) if json => {
             let class = error.class();
@@ -106,13 +109,66 @@ fn statuses(
     all: bool,
     problem: Option<&str>,
     config_path: Option<PathBuf>,
+    filters: &crate::cli::Filters,
 ) -> Result<Vec<ProblemStatus>, Error> {
     let cwd = std::env::current_dir().map_err(|e| Error::Workspace(e.to_string()))?;
     let root = crate::workspace_commands::root()?;
-    let problems = selection::select_many(&root, &cwd, reference, all, problem)?;
-    problems
+    let all = all || (!filters.is_empty() && reference.is_none() && problem.is_none());
+    if filters.is_empty() {
+        return selection::select_many(&root, &cwd, reference, all, problem)?
+            .iter()
+            .map(|problem| problem_status(&root, &cwd, problem, config_path.clone(), None))
+            .collect();
+    }
+    // Contests are read only for `--contest`, the one filter that needs them;
+    // a contest that cannot be used is then reported, never skipped silently.
+    let contests = if filters.contest.is_empty() {
+        Vec::new()
+    } else {
+        let (contests, invalid) = crate::organisation_read::contests(&root)?;
+        crate::organisation_read::validate_contests(filters, &contests, &invalid)?;
+        for source in invalid {
+            eprintln!("cpf: {}: {}", source.path.display(), source.message);
+        }
+        contests
+    };
+    // The candidates are exactly the unfiltered selection, `--all` included,
+    // so an invalid entry fails the command as it does without a filter.
+    let candidates = selection::select_many(&root, &cwd, reference, all, problem)?
+        .into_iter()
+        .map(|selected| {
+            let record = storage::read_user_record(selected.dir.join("problem.toml"), 1, |doc| {
+                Ok::<_, String>(doc.clone())
+            });
+            let document = selection::record_result(record).map_err(Error::Workspace)?;
+            Ok(crate::organisation_read::Problem { selected, document })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    candidates
         .iter()
-        .map(|problem| problem_status(&root, &cwd, problem, config_path.clone()))
+        .filter(|candidate| {
+            let matched = crate::organisation_read::matches(filters, candidate, &contests);
+            if !matched {
+                for finding in crate::organisation::findings(candidate.fields()) {
+                    eprintln!(
+                        "cpf: {}: invalid {}: {}",
+                        candidate.selected.dir.join("problem.toml").display(),
+                        finding.field,
+                        finding.reason
+                    );
+                }
+            }
+            matched
+        })
+        .map(|candidate| {
+            problem_status(
+                &root,
+                &cwd,
+                &candidate.selected,
+                config_path.clone(),
+                Some(&candidate.document),
+            )
+        })
         .collect()
 }
 
@@ -185,11 +241,18 @@ fn problem_status(
     cwd: &Path,
     problem: &selection::Problem,
     config_path: Option<PathBuf>,
+    snapshot: Option<&toml_edit::DocumentMut>,
 ) -> Result<ProblemStatus, Error> {
-    let metadata = storage::read_user_record(problem.dir.join("problem.toml"), 1, |document| {
-        Ok::<_, String>(document.clone())
-    });
-    let document = selection::record_result(metadata).map_err(Error::Workspace)?;
+    let document;
+    let document = if let Some(snapshot) = snapshot {
+        snapshot
+    } else {
+        let metadata = storage::read_user_record(problem.dir.join("problem.toml"), 1, |document| {
+            Ok::<_, String>(document.clone())
+        });
+        document = selection::record_result(metadata).map_err(Error::Workspace)?;
+        &document
+    };
     let fields = document.get("problem");
     let tags = fields
         .and_then(|p| p.get("tags"))
@@ -232,7 +295,7 @@ fn problem_status(
             .push("ignore patterns unavailable: configuration has errors".into());
         Vec::new()
     });
-    let mut registered = crate::workspace_files::declarations(&document, target.as_ref())
+    let mut registered = crate::workspace_files::declarations(document, target.as_ref())
         .map_err(Error::Workspace)?;
     let store = TestStore::new(problem.dir.clone());
     let catalog = store.catalog();
@@ -248,7 +311,7 @@ fn problem_status(
     }
     let owned = crate::workspace_files::provenance(
         &problem.dir,
-        &document,
+        document,
         &registered,
         &mut result.diagnostics,
     );

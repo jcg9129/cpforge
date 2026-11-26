@@ -217,6 +217,7 @@ async fn stalled(point: Point, cancelling: bool) {
     drop(release);
     idle().await;
     assert!(matches!(probe(&directory), ProbeOutcome::Acquired(_)));
+    released_budget(&budget).await;
     assert_eq!(budget.usage().retained, 0);
 }
 
@@ -499,6 +500,7 @@ fn dropped_wait_transfers_a_clearing_walker_that_finishes_its_clear() {
                 assert!(!tree.exists());
                 assert!(!walking.load(Ordering::Acquire));
                 assert!(matches!(probe(&directory), ProbeOutcome::Acquired(_)));
+                released_budget(&budget).await;
                 assert_eq!(budget.usage().retained, 0);
             });
         },
@@ -950,6 +952,7 @@ async fn file_stall(point: &'static str, cancelling: bool) {
     drop(release);
     idle().await;
     assert_eq!(supervisor::debug_counters().file_io_directories, 0);
+    released_budget(&budget).await;
     assert_eq!(
         budget.usage(),
         crate::storage::budget::BudgetUsage::default()
@@ -1115,6 +1118,7 @@ fn renamed_file_io_cwd_releases_the_staged_charge_and_directory() {
                 drop(final_report);
                 drop(executor);
                 idle().await;
+                released_budget(&budget).await;
                 assert_eq!(budget.usage().retained, 0);
             });
         },
@@ -1267,6 +1271,7 @@ fn blocked_file_staging_keeps_its_charge_until_the_creation_thread_returns() {
                             .all(|(_, thread)| *thread == worker)
                     );
                     drop(report_owner);
+                    released_budget(&budget).await;
                     assert_eq!(budget.usage().retained, 0);
                 }
             });
@@ -1436,6 +1441,7 @@ fn failed_io_scratch_unlinks_retain_only_the_copies_still_present() {
                 drop(final_report);
                 drop(executor);
                 idle().await;
+                released_budget(&budget).await;
                 assert_eq!(budget.usage().retained, 0);
 
                 let f = Fixture::new();

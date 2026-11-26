@@ -64,15 +64,7 @@ fn forms() -> Vec<Vec<&'static str>> {
             "2026-01-01..2026-11-25",
             "--json",
         ],
-        vec![
-            "ls",
-            "--contests",
-            "--tag",
-            "dp",
-            "--site",
-            "local",
-            "--json",
-        ],
+        vec!["status", "--tag", "dp", "--solved", "2026-11-25", "--json"],
         vec![
             "ls",
             "--archived",
@@ -91,7 +83,6 @@ fn forms() -> Vec<Vec<&'static str>> {
             "snapshots",
             "--json",
         ],
-        vec!["status", "--tag", "dp", "--json"],
         vec![
             "stress",
             "--profile",
@@ -238,6 +229,12 @@ fn unfinished_forms_refuse_and_invalid_flags_are_clap_usage_errors() {
             "test add --from-stress"
         } else if args.starts_with(&["stress", "ls"]) {
             "stress ls"
+        } else if args.starts_with(&["ls", "--archived"]) {
+            "ls --archived"
+        } else if args[0] == "ls" {
+            "ls --created"
+        } else if args[0] == "status" {
+            "status --solved"
         } else if args[0] == "quarantine" {
             if args[1] == "ls" {
                 "quarantine ls"

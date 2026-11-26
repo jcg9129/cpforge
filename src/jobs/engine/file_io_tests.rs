@@ -388,6 +388,7 @@ async fn collection_rows() {
         );
         assert!(budget.usage().retained + budget.usage().reserved <= budget.limit());
         drop(result);
+        released_budget(&budget).await;
         assert_eq!(
             budget.usage(),
             crate::storage::budget::BudgetUsage::default()
@@ -485,6 +486,7 @@ async fn removal_rows() {
     assert_eq!(budget.usage().retained, baseline.retained + 2 * (6 + 4));
     assert!(budget.usage().retained + budget.usage().reserved <= limit);
     drop(result);
+    released_budget(&budget).await;
     assert_eq!(
         budget.usage(),
         crate::storage::budget::BudgetUsage::default()
@@ -606,6 +608,7 @@ async fn stall_row(point: &'static str, cancelling: bool) {
     send.send(()).unwrap();
     idle().await;
     assert!(!directory.join("r00000").join("out").join("output").exists());
+    released_budget(&budget).await;
     assert_eq!(
         budget.usage(),
         crate::storage::budget::BudgetUsage::default()
@@ -714,6 +717,7 @@ async fn staging_row(after_job: bool) {
     }
     idle().await;
     assert!(!staged.exists());
+    released_budget(&budget).await;
     assert_eq!(
         budget.usage(),
         crate::storage::budget::BudgetUsage::default()

@@ -18,9 +18,11 @@ mod fsck;
 mod hooks;
 pub mod job_command;
 pub mod jobs;
+mod list;
 pub mod names;
 mod notes;
 mod organisation;
+mod organisation_read;
 pub mod process;
 pub mod progress;
 pub mod report;
@@ -55,7 +57,6 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     if let Some(command) = cli.command.as_ref() {
         let unavailable = match command {
             Command::Fetch(_) => Some("fetch"),
-            Command::Ls(_) => Some("ls"),
             Command::Search(_) => Some("search"),
             Command::Stress(args) => {
                 if args.command.is_none() {
@@ -79,7 +80,6 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 cli::QuarantineCommand::Purge { .. } => "quarantine purge",
             }),
             Command::Restore { .. } => Some("restore"),
-            Command::Status { filters, .. } if !filters.is_empty() => Some("status"),
             _ => None,
         };
         if let Some(name) = unavailable {
@@ -87,6 +87,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
         }
     }
     match cli.command {
+        Some(Command::Ls(args)) => return list::run(args),
         Some(Command::Tag(args)) => {
             return organisation::run(&args.target, organisation::Operation::Tag(&args.tags), None)
                 .map(|()| exit::ExitCode::Success);
@@ -179,7 +180,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             reference,
             all,
             json,
-            filters: _,
+            filters,
         }) => {
             if cli.problem.is_some() && (reference.is_some() || all) {
                 return Err(clap::Error::raw(
@@ -194,6 +195,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 json,
                 cli.problem.as_deref(),
                 cli.config,
+                &filters,
             );
         }
         Some(Command::Adopt { path }) => {

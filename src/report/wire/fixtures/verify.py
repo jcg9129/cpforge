@@ -513,6 +513,28 @@ def verify():
                 for target in problem["targets"]:
                     assert list(target) == ["target", "fact_state", "comparison", "last_verdict", "finished_at", "capture_check", "judge"]
                     assert target["judge"] in ["none", "unchanged", "changed", "unknown"]
+        if isinstance(value, dict) and value.get("document") == "ls":
+            assert list(value) == ["schema", "document", "platform", "kind", "problems", "contests", "invalid"], path
+            assert value["kind"] in ["problems", "contests"], path
+            assert not value["contests" if value["kind"] == "problems" else "problems"], path
+            for source in value["invalid"]:
+                assert list(source) == ["path", "kind", "field", "message"], path
+                assert list(source["path"]) in [["utf8"], ["bytes_b64"]], path
+                assert (source["field"] is not None) == (source["kind"] == "invalid_field"), path
+            for problem in value["problems"]:
+                assert list(problem) == ["problem", "origin", "title", "tags", "user_status", "effective_status", "created_at", "updated_at", "solved_at", "archived_at", "contests", "findings"], path
+                assert problem["origin"] == "active", path
+                invalid_status = any(finding["field"] == "status" for finding in problem["findings"])
+                assert problem["effective_status"] == (None if invalid_status else problem["user_status"] or "new"), path
+                assert problem["contests"] == sorted(problem["contests"]), path
+            for contest in value["contests"]:
+                assert list(contest) == ["contest", "identity", "tags", "members", "counts", "unresolved", "invalid", "findings"], path
+                counts = contest["counts"]
+                builtins = ["new", "in-progress", "solved", "skipped"]
+                expected = sorted(counts, key=lambda row: (0, builtins.index(row["status"])) if row["status"] in builtins else (1, row["status"]))
+                assert counts == expected, path
+                assert all(row["count"] > 0 for row in counts), path
+                assert sum(row["count"] for row in counts) + contest["unresolved"] + contest["invalid"] == contest["members"], path
         for report in [value, value.get("report") if isinstance(value, dict) else None]:
             if isinstance(report, dict) and report.get("document") == "job_report":
                 job_report_members(report, path)

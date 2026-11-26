@@ -3354,7 +3354,7 @@ contest fetch completes its membership.
   `broken`, as without the filter.
 - `SG-64` **Contest status:** a contest of five members (two `solved`, one without
   `status`, one with an invalid status, one whose directory is missing) →
-  `cpf ls --contests` shows `solved 2, new 1, invalid 1, unresolved 1`;
+  `cpf ls --contests` shows `new 1, solved 2, invalid 1, unresolved 1`;
   after `cpf mark` of the `new` member to `solved` → `solved 3, …`, and
   `contest.toml` is byte-identical.
 - `SG-65` **Contest listing:** contests `atcoder-abc400` (`[contest] id =

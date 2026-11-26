@@ -15,7 +15,7 @@ use crate::workspace::find_root;
 use crate::workspace_commands::{publication_warnings, recovery_warnings};
 
 const MAX_INSTANT: &str = "9999-12-30T22:00:00.999Z";
-const BUILT_INS: [&str; 4] = ["new", "in-progress", "solved", "skipped"];
+pub(crate) const BUILT_INS: [&str; 4] = ["new", "in-progress", "solved", "skipped"];
 
 #[derive(Debug)]
 pub(crate) struct Finding {
@@ -70,7 +70,7 @@ fn date_valid(text: &str) -> bool {
     year >= 1970 && (1..=days).contains(&day)
 }
 
-fn timestamp_valid(text: &str) -> bool {
+pub(crate) fn timestamp_valid(text: &str) -> bool {
     if text.len() == 10 {
         return date_valid(text);
     }

@@ -208,6 +208,9 @@ fn argument_grammars_are_checked_without_workspace_io() {
         vec!["mark", "contest:c", "solved"],
         vec!["--problem", "a", "tag", ".", "dp"],
         vec!["notes", "contest:c"],
+        vec!["ls", "--tag", "a b"],
+        vec!["ls", "--contests", "--status", "new"],
+        vec!["status", "--solved", "2026-02-29"],
         vec!["notes", "p", "--problem", "q"],
         vec!["tag", "p", "dp", "--json"],
     ];
@@ -218,6 +221,33 @@ fn argument_grammars_are_checked_without_workspace_io() {
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
+    }
+    // Search terms: none, 17, one of 257 bytes and (Unix) one not UTF-8.
+    #[cfg(unix)]
+    let non_utf8 = {
+        use std::os::unix::ffi::OsStringExt;
+        Some(std::ffi::OsString::from_vec(vec![b'a', 0xff]))
+    };
+    #[cfg(not(unix))]
+    let non_utf8: Option<std::ffi::OsString> = None;
+    let searches = [
+        vec![std::ffi::OsString::from("search")],
+        std::iter::once("search".into())
+            .chain((0..17).map(|index| format!("t{index}").into()))
+            .collect::<Vec<std::ffi::OsString>>(),
+        vec!["search".into(), "x".repeat(257).into()],
+    ]
+    .into_iter()
+    .chain(non_utf8.map(|term| vec!["search".into(), term]));
+    for args in searches {
+        let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
+            .current_dir(&outside.0)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty());
         assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
     }
@@ -1060,5 +1090,454 @@ fn passing_test_jobs_never_write_the_workflow_status() {
             "{output:?}"
         );
         assert_eq!(fs::read(&record).unwrap(), before);
+    }
+}
+
+/// The shared twelve-problem organisation fixture. Every reader test uses this
+/// constructor so membership, ordering and invalid fields have one definition.
+fn fixture_f() -> Workspace {
+    let workspace = Workspace::new();
+    fs::remove_dir_all(workspace.path("problems/p")).unwrap();
+    let rows = [
+        ("a", "local:a", "", "tags = ['DP']", "2026-11-24"),
+        (
+            "atcoder-abc400_a",
+            "atcoder:abc400_a",
+            "solved",
+            "tags = ['dp', 'graphs']",
+            "2026-11-24T10:00:00Z",
+        ),
+        ("b", "local:b", "new", "tags = ['graphs']", NOW),
+        ("c", "local:c", "in-progress", "tags = ['dp']", "invalid"),
+        ("d", "local:d", "solved", "tags = ['DP', 'graphs']", ""),
+        ("e", "local:e", "skipped", "", ""),
+        ("wa", "local:wa", "wa", "tags = ['dp']", ""),
+        ("g", "local:g", "5", "tags = ['dp']", ""),
+        ("h", "local:h", "solved", "tags = 'dp'", ""),
+        ("i", "local:i", "new", "", ""),
+        ("j", "local:j", "skipped", "tags = ['dp']", ""),
+        ("k", "local:k", "solved", "", ""),
+    ];
+    for (name, identity, status, tags, date) in rows {
+        let mut record = format!("schema = 1\n[problem]\nid = '{identity}'\n{tags}\n");
+        if !status.is_empty() {
+            record.push_str(&format!("status = '{status}'\n"));
+        }
+        if !date.is_empty() {
+            for field in ["created_at", "updated_at", "solved_at", "archived_at"] {
+                record.push_str(&format!("{field} = '{date}'\n"));
+            }
+        }
+        workspace.write(&format!("problems/{name}/problem.toml"), record);
+    }
+    for (name, ids) in [
+        ("c1", vec!["local:d", "atcoder:abc400_a", "local:a"]),
+        ("c2", vec!["local:b", "atcoder:abc400_a", "local:wa"]),
+    ] {
+        let mut record = "schema = 1\ntags = ['rated']\n".to_owned();
+        for id in ids {
+            record.push_str(&format!("[[problem]]\nid = '{id}'\n"));
+        }
+        workspace.write(&format!("contests/{name}/contest.toml"), record);
+    }
+    workspace
+}
+
+fn document(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+fn problem_ids(output: &Output, json: bool) -> Vec<String> {
+    if json {
+        document(output)["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|problem| problem["problem"].as_str().unwrap().to_owned())
+            .collect()
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("local:") || line.starts_with("atcoder:"))
+            .map(|line| line.split('\t').next().unwrap().to_owned())
+            .collect()
+    }
+}
+
+#[test]
+fn shared_filters_keep_candidate_order_and_validated_values() {
+    let workspace = fixture_f();
+    let table = [
+        (
+            vec!["--status", "new"],
+            vec!["local:a", "local:b", "local:i"],
+        ),
+        (vec!["--status", "in-progress"], vec!["local:c"]),
+        (
+            vec!["--status", "solved"],
+            vec!["atcoder:abc400_a", "local:d", "local:h", "local:k"],
+        ),
+        (vec!["--status", "skipped"], vec!["local:e", "local:j"]),
+        (vec!["--status", "wa"], vec!["local:wa"]),
+        (
+            vec!["--status", "solved", "--status", "new"],
+            vec![
+                "local:a",
+                "atcoder:abc400_a",
+                "local:b",
+                "local:d",
+                "local:h",
+                "local:i",
+                "local:k",
+            ],
+        ),
+        (
+            vec!["--tag", "dp"],
+            vec![
+                "local:a",
+                "atcoder:abc400_a",
+                "local:c",
+                "local:d",
+                "local:g",
+                "local:j",
+                "local:wa",
+            ],
+        ),
+        (
+            vec!["--tag", "DP"],
+            vec![
+                "local:a",
+                "atcoder:abc400_a",
+                "local:c",
+                "local:d",
+                "local:g",
+                "local:j",
+                "local:wa",
+            ],
+        ),
+        (
+            vec!["--tag", "dp", "--tag", "graphs"],
+            vec!["atcoder:abc400_a", "local:d"],
+        ),
+        (vec!["--tag", "rated"], vec![]),
+        (vec!["--site", "atcoder"], vec!["atcoder:abc400_a"]),
+        (
+            vec!["--site", "local"],
+            vec![
+                "local:a", "local:b", "local:c", "local:d", "local:e", "local:g", "local:h",
+                "local:i", "local:j", "local:k", "local:wa",
+            ],
+        ),
+        (
+            vec!["--contest", "c1"],
+            vec!["local:a", "atcoder:abc400_a", "local:d"],
+        ),
+        (
+            vec!["--contest", "c1", "--contest", "c2"],
+            vec![
+                "local:a",
+                "atcoder:abc400_a",
+                "local:b",
+                "local:d",
+                "local:wa",
+            ],
+        ),
+        (
+            vec!["--status", "solved", "--tag", "dp"],
+            vec!["atcoder:abc400_a", "local:d"],
+        ),
+        (
+            vec!["--contest", "c1", "--site", "local", "--tag", "dp"],
+            vec!["local:a", "local:d"],
+        ),
+        (
+            vec!["--site", "local", "--site", "atcoder", "--status", "wa"],
+            vec!["local:wa"],
+        ),
+        (vec!["--status", "removed-custom-value"], vec![]),
+    ];
+    for (filters, expected) in table {
+        for prefix in [vec!["ls"], vec!["status", "--all"], vec!["status"]] {
+            for json in [false, true] {
+                let mut args = prefix.clone();
+                args.extend_from_slice(&filters);
+                if json {
+                    args.push("--json");
+                }
+                let output = workspace.unchanged(&args, 0);
+                assert_eq!(problem_ids(&output, json), expected, "{args:?}");
+                if prefix[0] == "ls" && json {
+                    let doc = document(&output);
+                    assert!(
+                        doc["invalid"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|source| source["field"] == "status")
+                    );
+                }
+            }
+        }
+    }
+    for json in [false, true] {
+        let mut args = vec!["status", "contest:c1", "--status", "solved"];
+        if json {
+            args.push("--json");
+        }
+        assert_eq!(
+            problem_ids(&workspace.unchanged(&args, 0), json),
+            ["local:d", "atcoder:abc400_a"]
+        );
+    }
+    for prefix in [vec!["ls"], vec!["status", "--all"]] {
+        let mut args = prefix;
+        args.extend(["--contest", "nope"]);
+        workspace.unchanged(&args, 8);
+    }
+    workspace.unchanged(&["ls", "--status", "5"], 2);
+    workspace.unchanged(&["status", "--status", "5"], 2);
+}
+
+#[test]
+fn invalid_entries_and_fields_survive_filters() {
+    let workspace = fixture_f();
+    workspace.write("problems/broken/problem.toml", "not [ toml");
+    workspace.write("problems/f", "regular file");
+    workspace.write("problems/future/problem.toml", "schema = 2\n");
+    workspace.write(
+        "problems/mismatch/problem.toml",
+        "schema = 1\n[problem]\nid = 'local:other'\n",
+    );
+    workspace.write("problems/missing/placeholder", "");
+    fs::create_dir_all(workspace.path("problems/unreadable/problem.toml")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("a", workspace.path("problems/l")).unwrap();
+    #[cfg(windows)]
+    {
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(workspace.path("problems/l"))
+            .arg(workspace.path("problems/a"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let output = workspace.unchanged(&["ls", "--json"], 0);
+    let doc = document(&output);
+    assert_eq!(doc["problems"].as_array().unwrap().len(), 12);
+    let sources = doc["invalid"].as_array().unwrap();
+    for (path, kind) in [
+        ("problems/broken/problem.toml", "metadata_malformed"),
+        ("problems/f", "not_a_directory"),
+        ("problems/l", "link"),
+        ("problems/future/problem.toml", "metadata_too_new"),
+        ("problems/mismatch/problem.toml", "identity_mismatch"),
+        ("problems/missing/problem.toml", "metadata_missing"),
+        ("problems/unreadable/problem.toml", "metadata_unreadable"),
+    ] {
+        assert!(
+            sources
+                .iter()
+                .any(|source| source["path"]["utf8"] == path && source["kind"] == kind),
+            "{path}: {sources:?}"
+        );
+        let human = workspace.unchanged(&["ls", "--tag", "rated"], 0);
+        assert!(String::from_utf8_lossy(&human.stdout).contains(kind));
+    }
+    // The filter keeps the unfiltered `--all` failure: same status, same entry.
+    let filtered = workspace.unchanged(&["status", "--all", "--tag", "dp", "--json"], 8);
+    let unfiltered = workspace.unchanged(&["status", "--all", "--json"], 8);
+    let message = document(&filtered)["error"]["message"].clone();
+    assert!(message.as_str().unwrap().contains("broken"), "{message}");
+    assert_eq!(message, document(&unfiltered)["error"]["message"]);
+    let invalid = doc["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|problem| problem["problem"] == "local:g")
+        .unwrap();
+    assert!(invalid["user_status"].is_null() && invalid["effective_status"].is_null());
+    let invalid = doc["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|problem| problem["problem"] == "local:h")
+        .unwrap();
+    assert_eq!(invalid["tags"], serde_json::json!([]));
+    assert_eq!(invalid["findings"][0]["field"], "tags");
+}
+
+#[test]
+fn contest_counts_are_derived_and_contest_filters_use_contest_fields() {
+    let workspace = fixture_f();
+    // Five members: two solved, one absent, one invalid and one unresolved.
+    workspace.write("contests/c/contest.toml", "schema = 1\ntags = ['Rated']\n[[problem]]\nid = 'local:d'\n[[problem]]\nid = 'local:k'\n[[problem]]\nid = 'local:a'\n[[problem]]\nid = 'local:g'\n[[problem]]\nid = 'local:missing'\n");
+    workspace.write("contests/atcoder-abc400/contest.toml", "schema = 1\ntags = ['rated']\n[contest]\nid = 'atcoder:abc400'\n[[problem]]\nid = 'atcoder:abc400_a'\n");
+    workspace.write("contests/broken/contest.toml", "not [ toml");
+    workspace.write("contests/f", "regular file");
+    fs::remove_dir_all(workspace.path("contests/c1")).unwrap();
+    fs::remove_dir_all(workspace.path("contests/c2")).unwrap();
+    let before = fs::read(workspace.path("contests/c/contest.toml")).unwrap();
+    let output = workspace.unchanged(&["ls", "--contests", "--json"], 0);
+    let doc = document(&output);
+    assert_eq!(doc["contests"][0]["contest"], "atcoder-abc400");
+    let c = &doc["contests"][1];
+    assert_eq!(c["contest"], "c");
+    assert_eq!(c["tags"], serde_json::json!(["Rated"]));
+    assert_eq!(c["members"], 5);
+    assert_eq!(
+        c["counts"],
+        serde_json::json!([{"status":"new","count":1},{"status":"solved","count":2}])
+    );
+    assert_eq!(c["invalid"], 1);
+    assert_eq!(c["unresolved"], 1);
+    assert!(
+        doc["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["kind"] == "contest_malformed")
+    );
+    assert!(
+        doc["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["kind"] == "not_a_directory")
+    );
+    for (filters, expected) in [
+        (vec!["--site", "atcoder"], vec!["atcoder-abc400"]),
+        (vec!["--site", "local"], vec!["c"]),
+        (vec!["--tag", "rated"], vec!["atcoder-abc400", "c"]),
+        (vec!["--tag", "dp"], vec![]),
+    ] {
+        let mut args = vec!["ls", "--contests", "--json"];
+        args.extend(filters);
+        let output = workspace.unchanged(&args, 0);
+        let doc = document(&output);
+        let actual = doc["contests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|contest| contest["contest"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+    let human = workspace.unchanged(&["ls", "--contests"], 0);
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains("new 1, solved 2, invalid 1, unresolved 1"));
+    assert!(text.contains("Rated\t5\t"));
+    workspace.run(&["mark", "a", "solved"], 0);
+    let doc = document(&workspace.unchanged(&["ls", "--contests", "--json"], 0));
+    assert_eq!(
+        doc["contests"][1]["counts"],
+        serde_json::json!([{"status":"solved","count":3}])
+    );
+    assert_eq!(
+        fs::read(workspace.path("contests/c/contest.toml")).unwrap(),
+        before
+    );
+    workspace.unchanged(&["ls", "--contest", "broken", "--json"], 8);
+}
+
+#[test]
+fn readers_create_no_lock_and_ignore_a_held_lock() {
+    let workspace = fixture_f();
+    fs::remove_file(workspace.path(".cpforge/lock")).unwrap();
+    for args in [
+        vec!["ls"],
+        vec!["ls", "--contests"],
+        vec!["status", "--tag", "dp"],
+        vec!["notes", "a", "--path"],
+    ] {
+        workspace.unchanged(&args, 0);
+        assert!(!workspace.path(".cpforge/lock").exists());
+    }
+    let lock = workspace.0.lock();
+    let held = lock.acquire("reader exclusion check").unwrap();
+    // A Windows lock handle is exclusive; snapshots must skip it while held.
+    for args in [
+        vec!["ls", "--json"],
+        vec!["ls", "--contests", "--json"],
+        vec!["status", "--tag", "dp", "--json"],
+    ] {
+        workspace.run(&args, 0);
+    }
+    drop(held);
+}
+
+#[test]
+fn listing_workspace_errors_and_closed_json_stdout() {
+    let outside = Directory::new();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cpf"));
+        command.current_dir(&outside.0).arg("ls");
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(8));
+        if json {
+            assert_eq!(document(&output)["document"], "error");
+        }
+    }
+    let workspace = fixture_f();
+    let mut child = workspace
+        .command(&["ls", "--json"])
+        .stdout(closed_pipe())
+        .spawn()
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(11));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, args) in [
+            ("problems", vec!["ls", "--json"]),
+            ("contests", vec!["ls", "--contests", "--json"]),
+        ] {
+            let path = workspace.path(path);
+            let permissions = fs::metadata(&path).unwrap().permissions();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0)).unwrap();
+            // Root can enumerate a mode-000 directory; exercise when enforced.
+            let denied = fs::read_dir(&path).is_err();
+            let output = workspace.run(&args, if denied { 8 } else { 0 });
+            fs::set_permissions(&path, permissions).unwrap();
+            if denied {
+                assert_eq!(document(&output)["document"], "error");
+            }
+        }
+    }
+}
+
+// Own only the write end of an anonymous pipe. No reader exists by the time
+// cpf starts, so this cannot race a fast successful JSON publication.
+fn closed_pipe() -> Stdio {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        let mut handles = [-1; 2];
+        // SAFETY: handles is writable storage for two file descriptors.
+        assert_eq!(unsafe { libc::pipe(handles.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two distinct descriptors owned by this helper.
+        unsafe {
+            drop(File::from_raw_fd(handles[0]));
+            Stdio::from(File::from_raw_fd(handles[1]))
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+        let mut reader = std::ptr::null_mut();
+        let mut writer = std::ptr::null_mut();
+        // SAFETY: both out parameters are writable; default pipe attributes.
+        assert_ne!(
+            unsafe { CreatePipe(&mut reader, &mut writer, std::ptr::null(), 0) },
+            0
+        );
+        // SAFETY: CreatePipe returned two distinct handles owned by this helper.
+        unsafe {
+            drop(File::from_raw_handle(reader));
+            Stdio::from(File::from_raw_handle(writer))
+        }
     }
 }

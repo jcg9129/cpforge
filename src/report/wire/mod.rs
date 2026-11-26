@@ -14,6 +14,7 @@ mod artifacts;
 mod events;
 mod io;
 mod judging;
+mod ls;
 mod model;
 mod native;
 pub mod read;
@@ -22,6 +23,7 @@ mod run;
 mod schema;
 mod status;
 mod value;
+pub(crate) use ls::encode_ls;
 pub(crate) use status::{ProblemStatus, encode_status};
 
 pub use artifacts::*;
