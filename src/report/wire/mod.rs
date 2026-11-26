@@ -538,6 +538,24 @@ pub fn encode_capture_manifest(
     )?))
 }
 
+/// Report §6.1 notes document, with a lossless absolute native path.
+pub(crate) fn encode_notes(
+    platform: &str,
+    problem: &str,
+    path: &std::path::Path,
+    state: &str,
+) -> Result<Vec<u8>> {
+    Ok(encode(&document(
+        "notes",
+        platform,
+        vec![
+            ("problem", s(problem)),
+            ("path", native::ns(&native_bytes(path.as_os_str()))),
+            ("state", token(state)?),
+        ],
+    )?))
+}
+
 #[cfg(test)]
 mod bounds;
 #[cfg(test)]

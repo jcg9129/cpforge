@@ -61,6 +61,7 @@ impl Workspace {
             .env("USERPROFILE", self.path("user"))
             .env("XDG_CONFIG_HOME", self.path("user"))
             .env("APPDATA", self.path("user"))
+            .env("CPF_STORAGE_ORG_NOW", "2026-11-24T10:00:00.000Z")
             .env_remove("CPF_STORAGE_CRASH_AT");
         command
     }
@@ -107,6 +108,18 @@ fn problem(name: &str) -> String {
     format!("schema = 1\n\n[problem]\nid = \"local:{name}\"\n")
 }
 
+// Existing byte fixtures compare the rest of the generated record unchanged.
+fn without_creation(path: impl AsRef<Path>) -> String {
+    let text = fs::read_to_string(path).unwrap();
+    let document: toml_edit::DocumentMut = text.parse().unwrap();
+    let created = document["problem"]["created_at"].as_str().unwrap();
+    assert_eq!(created.len(), 24);
+    assert!(created.ends_with('Z'));
+    text.split_inclusive('\n')
+        .filter(|line| !line.starts_with("created_at = "))
+        .collect()
+}
+
 fn contest_member(id: &str, label: Option<&str>) -> String {
     let mut text = format!("\n[[problem]]\nid = \"local:{id}\"\n");
     if let Some(label) = label {
@@ -125,7 +138,7 @@ fn unconfigured_add_has_exact_metadata_and_is_idempotent() {
     assert!(stdout.contains("language unresolved"));
     assert!(stdout.contains("without a solution file"));
     let path = workspace.path("problems/two-sum/problem.toml");
-    assert_eq!(fs::read(&path).unwrap(), problem("two-sum").as_bytes());
+    assert_eq!(without_creation(&path), problem("two-sum"));
     assert_eq!(
         fs::read_dir(workspace.path("problems/two-sum"))
             .unwrap()
@@ -161,7 +174,7 @@ fn default_and_explicit_languages_copy_bytes_and_record_provenance() {
         cpp
     );
     assert_eq!(
-        fs::read_to_string(workspace.path("problems/one/problem.toml")).unwrap(),
+        without_creation(workspace.path("problems/one/problem.toml")),
         format!(
             "{}\n[files]\ncreated = [{{ path = \"main.cpp\", command = \"add\" }}]\n",
             problem("one")
@@ -173,7 +186,7 @@ fn default_and_explicit_languages_copy_bytes_and_record_provenance() {
         python
     );
     assert_eq!(
-        fs::read_to_string(workspace.path("problems/two/problem.toml")).unwrap(),
+        without_creation(workspace.path("problems/two/problem.toml")),
         format!(
             "{}\n[config]\nlanguage = \"python\"\n\n[files]\ncreated = [{{ path = \"main.py\", command = \"add\" }}]\n",
             problem("two")
@@ -196,7 +209,7 @@ fn explicit_language_without_template_is_recorded_without_solution() {
     success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains("no template"));
     assert_eq!(
-        fs::read_to_string(workspace.path("problems/one/problem.toml")).unwrap(),
+        without_creation(workspace.path("problems/one/problem.toml")),
         format!("{}\n[config]\nlanguage = \"python\"\n", problem("one"))
     );
     assert!(!workspace.path("problems/one/main.py").exists());
@@ -223,7 +236,7 @@ fn new_problem_uses_its_prospective_config_when_invoked_inside_another_problem()
         b"cpp template"
     );
     assert_eq!(
-        fs::read_to_string(workspace.path("problems/inherited/problem.toml")).unwrap(),
+        without_creation(workspace.path("problems/inherited/problem.toml")),
         format!(
             "{}\n[files]\ncreated = [{{ path = \"main.cpp\", command = \"add\" }}]\n",
             problem("inherited")
@@ -242,7 +255,7 @@ fn new_problem_uses_its_prospective_config_when_invoked_inside_another_problem()
         b"python template"
     );
     assert_eq!(
-        fs::read_to_string(workspace.path("problems/explicit/problem.toml")).unwrap(),
+        without_creation(workspace.path("problems/explicit/problem.toml")),
         format!(
             "{}\n[config]\nlanguage = \"python\"\n\n[files]\ncreated = [{{ path = \"main.py\", command = \"add\" }}]\n",
             problem("explicit")
@@ -487,13 +500,13 @@ fn bad_contest_records_allow_problem_publication_and_rerun_completes_membership(
         assert!(String::from_utf8_lossy(&output.stderr).contains(classification));
         assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
         let problem_path = workspace.path("problems/two/problem.toml");
-        assert_eq!(fs::read(&problem_path).unwrap(), problem("two").as_bytes());
+        assert_eq!(without_creation(&problem_path), problem("two"));
         fs::write(workspace.path("problems/two/main.cpp"), b"edited solution").unwrap();
         fs::write(&path, b"schema = 1\n").unwrap();
         // Invalid config must not prevent resuming membership of an existing problem.
         workspace.user_config("schema = 99\n");
         success(&workspace.add(&["two", "--contest", "round", "--label", "B"]));
-        assert_eq!(fs::read(problem_path).unwrap(), problem("two").as_bytes());
+        assert_eq!(without_creation(problem_path), problem("two"));
         assert_eq!(
             fs::read(workspace.path("problems/two/main.cpp")).unwrap(),
             b"edited solution"
@@ -759,6 +772,10 @@ mod crash_tests {
                     "{point}"
                 );
                 assert_eq!(
+                    document["problem"]["created_at"].as_str(),
+                    Some("2026-11-24T10:00:00.000Z")
+                );
+                assert_eq!(
                     document["files"]["created"].as_array().unwrap().len(),
                     1,
                     "{point}"
@@ -845,8 +862,8 @@ fn simultaneous_adds_keep_one_problem_and_one_membership() {
     success(&workspace.add(&["one", "--contest", "round", "--label", "A"]));
     success(&first.wait_with_output().unwrap());
     assert_eq!(
-        fs::read(workspace.path("problems/one/problem.toml")).unwrap(),
-        problem("one").as_bytes()
+        without_creation(workspace.path("problems/one/problem.toml")),
+        problem("one")
     );
     assert_eq!(
         fs::read_to_string(workspace.path("contests/round/contest.toml")).unwrap(),

@@ -123,8 +123,23 @@ fn human(status: &ProblemStatus, output: &mut String) {
     if !status.tags.is_empty() {
         let _ = writeln!(output, "  tags: {}", status.tags.join(", "));
     }
-    if let Some(user_status) = &status.user_status {
-        let _ = writeln!(output, "  status: {user_status}");
+    // The stored value as written; an absent status is effectively `new`,
+    // an invalid non-string one has no workflow line, only its finding.
+    let invalid = status
+        .findings
+        .iter()
+        .any(|finding| finding.field == "status");
+    match &status.user_status {
+        Some(user_status) => {
+            let _ = writeln!(output, "  workflow: {user_status}");
+        }
+        None if !invalid => {
+            let _ = writeln!(output, "  workflow: new");
+        }
+        None => {}
+    }
+    for finding in &status.findings {
+        let _ = writeln!(output, "  invalid {}: {}", finding.field, finding.reason);
     }
     for path in &status.missing {
         let _ = writeln!(output, "  missing registered file: {}", path.display());
@@ -191,6 +206,7 @@ fn problem_status(
         problem: problem.identity.to_string(),
         tags,
         user_status,
+        findings: crate::organisation::findings(fields),
         missing: Vec::new(),
         untracked: Vec::new(),
         diagnostics: Vec::new(),
@@ -238,7 +254,10 @@ fn problem_status(
     );
     for path in &registered {
         // Metadata files are structural records, not missing user-file entries.
-        if path == Path::new("problem.toml") || path == Path::new("tests.toml") {
+        if matches!(
+            path.to_str(),
+            Some("problem.toml" | "tests.toml" | "notes.md")
+        ) {
             continue;
         }
         let full = problem.dir.join(path);
@@ -378,6 +397,9 @@ fn inventory(
     for entry in entries {
         let entry = entry.map_err(|e| Error::Workspace(e.to_string()))?;
         let path = relative.join(entry.file_name());
+        if path == Path::new("notes.md") {
+            continue;
+        }
         let metadata =
             fs::symlink_metadata(entry.path()).map_err(|e| Error::Workspace(e.to_string()))?;
         if storage::is_link(&metadata) || !metadata.is_dir() {
@@ -580,6 +602,7 @@ mod tests {
                     problem: "local:A".into(),
                     tags: vec![],
                     user_status: None,
+                    findings: Vec::new(),
                     missing: vec![],
                     untracked: vec![],
                     diagnostics: vec![],

@@ -3231,7 +3231,7 @@ contest fetch completes its membership.
   "solved"` without `solved_at` → `cpf mark p solved` writes nothing;
   `cpf mark p new` then `cpf mark p solved` at T4 → `solved_at` = T4. With
   workspace `status.values = ["wa"]` → `cpf mark p wa` succeeds; without →
-  7, record byte-identical, message lists the five-name vocabulary; user
+  7, record byte-identical, message lists the four built-in names; user
   `["wa"]` with workspace `["x"]` → `wa` is 7 (the array replaces);
   `status.values = [1]` → 7; a phase-1 error in a language table only →
   `mark` succeeds with a warning. `mark p new` on a problem without

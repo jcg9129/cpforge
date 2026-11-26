@@ -13,6 +13,7 @@ pub(crate) struct ProblemStatus {
     pub missing: Vec<PathBuf>,
     pub untracked: Vec<PathBuf>,
     pub diagnostics: Vec<String>,
+    pub findings: Vec<crate::organisation::Finding>,
     pub fact_state: &'static str,
     pub comparison: &'static str,
     pub judge: &'static str,
@@ -69,6 +70,15 @@ pub(crate) fn encode_status(platform: &str, problems: &[ProblemStatus]) -> Resul
                 ])]),
             ),
             ("diagnostics", array(&problem.diagnostics, |m| text(m))),
+            (
+                "findings",
+                array(&problem.findings, |finding| {
+                    obj([
+                        ("field", s(finding.field)),
+                        ("reason", text(&finding.reason)),
+                    ])
+                }),
+            ),
         ]));
     }
     Ok(encode(&document(
@@ -109,6 +119,7 @@ mod tests {
                     user_status: None,
                     missing: Vec::new(),
                     untracked: Vec::new(),
+                    findings: Vec::new(),
                     diagnostics: Vec::new(),
                     fact_state: "missing",
                     comparison: "unknown",
@@ -121,6 +132,7 @@ mod tests {
                     user_status: Some("solved".into()),
                     missing: vec![PathBuf::from("main.cpp")],
                     untracked: vec![["notes", "a.txt"].iter().collect()],
+                    findings: Vec::new(),
                     diagnostics: vec!["note".into()],
                     fact_state: "valid",
                     comparison: "source_changed",
@@ -131,5 +143,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, include_bytes!("fixtures/status.json"));
+    }
+    #[test]
+    fn organisation_document_vectors_match_the_encoders() {
+        let document: toml_edit::DocumentMut =
+            "[problem]\ntags = ['dp', 'DP']\nstatus = 'Working on it'\n"
+                .parse()
+                .unwrap();
+        let problem = ProblemStatus {
+            problem: "local:A".into(),
+            tags: vec!["dp".into(), "DP".into()],
+            user_status: Some("Working on it".into()),
+            missing: Vec::new(),
+            untracked: Vec::new(),
+            diagnostics: Vec::new(),
+            findings: crate::organisation::findings(document.get("problem")),
+            fact_state: "missing",
+            comparison: "unknown",
+            judge: "unknown",
+            fact: None,
+        };
+        assert_eq!(
+            encode_status("unix", &[problem]).unwrap(),
+            include_bytes!("fixtures/status_invalid_fields.json")
+        );
+        let vectors: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/notes.json")).unwrap();
+        for vector in vectors.as_array().unwrap() {
+            let bytes = crate::report::wire::encode_notes(
+                "unix",
+                "local:p",
+                Path::new("/workspace/problems/p/notes.md"),
+                vector["state"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                *vector
+            );
+        }
     }
 }

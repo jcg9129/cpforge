@@ -468,7 +468,7 @@ fn nonempty_term(value: &str) -> Result<String, String> {
         Ok(value.to_owned())
     }
 }
-fn tag_name(value: &str) -> Result<String, String> {
+pub(crate) fn tag_name(value: &str) -> Result<String, String> {
     if (1..=32).contains(&value.len())
         && value.as_bytes()[0].is_ascii_alphanumeric()
         && value
@@ -483,7 +483,7 @@ fn tag_name(value: &str) -> Result<String, String> {
         )
     }
 }
-fn status_name(value: &str) -> Result<String, String> {
+pub(crate) fn status_name(value: &str) -> Result<String, String> {
     if (1..=32).contains(&value.len())
         && value.as_bytes()[0].is_ascii_lowercase()
         && !value.ends_with('-')
@@ -619,6 +619,15 @@ impl Cli {
                 | Command::Quarantine { .. },
             ) if self.problem.is_some() => {
                 Some("--problem cannot be used with this command; use its target operand")
+            }
+            Some(Command::Notes {
+                reference: None, ..
+            }) if self
+                .problem
+                .as_deref()
+                .is_some_and(|reference| reference.starts_with("contest:")) =>
+            {
+                Some("this command requires a problem, not a contest")
             }
             Some(Command::Notes {
                 reference: Some(_), ..

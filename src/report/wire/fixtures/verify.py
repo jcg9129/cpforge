@@ -509,12 +509,19 @@ def verify():
             assert raw.startswith(b'{"schema":1,"document":'), path
         if isinstance(value, dict) and value.get("document") == "status":
             for problem in value["problems"]:
+                assert "findings" in problem, path
                 for target in problem["targets"]:
                     assert list(target) == ["target", "fact_state", "comparison", "last_verdict", "finished_at", "capture_check", "judge"]
                     assert target["judge"] in ["none", "unchanged", "changed", "unknown"]
         for report in [value, value.get("report") if isinstance(value, dict) else None]:
             if isinstance(report, dict) and report.get("document") == "job_report":
                 job_report_members(report, path)
+    org = json.loads((ROOT / "status_invalid_fields.json").read_bytes())["problems"][0]
+    assert org["tags"] == ["dp", "DP"] and org["user_status"] == "Working on it"
+    assert [f["field"] for f in org["findings"]] == ["tags", "status"]
+    notes = json.loads((ROOT / "notes.json").read_bytes())
+    assert [n["state"] for n in notes] == ["created", "existing", "absent"]
+    assert all(list(n) == ["schema", "document", "platform", "problem", "path", "state"] for n in notes)
     print(f"{len(files)} golden fixtures: compact UTF-8, unique members, canonical order/prefix")
     for binary in [False, True]:
         refusal = json.loads((ROOT / "refusal.json").read_bytes())

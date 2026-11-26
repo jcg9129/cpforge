@@ -196,6 +196,16 @@ pub fn edit_toml<E>(
     check: impl Fn(&DocumentMut) -> Result<(), E>,
     ops: impl Fn(&mut DocumentMut) -> Result<(), E>,
 ) -> Result<Published, EditError<E>> {
+    edit_toml_scoped(guard, path.as_ref(), check, ops, false)
+}
+
+fn edit_toml_scoped<E>(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    check: impl Fn(&DocumentMut) -> Result<(), E>,
+    ops: impl Fn(&mut DocumentMut) -> Result<(), E>,
+    organisation: bool,
+) -> Result<Published, EditError<E>> {
     let path = guard.check_path(path).map_err(EditError::Storage)?;
     let baseline = read_baseline(guard, &path)?;
     #[cfg(feature = "storage-test-hooks")]
@@ -235,13 +245,31 @@ pub fn edit_toml<E>(
     if output.len() > super::RECORD_SIZE_LIMIT {
         return Err(EditError::TooLarge { path });
     }
-    let result = atomic_replace(guard, &path, output.as_bytes(), || {
-        if !unchanged() {
-            return Err(Conflict { path: path.clone() });
-        }
-        super::crash::point("edit_toml.validated");
-        Ok(())
-    });
+    let mut first_validation = true;
+    let result = super::publish::replace_with_commit(
+        guard,
+        &path,
+        output.as_bytes(),
+        || {
+            if organisation && first_validation {
+                super::crash::barrier("org.before_validation");
+                first_validation = false;
+            }
+            if !unchanged() {
+                return Err(Conflict { path: path.clone() });
+            }
+            if organisation {
+                super::crash::point("org.edit_validated");
+            }
+            super::crash::point("edit_toml.validated");
+            Ok(())
+        },
+        || {
+            if organisation {
+                super::crash::point("org.edit_committed");
+            }
+        },
+    );
     match result {
         Ok(published) => {
             super::crash::point("edit_toml.published");
@@ -274,12 +302,30 @@ pub fn edit_toml_replay<E>(
     check: impl Fn(&DocumentMut) -> Result<(), E>,
     ops: impl Fn(&mut DocumentMut) -> Result<(), E>,
 ) -> Result<Published, EditError<E>> {
-    let path = path.as_ref();
-    let cleanup = match edit_toml(guard, path, &check, &ops) {
+    replay_scoped(guard, path.as_ref(), check, ops, false)
+}
+
+pub(crate) fn edit_organisation<E>(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    check: impl Fn(&DocumentMut) -> Result<(), E>,
+    ops: impl Fn(&mut DocumentMut) -> Result<(), E>,
+) -> Result<Published, EditError<E>> {
+    replay_scoped(guard, path, check, ops, true)
+}
+
+fn replay_scoped<E>(
+    guard: &WorkspaceGuard<'_>,
+    path: &Path,
+    check: impl Fn(&DocumentMut) -> Result<(), E>,
+    ops: impl Fn(&mut DocumentMut) -> Result<(), E>,
+    organisation: bool,
+) -> Result<Published, EditError<E>> {
+    let cleanup = match edit_toml_scoped(guard, path, &check, &ops, organisation) {
         Err(EditError::Conflict { cleanup, .. }) => cleanup,
         result => return result,
     };
-    match edit_toml(guard, path, check, ops) {
+    match edit_toml_scoped(guard, path, check, ops, organisation) {
         Ok(mut published) => {
             // Replacement commits by rename, so its own temp name is gone.
             published.cleanup = cleanup;

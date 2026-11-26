@@ -127,7 +127,11 @@ pub(crate) fn declarations(
     document: &DocumentMut,
     target: Option<&TargetPlan>,
 ) -> Result<BTreeSet<PathBuf>, String> {
-    let mut paths = BTreeSet::from([PathBuf::from("problem.toml"), PathBuf::from("tests.toml")]);
+    let mut paths = BTreeSet::from([
+        PathBuf::from("problem.toml"),
+        PathBuf::from("tests.toml"),
+        PathBuf::from("notes.md"),
+    ]);
     if let Some(target) = target {
         for file in target.captured_files().chain(&target.solution_files) {
             paths.insert(file.value.components().iter().collect());

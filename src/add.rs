@@ -31,6 +31,7 @@ pub(crate) fn add(
     if let Some(label) = label {
         validate_label(label).map_err(Error::Workspace)?;
     }
+    let now = crate::organisation::now()?;
     let current = std::env::current_dir()
         .map_err(|error| Error::Workspace(format!("cannot read current directory: {error}")))?;
     let root = find_root(&current)?;
@@ -51,6 +52,7 @@ pub(crate) fn add(
         contest.as_ref(),
         label,
         language,
+        &now,
         &mut report,
     );
     for line in report.lines {
@@ -68,13 +70,14 @@ fn add_locked(
     contest: Option<&Identifier>,
     label: Option<&str>,
     language: Option<&str>,
+    now: &str,
     report: &mut Report,
 ) -> Result<(), Error> {
     crash::point("add.locked");
     let created = if problem_exists(guard, name)? {
         false
     } else {
-        create_problem(guard, name, language, report)?
+        create_problem(guard, name, language, now, report)?
     };
     let relative = format!("problems/{}", name.as_str());
     if created {
@@ -142,6 +145,7 @@ fn create_problem(
     guard: &WorkspaceGuard<'_>,
     name: &Identifier,
     language: Option<&str>,
+    now: &str,
     report: &mut Report,
 ) -> Result<bool, Error> {
     let loaded = load_config(&ConfigRequest {
@@ -164,7 +168,7 @@ fn create_problem(
         operation: Operation::Other,
         ..ConfigRequest::default()
     });
-    materialize_problem(guard, name, language, &loaded, report)
+    materialize_problem(guard, name, language, &loaded, now, report)
 }
 
 /// Resolve the prospective record before staging or publishing any files.
@@ -173,6 +177,7 @@ fn materialize_problem(
     name: &Identifier,
     language: Option<&str>,
     loaded: &crate::config::LoadedConfig,
+    now: &str,
     report: &mut Report,
 ) -> Result<bool, Error> {
     if loaded.has_errors() {
@@ -208,15 +213,18 @@ fn materialize_problem(
     } else {
         None
     };
+    let mut document = problem_record(
+        name,
+        language,
+        template.as_ref().map(|(path, _)| path.as_str()),
+    )
+    .parse::<DocumentMut>()
+    .expect("generated problem");
+    document["problem"]["created_at"] = value(now);
     let created = publish_problem(
         guard,
         name,
-        problem_record(
-            name,
-            language,
-            template.as_ref().map(|(path, _)| path.as_str()),
-        )
-        .as_bytes(),
+        document.to_string().as_bytes(),
         template.as_ref(),
         report,
     )?;
@@ -653,7 +661,14 @@ mod tests {
             });
             assert!(!loaded.has_errors(), "{:?}", loaded.diagnostics());
             let mut report = Report::default();
-            let result = materialize_problem(&guard, &name, Some("cpp"), &loaded, &mut report);
+            let result = materialize_problem(
+                &guard,
+                &name,
+                Some("cpp"),
+                &loaded,
+                "2026-11-24T10:00:00.000Z",
+                &mut report,
+            );
             let problem = dir.0.join("problems").join("one");
             if count == 1 {
                 assert!(result.unwrap());

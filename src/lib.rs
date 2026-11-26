@@ -19,6 +19,8 @@ mod hooks;
 pub mod job_command;
 pub mod jobs;
 pub mod names;
+mod notes;
+mod organisation;
 pub mod process;
 pub mod progress;
 pub mod report;
@@ -53,10 +55,6 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     if let Some(command) = cli.command.as_ref() {
         let unavailable = match command {
             Command::Fetch(_) => Some("fetch"),
-            Command::Tag(_) => Some("tag"),
-            Command::Untag(_) => Some("untag"),
-            Command::Mark { .. } => Some("mark"),
-            Command::Notes { .. } => Some("notes"),
             Command::Ls(_) => Some("ls"),
             Command::Search(_) => Some("search"),
             Command::Stress(args) => {
@@ -89,6 +87,27 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
         }
     }
     match cli.command {
+        Some(Command::Tag(args)) => {
+            return organisation::run(&args.target, organisation::Operation::Tag(&args.tags), None)
+                .map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Untag(args)) => {
+            return organisation::run(
+                &args.target,
+                organisation::Operation::Untag(&args.tags),
+                None,
+            )
+            .map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Mark { target, status }) => {
+            return organisation::run(&target, organisation::Operation::Mark(&status), cli.config)
+                .map(|()| exit::ExitCode::Success);
+        }
+        Some(Command::Notes {
+            reference,
+            path,
+            json,
+        }) => return notes::run(reference.as_deref(), cli.problem.as_deref(), path, json),
         Some(Command::Config { command }) => {
             return config_commands::run(command, cli.problem.as_deref(), cli.config);
         }

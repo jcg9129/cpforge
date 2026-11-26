@@ -12,16 +12,28 @@ use super::{
 pub fn atomic_replace(
     guard: &WorkspaceGuard<'_>,
     target: impl AsRef<Path>,
+    bytes: &[u8],
+    validate: impl FnMut() -> Result<(), Conflict>,
+) -> Result<Published, StorageError> {
+    replace_with_commit(guard, target.as_ref(), bytes, validate, || {})
+}
+
+/// Internal commit notification runs after rename and before directory sync.
+pub(crate) fn replace_with_commit(
+    guard: &WorkspaceGuard<'_>,
+    target: &Path,
     mut bytes: &[u8],
     mut validate: impl FnMut() -> Result<(), Conflict>,
+    committed: impl FnOnce(),
 ) -> Result<Published, StorageError> {
-    let target = destination(guard, target.as_ref())?;
+    let target = destination(guard, target)?;
     let temp = prepare_temp(guard, &target, &mut bytes, true)?;
     super::crash::point("atomic_replace.temp_synced");
     let result = replace_attempts(guard, &temp, &target, &mut validate);
     if let Err(error) = result {
         return Err(clean_file(guard, error, &temp));
     }
+    committed();
     super::crash::point("atomic_replace.renamed");
     let published = finish(
         guard,
@@ -49,8 +61,29 @@ pub fn publish_file_noclobber_from_reader(
     target: impl AsRef<Path>,
     reader: &mut impl Read,
 ) -> Result<Published, StorageError> {
-    let target = destination(guard, target.as_ref())?;
+    publish_reader(guard, target.as_ref(), reader, false)
+}
+
+/// Notes use the same no-clobber protocol with named test boundaries.
+pub(crate) fn publish_notes(
+    guard: &WorkspaceGuard<'_>,
+    target: &Path,
+) -> Result<Published, StorageError> {
+    publish_reader(guard, target, &mut &b""[..], true)
+}
+
+fn publish_reader(
+    guard: &WorkspaceGuard<'_>,
+    target: &Path,
+    reader: &mut impl Read,
+    notes: bool,
+) -> Result<Published, StorageError> {
+    let target = destination(guard, target)?;
     let temp = prepare_temp(guard, &target, reader, false)?;
+    if notes {
+        super::crash::barrier("notes.before_publish");
+        super::crash::point("notes.before_publish");
+    }
     #[cfg(feature = "storage-test-hooks")]
     if let Some(hook) = guard.test_hooks.before_file_publish {
         hook(&target);
@@ -92,6 +125,9 @@ pub fn publish_file_noclobber_from_reader(
             ));
         }
     };
+    if notes {
+        super::crash::point("notes.published");
+    }
     super::crash::point("file_noclobber.after_publish");
     let published = finish(guard, &target, temp.parent().expect("temp parent"), cleanup);
     super::crash::point("file_noclobber.directory_synced");

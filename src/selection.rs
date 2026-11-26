@@ -17,7 +17,7 @@ use crate::names::{
 use crate::storage::{self, Record, StorageError, WorkspaceGuard, WorkspaceLock};
 use crate::workspace::{Report, find_root, publication_warnings};
 
-fn problem_identity(document: &DocumentMut) -> Result<String, String> {
+pub(crate) fn problem_identity(document: &DocumentMut) -> Result<String, String> {
     let id = document
         .get("problem")
         .and_then(|item| item.get("id"))
@@ -345,7 +345,7 @@ pub(crate) fn contest_binding(document: &DocumentMut, name: &Identifier) -> Resu
 }
 
 /// Shared lock-free, exact-spelling contest lookup for labels and bulk readers.
-fn read_contest(root: &Path, reference: &str) -> Result<DocumentMut, SelectionError> {
+pub(crate) fn read_contest(root: &Path, reference: &str) -> Result<DocumentMut, SelectionError> {
     let invalid = |reason: String| SelectionError::InvalidReference {
         reference: reference.into(),
         reason,

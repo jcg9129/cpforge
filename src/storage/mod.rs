@@ -30,10 +30,12 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+pub(crate) use edit::edit_organisation;
 pub use edit::{EditError, edit_text, edit_toml, edit_toml_replay};
 pub(crate) use lock::checked_path;
 pub use lock::{LockOptions, WorkspaceGuard, WorkspaceLock};
 pub(crate) use publish::copy_stream;
+pub(crate) use publish::publish_notes;
 pub use publish::{
     atomic_replace, publish_dir_noclobber, publish_file_noclobber,
     publish_file_noclobber_from_reader,

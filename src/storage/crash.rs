@@ -32,6 +32,12 @@
 //! completed, including an unchanged existing membership).
 //! `test_add.locked` (after recovery), `test_add.input_published`,
 //! `test_add.answer_published`, `test_add.registered` (catalog insertion).
+//! Organisation clock: `CPF_STORAGE_ORG_NOW=YYYY-MM-DDTHH:MM:SS.mmmZ`
+//! overrides the single invocation clock sample for tag/untag/mark/add.
+//! Organisation barriers: `org.after_resolve`, `org.before_validation`,
+//! `notes.before_publish`; crash points: `org.edit_validated`,
+//! `org.edit_committed` (rename complete, directory not yet synced),
+//! `notes.before_publish`, `notes.published`.
 //! Selecting `file_noclobber.linked` also forces the Linux link fallback in
 //! test builds, so real command subprocesses can exercise that boundary.
 //!

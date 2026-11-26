@@ -42,11 +42,6 @@ fn forms() -> Vec<Vec<&'static str>> {
         ],
         vec!["fetch", "--history"],
         vec!["fetch", "--history", "atcoder:abc300_a"],
-        vec!["tag", ".", "dp", "Graphs"],
-        vec!["untag", "contest:c", "dp"],
-        vec!["mark", ".", "in-progress"],
-        vec!["notes"],
-        vec!["notes", "p", "--path", "--json"],
         vec![
             "ls",
             "--status",
