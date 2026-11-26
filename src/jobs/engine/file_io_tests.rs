@@ -165,7 +165,7 @@ fn engine(f: &Fixture, count: usize, input: bool, limit: u64) -> Engine<'static>
     }
     engine
 }
-fn header(data: &ReportData, count: u32, input: bool, code: i32) {
+fn header(data: &ReportData, count: u32, input: bool, code: i64) {
     assert_eq!(
         data.details.target.as_ref().unwrap().io,
         Some(report::FileIo {
