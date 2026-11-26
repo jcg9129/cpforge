@@ -265,7 +265,7 @@ fn batch_roles_require_final_records_and_skip_absent_templates() {
     )
     .unwrap();
     let mut engine = admission(1, true);
-    engine.templates = Box::new(sparse);
+    *engine.templates = sparse;
     let mut live = engine.admit().unwrap();
     for expected in [
         BatchRole::Generator,
