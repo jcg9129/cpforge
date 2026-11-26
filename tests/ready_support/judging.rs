@@ -332,7 +332,7 @@ fn profile_arguments_and_staging_use_each_runs_private_directory() {
         assert!(checker.outputs.is_none());
         assert!(checker.build_stage.is_none());
         let run = &checker.runs[0];
-        let cwd = dir.join("r00002/cwd");
+        let cwd = dir.join("r00002").join("cwd");
         let Resolution::Resolved(stage) = run.stage.as_ref() else {
             panic!("build-free role")
         };
@@ -480,12 +480,12 @@ fn role_capture_refuses_links_in_files_and_ancestors() {
 #[test]
 fn role_paths_cannot_leave_the_problem() {
     let f = fixture();
-    for path in [
-        "../outside",
-        "/absolute",
-        "data/../validator.exe",
-        "C:/outside",
-    ] {
+    // A drive prefix is only non-relative on Windows (config §6.2: "relative").
+    let mut paths = vec!["../outside", "/absolute", "data/../validator.exe"];
+    if cfg!(windows) {
+        paths.push("C:/outside");
+    }
+    for path in paths {
         f.write("problem/problem.toml", &format!("schema = 1\n[problem]\nid = 'local:p'\n[config]\nlanguage = 'python'\n[check]\nvalidator = {{ program = '{path}', profile = 'simple' }}"));
         let loaded = load_config(&ConfigRequest {
             current_dir: f.0.clone(),
