@@ -141,7 +141,11 @@ impl Drop for Fixture {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(64), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 fn digest(text: &str) -> [u8; 32] {
     std::array::from_fn(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).unwrap())
