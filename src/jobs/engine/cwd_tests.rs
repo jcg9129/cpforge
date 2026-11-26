@@ -1211,8 +1211,9 @@ fn blocked_file_staging_keeps_its_charge_until_the_creation_thread_returns() {
                     assert_eq!(data.result.counts.tests, 2);
                     assert_eq!(data.result.counts.by_class.cancelled, 1);
                     assert_eq!(data.result.counts.by_class.skipped, 1);
-                    assert_eq!(data.result.counts.by_verdict.cancelled, 1);
-                    assert_eq!(data.result.counts.by_verdict.not_run, 1);
+                    // A test skipped by cancellation is `cancelled` too (report §2.5).
+                    assert_eq!(data.result.counts.by_verdict.cancelled, 2);
+                    assert_eq!(data.result.counts.by_verdict.not_run, 0);
                     assert_eq!(data.tests[0].class, Some(RunClass::Cancelled));
                     assert_eq!(data.tests[0].verdict, Some(report::TestVerdict::Cancelled));
                     assert!(matches!(
@@ -1232,12 +1233,7 @@ fn blocked_file_staging_keeps_its_charge_until_the_creation_thread_returns() {
                         })
                     );
                     assert_eq!(data.tests[1].class, None);
-                    assert_eq!(
-                        data.tests[1].verdict,
-                        Some(report::TestVerdict::NotRun {
-                            reason: SkipReason::Cancelled
-                        })
-                    );
+                    assert_eq!(data.tests[1].verdict, Some(report::TestVerdict::Cancelled));
                     assert!(matches!(
                         data.tests[1].check.as_ref().unwrap().kind,
                         report::CheckKind::NotAdmitted {

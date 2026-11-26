@@ -2080,7 +2080,7 @@ fn failed_io_scratch_removal_warns_and_excludes_the_staged_input_from_measuremen
         fixture.executable_problem("input = 'in.txt', output = 'out.txt'", "");
         fixture.write(
             "cpforge.toml",
-            "schema = 1\n[build]\ndeadline_s = 90\n[retention]\ncwd_bytes = '3B'\n",
+            "schema = 1\n[build]\ndeadline_s = 90\n[retention]\ncwd_bytes = 3\n",
         );
         fixture.cases(&[
             ("kept", "echo", Some("42\n")),
