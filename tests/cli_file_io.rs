@@ -1140,7 +1140,8 @@ int main() {
 "#,
         );
         fixture.cases(&[("good", "echo", Some("42\n")), ("bad", "bad", Some("42\n"))]);
-        let Some((job, doc)) = fixture.test_report(1) else {
+        // Invalid test data makes the job `checker_failed`: exit 5 (report §5.1).
+        let Some((job, doc)) = fixture.test_report(5) else {
             return;
         };
         assert_job(
