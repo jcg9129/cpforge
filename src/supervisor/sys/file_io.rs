@@ -525,7 +525,8 @@ mod tests {
     fn unreadable_file_renamed_before_listing_is_misnamed() {
         let f = Fixture::new();
         std::fs::write(f.0.join("out.txt"), b"42\n").unwrap();
-        std::fs::set_permissions(f.0.join("out.txt"), std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(f.0.join("out.txt"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
         let directory = Directory::open(&f.0).unwrap();
         let path = f.0.clone();
         *directory.before_listing.borrow_mut() = Some(Box::new(move || {

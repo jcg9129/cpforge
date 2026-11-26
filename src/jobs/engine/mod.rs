@@ -1991,7 +1991,7 @@ impl Context<'_> {
                 }
                 let mut input = record.input(
                     matches!(plan.role, Role::Test { .. })
-                        && !io.is_some_and(|io| io.output.is_some()),
+                        && io.is_none_or(|io| io.output.is_none()),
                     policies,
                 );
                 input.cwd_overflow_bytes = cwd_result.ok().flatten();
