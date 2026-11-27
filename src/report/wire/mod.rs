@@ -288,7 +288,10 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
-        ("roles", roles::roles(&meta.roles, false)?),
+        (
+            "roles",
+            roles::roles(&meta.roles, v.command == crate::report::JobKind::Stress)?,
+        ),
         (
             "executions",
             checked_array(&v.executions, 10_000, run::execution)?,

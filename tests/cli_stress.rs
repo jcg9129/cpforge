@@ -755,7 +755,7 @@ fn stress_shell_role_assets_prebuilt_brute_and_config_budgets() {
 sources = ["gen.py"]
 build = false
 [languages.generator.run]
-shell = { interpreter = "sh", script = 'test "$0" = cpf || exit 9; cat words; printf "%s\n" "$2"', args = ["{source}"] }
+shell = { interpreter = ["sh", "-c"], script = 'test "$0" = cpf || exit 9; cat words; printf "%s\n" "$2"', args = ["{source}"] }
 "#);
     f.program("words", "prefix\n");
     f.program("brute.sh", "#!/bin/sh\ncat\n");

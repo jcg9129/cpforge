@@ -114,7 +114,9 @@ pub(super) fn validate(
     check: Option<&CheckConfig>,
 ) -> Option<Box<StressConfig>> {
     let Some(n) = v.merged.at(&["stress"]) else {
-        if selection.operation == Operation::Stress {
+        // A missing table is reported only for a selected problem's record:
+        // without one there is no problem.toml that could declare it.
+        if selection.operation == Operation::Stress && selection.problem {
             v.error(
                 stages::origin("stress.generator", "<selection>"),
                 "stress.generator is required",

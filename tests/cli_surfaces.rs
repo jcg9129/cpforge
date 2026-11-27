@@ -150,6 +150,14 @@ fn forms() -> Vec<Vec<&'static str>> {
     ]
 }
 
+/// `cpf stress` search is implemented; replay, `ls` and `--from-stress` are not.
+fn stress_search(args: &[&str]) -> bool {
+    args[0] == "stress"
+        && !args.contains(&"--replay")
+        && !args.contains(&"--replay-binaries")
+        && !args.contains(&"ls")
+}
+
 #[test]
 fn help_lists_all_commands_and_each_command_has_help() {
     let output = cpf(&["--help"]);
@@ -198,11 +206,7 @@ fn help_lists_all_commands_and_each_command_has_help() {
 #[test]
 fn unfinished_forms_refuse_and_invalid_flags_are_clap_usage_errors() {
     for mut args in forms() {
-        if args[0] == "stress"
-            && !args.contains(&"--replay")
-            && !args.contains(&"--replay-binaries")
-            && !args.contains(&"ls")
-        {
+        if stress_search(&args) {
             continue;
         }
         let output = cpf(&args);
@@ -313,6 +317,10 @@ fn unfinished_commands_create_nothing() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("cpforge.toml"), b"schema = 1\n").unwrap();
     for args in forms() {
+        // The search form is a real job command now; it needs a problem.
+        if stress_search(&args) {
+            continue;
+        }
         let output = Command::new(env!("CARGO_BIN_EXE_cpf"))
             .current_dir(&root)
             .args(&args)

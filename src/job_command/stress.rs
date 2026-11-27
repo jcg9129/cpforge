@@ -106,13 +106,9 @@ impl JobCommand for StressSearch {
                 "failures kept in job iterations; saving failures is not available yet".into(),
             );
         }
-        lines.push(format!(
-            "stress: {}",
-            crate::report::render_label(&label(
-                LabelSubject::Job(data.result.verdict),
-                &DisplayContext::default()
-            ))
-        ));
+        // The verdict token: a test-job label would call a harness failure
+        // an invalid answer.
+        lines.push(format!("stress: {}", data.result.verdict.wire_token()));
         lines
     }
 }

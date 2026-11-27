@@ -1878,3 +1878,79 @@ fn unavailable_saving_keeps_complete_failure_directories() {
         released_budget(&budget).await;
     });
 }
+
+/// D1 through the real encoder: a stress report may list all five roles,
+/// generator and brute included; any other job kind refuses them.
+#[test]
+fn stress_report_encodes_every_role_and_other_kinds_refuse_stress_roles() {
+    run_test(move || async move {
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let budget = ready.budget.clone();
+        let req = request(&ready, 1, false);
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let mut executor = Script::default();
+        let report = Engine::stress(ready, req)
+            .unwrap()
+            .run(&mut executor, &mut persistence, &mut NoHooks)
+            .await;
+        let mut data = report.data().clone();
+        data.details.roles = [
+            report::RoleName::Checker,
+            report::RoleName::Validator,
+            report::RoleName::Interactor,
+            report::RoleName::Generator,
+            report::RoleName::Brute,
+        ]
+        .into_iter()
+        .map(|role| report::RoleReport {
+            role,
+            profile: match role {
+                report::RoleName::Generator | report::RoleName::Brute => None,
+                report::RoleName::Validator => Some(report::JudgeProfile::Simple),
+                _ => Some(report::JudgeProfile::Testlib),
+            },
+            origin: report::RoleOrigin::Prebuilt {
+                program: report::JudgeText::new(role.wire_token().as_bytes(), 128),
+            },
+            build: None,
+            capture: report::RoleCapture {
+                checked: true,
+                sources: vec![report::JudgeText::new(role.wire_token().as_bytes(), 128)],
+                sources_dropped: 0,
+                support_files: Vec::new(),
+                support_files_dropped: 0,
+                counts: [1, 0],
+                bytes: 1,
+                lists_sha256: [0; 32],
+                content_sha256: [1; 32],
+            },
+            provenance: report::RoleProvenance::Declared,
+        })
+        .collect();
+        let bytes = report::wire::encode_report_data(&data).unwrap();
+        assert!(bytes.len() <= STRESS_REPORT_BOUND);
+        let value = report::wire::read::read_json(&bytes).unwrap();
+        let roles: Vec<_> = value["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["role"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            roles,
+            ["checker", "validator", "interactor", "generator", "brute"]
+        );
+        report::wire::read::read_roles(&value["roles"], true).unwrap();
+        assert!(report::wire::read::read_roles(&value["roles"], false).is_err());
+        let mut other = data.clone();
+        other.command = report::JobKind::Test;
+        other.details.stress = None;
+        assert!(
+            report::wire::encode_report_data(&other)
+                .is_err_and(|e| e.to_string().contains("stress jobs"))
+        );
+        drop((report, persistence, executor));
+        released_budget(&budget).await;
+    });
+}
