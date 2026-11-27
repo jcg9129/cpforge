@@ -131,6 +131,7 @@ pub struct PreDeliveryExit {
 }
 #[derive(Clone, Debug)]
 pub struct ReportDetails {
+    pub stress: Option<Box<super::stress::StressReport>>,
     /// The planned shape; None means comparison without file-I/O evidence.
     pub shape: Option<crate::report::wire::ReportShape>,
     pub roles: Vec<crate::report::RoleReport>,

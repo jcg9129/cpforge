@@ -485,6 +485,80 @@ def verify_roles():
     print("roles: provenance, builds, capture lists, warnings, interactive configuration and run events fit their bounds")
 
 
+IRID = "18446744073709551615.candidate_interactor"
+FID = "f-" + "f" * 32 + "-" + U64 + "-" + U64
+BATCH_ROLES = ["generator", "validator", "brute", "candidate", "checker"]
+
+
+def stress_member(binary=False):
+    """Report §4.14 at the §3.7.1 maxima (R-S04): 8 runs per ref, 8 causes."""
+    diag = dict(iteration=U64, seed=U64, role=TOKEN, reason=TOKEN, source=TOKEN, text=native(1024, binary))
+    aggregate = dict([("class", TOKEN), ("count", U64), ("first", dict(iteration=U64, seed=U64)), ("diagnostics", [diag] * 16), ("diagnostics_dropped", U32)])
+    run = dict([("role", TOKEN), ("class", cls()), ("record", dict(digest=HEX, path="x" * 64, error=persist()))])
+    saved = dict(kind="not_promoted", reason=TOKEN, path="x" * 85, message=TEXT)
+    ref = dict([("id", FID), ("iteration", U64), ("seed", U64), ("class", TOKEN), ("role", TOKEN), ("reason", TOKEN), ("saved", saved), ("runs", [run] * 8)])
+    timing = dict(role=TOKEN, runs=U64, wall_us=dict(min=U64, max=U64, total=U64))
+    member = dict([("mode", TOKEN), ("shape", TOKEN), ("seeds", dict(start=U64, last=U64)), ("budget", dict(iterations=U64, time_us=U64)), ("stop", dict(reason=TOKEN, iteration=U64)), ("iterations", dict(admitted=U64, retired=U64, saved=U32, promoted=U32, not_saved=U64)), ("runs", U64), ("captured_bytes", U64), ("binaries_bytes", U64), ("classes", [aggregate] * 8), ("failures", [ref] * 20), ("failures_dropped", U64), ("timing", [timing] * 8), ("replay", dict(of=FID, original_class=TOKEN, reproduced=False, from_input=False, binaries=False)), ("cleanup_failed", dict(paths=[native(256, binary)] * 16, paths_dropped=U32))])
+    return member, [("StressDiag", diag, 2401, 2401), ("class aggregate", aggregate, 38631, 38631), ("failure run", run, 1681, 1681), ("failure ref", ref, 14186, 14186), ("stress member", member, 605717, 606208)]
+
+
+def verify_stress():
+    """Report §§3.2, 3.7, 4.14, 7.3 for stress jobs, and the event fixtures."""
+    assert len(encode(IRID)) == 43 and len(encode(FID)) == 78
+    assert re.fullmatch(r"f-[0-9a-f]{32}-(0|[1-9][0-9]*)-(0|[1-9][0-9]*)", FID) and len(FID) <= 76
+    for binary in [False, True]:
+        member, rows = stress_member(binary)
+        iteration_files = dict(summary())
+        for key in ["stdout", "stderr"]:
+            iteration_files[key] = dict(stream(), file="iterations/" + IRID + "/out/" + key)
+        rows += [("iteration_run_finished event", dict(event="iteration_run_finished", seq=U64, run=IRID, summary=summary()), 6898, 7168),
+                 # The capture `file` of an iteration run is job-relative under
+                 # `iterations/` (64 bytes at most); still one 7 KiB event line.
+                 ("iteration_run_finished, iteration capture files", dict(event="iteration_run_finished", seq=U64, run=IRID, summary=iteration_files), 7168, 7168),
+                 ("output_chunk event with irid", dict(event="output_chunk", seq=U64, run=IRID, stream=TOKEN, bytes=dict(bytes_b64=base64.b64encode(b"\xff" * 4096).decode())), 5656, 7168),
+                 ("iteration_started event", dict(event="iteration_started", seq=U64, iteration=U64, seed=U64, seeds=dict(interactor=U64, solution=U64)), 400, 400),
+                 ("iteration_run_started event", dict(event="iteration_run_started", seq=U64, run=IRID, stage=TOKEN, role=TOKEN, digest=HEX), 400, 400),
+                 ("iteration_finished event", dict(event="iteration_finished", seq=U64, iteration=U64, **{"class": TOKEN}, role=TOKEN, reason=TOKEN, saved=FID), 400, 400)]
+        for name, value, total, bound in rows:
+            actual = len(encode(value))
+            assert actual <= total and actual <= bound, (name, binary, actual, total, bound)
+            print(f"{'base64' if binary else 'utf8'} {name}: {actual} <= table {total} <= bound {bound}")
+        # §3.7.2 B_S: the judging header with two further role entries, `irid`
+        # warnings (+15 B each), six maximal builds and the stress member.
+        head = header(binary)
+        role = json.loads((ROOT / "role_size_vectors.json").read_bytes())[2 if binary else 0]
+        head["roles"] = [dict(role, role=name) for name in ["checker", "validator", "interactor", "generator", "brute"]]
+        head["command"] = "stress"
+        stress_header = len(encode(head)) + 24 * (756 - 741)
+        assert stress_header <= 162342 <= 163840, stress_header
+        head["executions"] = [entry(binary)] * 6
+        head["stress"] = member
+        report = len(encode(head)) + 24 * (756 - 741)
+        assert report <= 824869 <= 1048576, report
+        print(f"{'base64' if binary else 'utf8'} stress report: header {stress_header} <= 163840, report {report} <= B_S 1048576")
+    assert 163840 + 6 * (9216 + 1) + 605717 + 10 == 824869
+    events = json.loads((ROOT / "iteration_events.json").read_bytes(), object_pairs_hook=unique)
+    order = dict(iteration_started=["event", "seq", "iteration", "seed", "seeds"],
+                 iteration_run_started=["event", "seq", "run", "stage", "role", "digest"],
+                 output_chunk=["event", "seq", "run", "stream", "bytes"],
+                 iteration_run_finished=["event", "seq", "run", "summary"],
+                 iteration_finished=["event", "seq", "iteration", "class", "role", "reason", "saved"])
+    irid = re.compile(r"(0|[1-9][0-9]{0,19})\.(" + "|".join(BATCH_ROLES) + ")")
+    for event in events:
+        assert list(event) == order[event["event"]], event["event"]
+        decimal(event["seq"])
+        assert "execution" not in event and not str(event.get("run", "")).startswith("r")
+        if "run" in event:
+            assert irid.fullmatch(event["run"]) and int(event["run"].split(".")[0]) <= 2**64 - 1
+        if event["event"] == "iteration_run_started":
+            assert event["role"] == event["run"].split(".")[1]
+            assert event["stage"] in ["generator", "brute", "run", "checker", "validator", "interactor"]
+        if event["event"] == "iteration_finished":
+            assert event["saved"] is None or re.fullmatch(r"f-[0-9a-f]{32}-(0|[1-9][0-9]*)-(0|[1-9][0-9]*)", event["saved"])
+            assert (event["role"] == "none") == (event["class"] == "passed")
+    print("stress: irid/fid widths, stress member and B_S, iteration event order and identities")
+
+
 def job_report_members(report, path):
     """Appendix A order with every always-present member (report §3.6)."""
     members = list(report)
@@ -598,6 +672,7 @@ def verify():
     verify_roles()
     verify_judge_fingerprints()
     verify_judged_summaries()
+    verify_stress()
 
 
 def judge_fingerprint_vectors():

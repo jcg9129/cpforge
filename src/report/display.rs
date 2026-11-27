@@ -618,16 +618,25 @@ pub fn label(subject: LabelSubject<'_>, context: &DisplayContext) -> DisplayLabe
         LabelSubject::Job(verdict) => (
             match verdict {
                 JobVerdict::InternalError => Some(LabelToken::Internal),
-                JobVerdict::Infrastructure => Some(LabelToken::Infrastructure),
+                JobVerdict::Infrastructure | JobVerdict::StressCleanupFailed => {
+                    Some(LabelToken::Infrastructure)
+                }
                 JobVerdict::Cancelled => Some(LabelToken::Cancelled),
                 JobVerdict::BuildFailed => Some(LabelToken::CompileError),
                 JobVerdict::WallDeadline => Some(LabelToken::TimeLimit),
                 JobVerdict::OutputBudget => Some(LabelToken::OutputLimit),
                 JobVerdict::Signal | JobVerdict::NonzeroExit => Some(LabelToken::RuntimeError),
-                JobVerdict::CheckerFailed => Some(LabelToken::CheckerFailed),
-                JobVerdict::WrongAnswer => Some(LabelToken::WrongAnswer),
+                JobVerdict::CheckerFailed
+                | JobVerdict::JudgeFailure
+                | JobVerdict::OracleFailure
+                | JobVerdict::ValidatorFailure
+                | JobVerdict::GeneratorFailure => Some(LabelToken::CheckerFailed),
+                JobVerdict::WrongAnswer | JobVerdict::CandidateFailure => {
+                    Some(LabelToken::WrongAnswer)
+                }
                 JobVerdict::Unchecked => Some(LabelToken::Unchecked),
                 JobVerdict::NoTests
+                | JobVerdict::NoIterations
                 | JobVerdict::SubmitVersionMismatch
                 | JobVerdict::SubmitFailed => None,
                 JobVerdict::PresentationError => Some(LabelToken::PresentationError),

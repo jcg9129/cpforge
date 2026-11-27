@@ -95,7 +95,7 @@ async fn records(
         let mut spec = Box::new(ExecutionSpec {
             // Retirement uses the typed iteration identity. This execution
             // adapter offers no run events and allocates no report run ids.
-            run: RunId(run.id.to_string()),
+            run: RunIdentity::Iteration(run.id),
             execution: 0,
             role: Role::Test {
                 test: "injected".into(),
@@ -152,6 +152,7 @@ async fn records(
             writable: true,
             release,
             retained_bytes,
+            staging_release: RunRelease::not_held(),
         });
     }
     records

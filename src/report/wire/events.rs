@@ -25,6 +25,54 @@ pub fn encode_event_header(
 }
 pub fn encode_event(v: &e::Event) -> Result<Vec<u8>> {
     let (name, mut fields) = match &v.payload {
+        e::EventPayload::IterationStarted { iteration, seed } => (
+            "iteration_started",
+            vec![
+                ("iteration", u(*iteration)),
+                ("seed", u(*seed)),
+                (
+                    "seeds",
+                    obj([("interactor", Value::Null), ("solution", Value::Null)]),
+                ),
+            ],
+        ),
+        e::EventPayload::IterationRunStarted {
+            run,
+            stage: v_stage,
+            digest,
+        } => (
+            "iteration_run_started",
+            vec![
+                ("run", s(run.to_string())),
+                ("stage", stage(*v_stage)),
+                ("role", s(run.role.token())),
+                (
+                    "digest",
+                    hex(digest.as_ref().ok_or(Error("iteration run needs digest"))?),
+                ),
+            ],
+        ),
+        e::EventPayload::IterationRunFinished { run, summary: v } => (
+            "iteration_run_finished",
+            vec![("run", s(run.to_string())), ("summary", summary(v)?)],
+        ),
+        e::EventPayload::IterationFinished {
+            iteration,
+            decision,
+            saved,
+        } => (
+            "iteration_finished",
+            vec![
+                ("iteration", u(*iteration)),
+                ("class", s(decision.class.token())),
+                ("role", s(decision.role.map_or("none", |r| r.token()))),
+                ("reason", s(decision.reason)),
+                (
+                    "saved",
+                    saved.as_ref().map_or(Value::Null, |id| s(id.to_string())),
+                ),
+            ],
+        ),
         e::EventPayload::JobStarted {
             job,
             kind,
@@ -65,7 +113,13 @@ pub fn encode_event(v: &e::Event) -> Result<Vec<u8>> {
             (
                 "output_chunk",
                 vec![
-                    ("run", run_id(run.as_str())?),
+                    (
+                        "run",
+                        match run {
+                            e::RunIdentity::Report(id) => run_id(id.as_str())?,
+                            e::RunIdentity::Iteration(id) => s(id.to_string()),
+                        },
+                    ),
                     ("stream", s(stream_token(*stream))),
                     ("bytes", super::native::raw(bytes)),
                 ],

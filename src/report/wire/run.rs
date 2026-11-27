@@ -191,7 +191,9 @@ pub(super) fn stream(
         ),
         (
             "file",
-            file.map(|v| rel(v, 17)).transpose()?.unwrap_or(Value::Null),
+            file.map(|v| rel(v, if v.starts_with("iterations") { 64 } else { 17 }))
+                .transpose()?
+                .unwrap_or(Value::Null),
         ),
     ]))
 }
@@ -501,7 +503,7 @@ pub(super) fn reference(v: &e::ArtifactRef) -> Result<Value> {
             "path",
             v.path
                 .as_deref()
-                .map(|v| rel(v, 18))
+                .map(|v| rel(v, if v.starts_with("iterations") { 64 } else { 18 }))
                 .transpose()?
                 .unwrap_or(Value::Null),
         ),
@@ -564,6 +566,8 @@ pub(super) fn stage_role(stage: e::Stage, role: &e::Role) -> Result<()> {
 }
 pub(super) fn stage(v: e::Stage) -> Value {
     s(match v {
+        e::Stage::Generator => "generator",
+        e::Stage::Brute => "brute",
         e::Stage::Build => "build",
         e::Stage::Run => "run",
         e::Stage::Command => "command",

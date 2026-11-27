@@ -141,6 +141,10 @@ pub enum Point {
         iteration: u64,
         step: stress::RetirementStep,
     },
+    StressRetired {
+        iteration: u64,
+        debug: stress::RetirementDebug,
+    },
     StressRemove(stress::IterationRunId),
     StressPromote(u64),
     AfterAdmission(u32),
@@ -178,6 +182,7 @@ type Observer = dyn Fn(Point) + Send + Sync;
 #[derive(Debug)]
 pub struct Engine<'probe> {
     ready: ReadyExecutionJob<'probe>,
+    stress: Option<Box<stress::StressRequest>>,
     plan: Vec<PlannedExecution>,
     after_test: Vec<PlannedExecution>,
     disabled_hooks: Vec<Hook>,
@@ -357,6 +362,7 @@ impl<'probe> Engine<'probe> {
         }
         let engine = Self {
             ready,
+            stress: None,
             plan,
             after_test: Vec::new(),
             disabled_hooks: Vec::new(),
@@ -530,7 +536,8 @@ impl<'probe> Engine<'probe> {
         // The job state machine's future is large; keep it on the heap so
         // callers on small thread stacks (test threads, runtime workers) do
         // not overflow.
-        Box::pin(self.run_phases(executor, persistence, hooks)).await
+        Box::pin(self.run_phases(executor, persistence, hooks, &mut stress::NoRetirementHooks))
+            .await
     }
 
     async fn run_phases(
@@ -538,9 +545,11 @@ impl<'probe> Engine<'probe> {
         executor: &mut dyn Executor,
         persistence: &mut dyn Persistence,
         hooks: &mut dyn PhaseHooks,
+        retirement: &mut dyn stress::RetirementHooks,
     ) -> Arc<FinalizedReport> {
         let Self {
             mut ready,
+            stress,
             plan,
             after_test,
             disabled_hooks,
@@ -652,12 +661,14 @@ impl<'probe> Engine<'probe> {
             workspace: &ready.workspace,
             problem: ready.problem.as_ref(),
             job_id: ready.id.as_str(),
+            sequence: &ready.sequence,
             owner: &ready.owner,
             budget: &ready.budget,
             platform: ready.platform,
             cancel: &cancel,
             events: &events,
             output_events,
+            progress: progress.clone(),
             cwd_bytes: ready.cwd_bytes,
             cwd_walker: Arc::default(),
             #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -677,7 +688,12 @@ impl<'probe> Engine<'probe> {
         // Reserve report + replacement temporary before admitting any run.
         let (planned_tests, planned_aggregates) =
             report_populations(kind, &plan, ready.manifest.entries().len());
-        let report_reservation = if let Some(judging) = judging.take() {
+        let report_reservation = if kind == JobKind::Stress {
+            ready
+                .budget
+                .reserve(2 * stress::STRESS_REPORT_BOUND as u64)
+                .ok()
+        } else if let Some(judging) = judging.take() {
             Some(judging.report_reservation)
         } else {
             report::wire::report_reservation(
@@ -691,7 +707,14 @@ impl<'probe> Engine<'probe> {
         };
         let report_refused = report_reservation.is_none();
         let planned_count = (plan.len() + after_test.len()) as u32;
-        persistence.configure(planned_count, cancel.token());
+        persistence.configure(
+            if kind == JobKind::Stress {
+                6 + 8 * 21
+            } else {
+                planned_count
+            },
+            cancel.token(),
+        );
         let generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
@@ -1076,6 +1099,23 @@ impl<'probe> Engine<'probe> {
                 tests.push(test_report);
             }
         }
+        if let Some(request) = stress {
+            // Even a caught adapter panic must produce a stress document.
+            details.stress = Some(Box::new(stress::StressReport::new(request.schedule)));
+            match caught(context.stress_loop(
+                *request,
+                builds_succeeded,
+                report_refused,
+                executor,
+                persistence,
+                retirement,
+            ))
+            .await
+            {
+                Ok(Ok(stress)) => details.stress = Some(Box::new(stress)),
+                _ => record_internal(&cancel, Invariant::JobEvidence, InternalLocus::Job),
+            }
+        }
         for execution in &executions {
             for detail in &execution.io_warnings {
                 details.warnings.push(WireWarning {
@@ -1119,7 +1159,7 @@ impl<'probe> Engine<'probe> {
         let test_verdicts: Vec<_> = tests.iter().filter_map(|t| t.verdict.clone()).collect();
         let mut result = {
             let mut state = cancel.lock();
-            let result = report::job_verdict(&report::JobInput {
+            let mut result = report::job_verdict(&report::JobInput {
                 roles: &details.roles,
                 scoring,
                 kind,
@@ -1134,6 +1174,11 @@ impl<'probe> Engine<'probe> {
                 internal_before_freeze: state.internal.as_ref(),
                 internal_after_freeze: None,
             });
+            if let Some(stress) = &details.stress {
+                let verdict = stress.verdict(result.primary_verdict, state.internal.is_some());
+                result.primary_verdict = verdict;
+                result.verdict = verdict;
+            }
             state.internal = result.internal.clone();
             state.primary = Some(result.primary_verdict);
             state.phase = if kind == JobKind::Test {
@@ -1360,6 +1405,11 @@ impl<'probe> Engine<'probe> {
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::Closure);
         let dropped = events.close();
+        if let (Some(progress), Some(stress)) = (&progress, &details.stress) {
+            for line in stress.result_lines(cancel.start.elapsed()) {
+                progress.result(&line);
+            }
+        }
         if let Some(progress) = progress {
             let lines = progress.close();
             if lines != 0 {
@@ -1413,6 +1463,8 @@ impl<'probe> Engine<'probe> {
             if late_cancellation {
                 warnings.push(Warning::LateCancellation);
             }
+            // A late intent leaves the stress verdict intact (§2.14), but
+            // recorded cancellation still wins exit precedence (§5.2 row 5).
             details.pre_delivery_exit =
                 pre_delivery_exit(kind, result.verdict, cancellation, details.score.as_ref());
             let report = FinalizedReport {
@@ -1534,6 +1586,7 @@ struct Context<'a> {
     workspace: &'a Path,
     problem: Option<&'a crate::exec::ProblemBinding>,
     job_id: &'a str,
+    sequence: &'a (crate::storage::job::Epoch, u64),
     dir: &'a Path,
     owner: &'a JobOwner,
     budget: &'a Arc<JobBudget>,
@@ -1542,6 +1595,7 @@ struct Context<'a> {
     events: &'a Events,
     output_events: bool,
     cwd_bytes: Option<u64>,
+    progress: Option<crate::progress::ProgressQueue>,
     testlib: &'a std::collections::BTreeMap<u32, report::Scoring>,
     staged: &'a std::collections::BTreeMap<u32, Vec<crate::jobs::roles::StagedFile>>,
     runs: std::cell::RefCell<std::collections::BTreeMap<u32, RunId>>,
@@ -1581,58 +1635,100 @@ impl Context<'_> {
         report_refused: bool,
         admission_closed: &mut bool,
     ) -> ExecutionReport {
+        Box::pin(self.execute_inner(
+            plan,
+            target,
+            executor,
+            persistence,
+            report_refused,
+            admission_closed,
+            &mut None,
+        ))
+        .await
+    }
+
+    // The optional iteration state owns deferred persistence and release handles;
+    // ordinary execution keeps the same admission and finalization path.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_inner(
+        &self,
+        plan: PlannedExecution,
+        target: &mut TargetState<'_>,
+        executor: &mut dyn Executor,
+        persistence: &mut dyn Persistence,
+        report_refused: bool,
+        admission_closed: &mut bool,
+        iteration: &mut Option<stress::IterationExecution>,
+    ) -> ExecutionReport {
         let admitted_at = std::time::Instant::now();
-        let run = {
-            let mut state = self.cancel.lock();
-            if state.intent.is_some() {
-                return skipped(plan, SkipReason::Cancelled);
-            }
-            let run = RunId(format!("r{:05}", state.next_run));
-            state.next_run += 1;
-            run
+        let report_run = if iteration.is_some() {
+            None
+        } else {
+            Some({
+                let mut state = self.cancel.lock();
+                if state.intent.is_some() {
+                    return skipped(plan, SkipReason::Cancelled);
+                }
+                let run = RunId(format!("r{:05}", state.next_run));
+                state.next_run += 1;
+                run
+            })
+        };
+        let run = match (iteration.as_ref(), &report_run) {
+            (Some(state), _) => RunIdentity::Iteration(state.id),
+            (_, Some(run)) => RunIdentity::Report(run.clone()),
+            _ => unreachable!("execution identity"),
         };
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.phase_point(Point::AfterAdmission(plan.index));
-        self.runs.borrow_mut().insert(plan.index, run.clone());
-        let directory = self.dir.join(run.as_str());
+        if let Some(run) = &report_run {
+            self.runs.borrow_mut().insert(plan.index, run.clone());
+        }
+        let directory = iteration.as_ref().map_or_else(
+            || self.dir.join(&*run.as_str()),
+            |state| state.id.directory(self.dir),
+        );
         let planned_cwd = crate::jobs::plan::RunLayout::new(self.dir, plan.index as usize).cwd;
-        let staged = self
-            .staged
-            .get(&plan.index)
-            .into_iter()
-            .flatten()
-            .map(|file| {
-                let mut file = file.clone();
-                file.destination = file
-                    .destination
-                    .strip_prefix(&planned_cwd)
-                    .expect("planned judge scratch")
-                    .components()
-                    .fold(directory.join("cwd"), |p, c| p.join(c));
-                if let Some(source) = &mut file.source {
-                    if let Ok(relative) = source.strip_prefix(self.dir) {
-                        let mut components = relative.components();
-                        if let Some(index) = components
-                            .next()
-                            .and_then(|c| c.as_os_str().to_str())
-                            .and_then(|c| c.strip_prefix('r'))
-                            .and_then(|n| n.parse::<u32>().ok())
-                        {
-                            // Only the fixed `output` copies a solution capture; copy
-                            // its frozen length, never what the file holds now.
-                            if file.destination == directory.join("cwd").join("output") {
-                                file.bytes = self.frozen_outputs.borrow().get(&index).copied();
-                            }
-                            if let Some(run) = self.runs.borrow().get(&index) {
-                                *source =
-                                    components.fold(self.dir.join(run.as_str()), |p, c| p.join(c));
+        let staged = if let Some(iteration) = iteration.as_mut() {
+            std::mem::take(&mut iteration.staged)
+        } else {
+            self.staged
+                .get(&plan.index)
+                .into_iter()
+                .flatten()
+                .map(|file| {
+                    let mut file = file.clone();
+                    file.destination = file
+                        .destination
+                        .strip_prefix(&planned_cwd)
+                        .expect("planned judge scratch")
+                        .components()
+                        .fold(directory.join("cwd"), |p, c| p.join(c));
+                    if let Some(source) = &mut file.source {
+                        if let Ok(relative) = source.strip_prefix(self.dir) {
+                            let mut components = relative.components();
+                            if let Some(index) = components
+                                .next()
+                                .and_then(|c| c.as_os_str().to_str())
+                                .and_then(|c| c.strip_prefix('r'))
+                                .and_then(|n| n.parse::<u32>().ok())
+                            {
+                                // Only the fixed `output` copies a solution capture; copy
+                                // its frozen length, never what the file holds now.
+                                if file.destination == directory.join("cwd").join("output") {
+                                    file.bytes = self.frozen_outputs.borrow().get(&index).copied();
+                                }
+                                if let Some(run) = self.runs.borrow().get(&index) {
+                                    *source = components
+                                        .fold(self.dir.join(run.as_str()), |p, c| p.join(c));
+                                }
                             }
                         }
                     }
-                }
-                file
-            })
-            .collect();
+                    file
+                })
+                .collect()
+        };
         let io = self
             .file_io
             .filter(|_| matches!(plan.role, Role::Test { .. }));
@@ -1730,6 +1826,21 @@ impl Context<'_> {
                     stage.environment.push((name.into(), value));
                 }
             }
+        }
+        // A judge-staging budget refusal is part of an iteration run's
+        // admission (stress §6.2: `retention_budget`, admission closes). An
+        // ordinary run keeps its established `not_started{setup}` record.
+        if let Some(failure) = failure
+            .as_mut()
+            .filter(|f| iteration.is_none() && f.reason == NotStartedReason::RetentionBudget)
+        {
+            failure.reason = NotStartedReason::Setup;
+        }
+        if failure
+            .as_ref()
+            .is_some_and(|f| f.reason == NotStartedReason::RetentionBudget)
+        {
+            *admission_closed = true;
         }
         let command = stage
             .as_ref()
@@ -1842,10 +1953,10 @@ impl Context<'_> {
             spec.digest = Some(spec.spec_digest());
             Arc::new(spec)
         });
-        if spec
+        let encoded_spec = spec
             .as_ref()
-            .is_some_and(|s| crate::report::wire::encode_spec(&s.wire_spec()).is_err())
-        {
+            .and_then(|s| crate::report::wire::encode_spec(&s.wire_spec()).ok());
+        if spec.is_some() && encoded_spec.is_none() {
             failure = Some(StartFailure {
                 reason: NotStartedReason::SpecTooLarge,
                 api: None,
@@ -1853,30 +1964,55 @@ impl Context<'_> {
                 invalid_limit: None,
             });
         }
+        let retained_bytes = resources.as_ref().map_or_else(
+            || Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            RunResources::retained_counter,
+        );
+        let release = if iteration.is_some() {
+            resources
+                .as_mut()
+                .map_or_else(stress::RunRelease::not_held, RunResources::track_release)
+        } else {
+            stress::RunRelease::not_held()
+        };
+        if iteration.is_some() && metadata.is_none() && !*admission_closed {
+            metadata = self.budget.reserve(METADATA).ok();
+            if metadata.is_none() {
+                *admission_closed = true;
+                failure = Some(StartFailure {
+                    reason: NotStartedReason::RetentionBudget,
+                    api: None,
+                    os_error: None,
+                    invalid_limit: None,
+                });
+            }
+        }
         // Specs enter the queue at admission, before process creation. Split
         // the fixed allowance so queued requests own independent reservations.
-        let spec_metadata = metadata.as_mut().and_then(|r| r.split(512 * 1024));
-        let enqueued = caught(async {
-            persistence
-                .enqueue(PendingArtifacts {
-                    finalized: false,
-                    run: run.clone(),
-                    execution: plan.index,
-                    spec: spec.clone(),
-                    record: None,
-                    metadata: spec_metadata,
-                    writable,
-                    owner: self.owner.clone(),
-                })
-                .await
-        })
-        .await;
-        if enqueued.is_err() {
-            record_internal(
-                self.cancel,
-                Invariant::JobEvidence,
-                InternalLocus::Execution { index: plan.index },
-            );
+        if iteration.is_none() {
+            let spec_metadata = metadata.as_mut().and_then(|r| r.split(512 * 1024));
+            let enqueued = caught(async {
+                persistence
+                    .enqueue(PendingArtifacts {
+                        finalized: false,
+                        run: report_run.clone().expect("ordinary run"),
+                        execution: plan.index,
+                        spec: spec.clone(),
+                        record: None,
+                        metadata: spec_metadata,
+                        writable,
+                        owner: self.owner.clone(),
+                    })
+                    .await
+            })
+            .await;
+            if enqueued.is_err() {
+                record_internal(
+                    self.cancel,
+                    Invariant::JobEvidence,
+                    InternalLocus::Execution { index: plan.index },
+                );
+            }
         }
         let record = if let Some(failure) = failure {
             Some(Arc::new(ExecutionRecord::NotStarted(failure)))
@@ -1890,13 +2026,21 @@ impl Context<'_> {
                     invalid_limit: None,
                 })))
             } else {
-                self.events.offer(EventPayload::RunStarted {
-                    run: run.clone(),
-                    execution: plan.index,
-                    stage: plan.stage,
-                    role: plan.role.clone(),
-                    digest: spec.digest,
-                });
+                if let Some(iteration) = iteration.as_ref() {
+                    self.events.offer(EventPayload::IterationRunStarted {
+                        run: iteration.id,
+                        stage: plan.stage,
+                        digest: spec.digest,
+                    });
+                } else {
+                    self.events.offer(EventPayload::RunStarted {
+                        run: report_run.clone().expect("ordinary run"),
+                        execution: plan.index,
+                        stage: plan.stage,
+                        role: plan.role.clone(),
+                        digest: spec.digest,
+                    });
+                }
                 caught(async {
                     executor
                         .execute(
@@ -1930,32 +2074,44 @@ impl Context<'_> {
                 }
             }
         }
+        if let Some(iteration) = iteration.as_mut() {
+            iteration.finalized_at = tokio::time::Instant::now();
+        }
         let writable = writable && metadata.is_some();
         #[cfg(feature = "storage-test-hooks")]
         self.point(Point::BeforeRecordEnqueue(plan.index));
         // Enqueue finalized evidence before deriving anything or comparing.
-        let enqueued = caught(async {
-            persistence
-                .enqueue(PendingArtifacts {
-                    finalized: true,
-                    run: run.clone(),
-                    execution: plan.index,
-                    spec: spec.clone(),
-                    record: record.clone(),
-                    metadata,
-                    writable,
-                    owner: self.owner.clone(),
-                })
-                .await
-        })
-        .await;
-        if enqueued.is_err() {
-            record_internal(
-                self.cancel,
-                Invariant::JobEvidence,
-                InternalLocus::Execution { index: plan.index },
-            );
+        // Iterations retain the whole metadata reservation until R5.
+        if iteration.is_none() {
+            let enqueued = caught(async {
+                persistence
+                    .enqueue(PendingArtifacts {
+                        finalized: true,
+                        run: report_run.clone().expect("ordinary run"),
+                        execution: plan.index,
+                        spec: spec.clone(),
+                        record: record.clone(),
+                        metadata: metadata.take(),
+                        writable,
+                        owner: self.owner.clone(),
+                    })
+                    .await
+            })
+            .await;
+            if enqueued.is_err() {
+                record_internal(
+                    self.cancel,
+                    Invariant::JobEvidence,
+                    InternalLocus::Execution { index: plan.index },
+                );
+            }
         }
+        let extracted_counter = scratch
+            .as_ref()
+            .map(judge_files::Scratch::extracted_counter);
+        let staging_release = scratch
+            .as_ref()
+            .map_or_else(stress::RunRelease::not_held, judge_files::Scratch::release);
         let mut result = ExecutionResult {
             coverage: Coverage::Admitted,
             class: None,
@@ -1970,12 +2126,19 @@ impl Context<'_> {
                 scratch,
                 &self.cwd_walker,
                 executor,
-                self.testlib.get(&plan.index).map(|scoring| {
+                // An iteration's plan index is its role slot, never a key of
+                // the job plan's testlib map.
+                match iteration.as_ref() {
+                    Some(iteration) => iteration.testlib,
+                    None => self.testlib.get(&plan.index).copied(),
+                }
+                .map(|scoring| {
                     Box::new(judge_files::ReportRequest {
                         directory: directory.clone(),
                         budget: self.budget.clone(),
-                        scoring: *scoring,
+                        scoring,
                         policies,
+                        retained: extracted_counter,
                     })
                 }),
             )
@@ -2067,10 +2230,32 @@ impl Context<'_> {
             }
         }
         if let Some(summary) = &summary {
-            self.events.offer(EventPayload::RunFinished {
-                run: run.clone(),
-                summary: summary.clone(),
-            });
+            if let Some(iteration) = iteration.as_ref() {
+                self.events.offer(EventPayload::IterationRunFinished {
+                    run: iteration.id,
+                    summary: summary.clone(),
+                });
+            } else {
+                self.events.offer(EventPayload::RunFinished {
+                    run: report_run.clone().expect("ordinary run"),
+                    summary: summary.clone(),
+                });
+            }
+        }
+        if let Some(iteration) = iteration.as_mut() {
+            if let Some(record) = &record {
+                iteration.retirement = Some(stress::RetirementRun {
+                    id: iteration.id,
+                    encoded_spec,
+                    digest: spec.as_ref().and_then(|s| s.digest),
+                    record: record.clone(),
+                    metadata,
+                    writable,
+                    release,
+                    retained_bytes,
+                    staging_release,
+                });
+            }
         }
         ExecutionReport {
             io_warnings: {
@@ -2097,7 +2282,7 @@ impl Context<'_> {
             judge_evidence: judge.evidence,
             judge_scratch_kept: judge.kept,
             plan,
-            run: Some(run),
+            run: report_run,
             program: spec.as_ref().map(|s| s.command.program.clone()),
             // Report §4.5: `spec` is null only for skipped executions and for
             // cancellation that interrupted run preparation (E §3.4).
@@ -2412,6 +2597,7 @@ fn report_details(
 ) -> ReportDetails {
     let target = ready.target.as_ref().filter(|_| capture);
     ReportDetails {
+        stress: None,
         shape: None,
         roles: ready.judging.as_ref().map_or_else(Vec::new, |j| {
             j.roles.iter().map(|r| r.report.clone()).collect()

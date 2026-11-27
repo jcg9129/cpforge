@@ -70,12 +70,19 @@ pub fn exit_status(input: &ExitInputs) -> ExitCode {
             Some(F::Site) => ExitCode::Site,
             Some(F::Infrastructure) => ExitCode::Infrastructure,
             _ => match input.verdict {
-                Some(V::Infrastructure) => ExitCode::Infrastructure,
+                Some(V::Infrastructure | V::StressCleanupFailed) => ExitCode::Infrastructure,
                 Some(V::SubmitVersionMismatch) => ExitCode::Config,
                 Some(V::BuildFailed | V::SubmitFailed) => ExitCode::BuildFailed,
-                Some(V::CheckerFailed) => ExitCode::CheckerFailed,
                 Some(
-                    V::WallDeadline
+                    V::CheckerFailed
+                    | V::JudgeFailure
+                    | V::OracleFailure
+                    | V::ValidatorFailure
+                    | V::GeneratorFailure,
+                ) => ExitCode::CheckerFailed,
+                Some(
+                    V::CandidateFailure
+                    | V::WallDeadline
                     | V::OutputBudget
                     | V::Signal
                     | V::NonzeroExit
@@ -85,7 +92,7 @@ pub fn exit_status(input: &ExitInputs) -> ExitCode {
                     | V::Idle,
                 ) => ExitCode::Failed,
                 Some(V::Scored) if !input.score_full => ExitCode::Failed,
-                Some(V::Unchecked | V::NoTests) => ExitCode::NotVerified,
+                Some(V::Unchecked | V::NoTests | V::NoIterations) => ExitCode::NotVerified,
                 _ => ExitCode::Success,
             },
         }

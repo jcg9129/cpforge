@@ -25,9 +25,26 @@ impl RunId {
     }
 }
 
+/// Execution identities keep iteration runs out of the report-run namespace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunIdentity {
+    Report(RunId),
+    Iteration(super::stress::IterationRunId),
+}
+impl RunIdentity {
+    pub fn as_str(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Report(id) => std::borrow::Cow::Borrowed(id.as_str()),
+            Self::Iteration(id) => std::borrow::Cow::Owned(id.to_string()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     Build,
+    Generator,
+    Brute,
     Run,
     Command,
     Hook,
@@ -129,7 +146,7 @@ pub struct PlannedExecution {
 /// separately from a supervisor's physical resources.
 #[derive(Clone, Debug)]
 pub struct ExecutionSpec {
-    pub run: RunId,
+    pub run: RunIdentity,
     pub execution: u32,
     pub role: Role,
     pub stage: Stage,

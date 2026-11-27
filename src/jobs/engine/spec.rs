@@ -76,6 +76,8 @@ impl ExecutionSpec {
         bytes(
             &mut hash,
             match spec.stage {
+                super::Stage::Generator => b"generator",
+                super::Stage::Brute => b"brute",
                 super::Stage::Build => b"build",
                 super::Stage::Run => b"run",
                 super::Stage::Command => b"command",

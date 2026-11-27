@@ -48,7 +48,7 @@ fn collected(solution: &ExecutionReport) -> bool {
     )
 }
 
-fn input(execution: &ExecutionReport, profile: r::JudgeProfile) -> r::JudgeInput {
+pub(super) fn input(execution: &ExecutionReport, profile: r::JudgeProfile) -> r::JudgeInput {
     r::JudgeInput {
         execution: execution.result.clone(),
         profile,

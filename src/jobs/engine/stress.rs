@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod classification;
+mod engine;
+mod report;
+pub(crate) use engine::IterationExecution;
+pub use engine::StressRequest;
+pub use report::*;
 mod retirement;
 pub use classification::*;
 pub use retirement::*;
@@ -809,6 +814,13 @@ impl<T> RetiringIteration<'_, T> {
         }
         counters.retired = counters.retired.checked_add(1).expect("iteration headroom");
         if cleanup_failed {
+            // Stress §6.4 step 1 sets `cleanup_failed` whatever stop the
+            // iteration's class set at R2: step 3 keeps a `save` (failing)
+            // iteration's promotion after an R10 failure and step 5 then
+            // requires `stress_cleanup_failed` unless a higher report §2.14
+            // row applies; row 5 there reads this stop and outranks the
+            // failing classes. Intent is §5 row 1, checked before row 3 at
+            // the next admission, and §2.14 rows 2-3 still precede row 5.
             self.owner.previous_stop = Some(StopReason::CleanupFailed);
         }
         self.owner.live = false;

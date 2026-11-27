@@ -914,6 +914,24 @@ fn st_l24_batch_orphans_record_internal_evidence_and_retire() {
             .unwrap();
         assert_eq!(engine.counters().retired, 1);
         assert_eq!(stop(&mut engine).reason, StopReason::Infrastructure);
+        let mut report = StressReport::new(engine.schedule);
+        report.counters = engine.counters();
+        report.stop = engine.stop().unwrap();
+        let verdict = report.verdict(
+            crate::report::JobVerdict::Succeeded,
+            cancel.lock().internal.is_some(),
+        );
+        assert_eq!(verdict, crate::report::JobVerdict::InternalError);
+        assert_eq!(
+            crate::jobs::engine::pre_delivery_exit(
+                crate::report::JobKind::Stress,
+                verdict,
+                None,
+                None
+            )
+            .code,
+            70
+        );
     }
 }
 
@@ -1248,6 +1266,11 @@ fn batch_classification_rows_s1_to_s8_decide_class_role_and_reason() {
             ValidationOutcome::ValidatorFailed,
             "signal",
         ),
+        (
+            RunClass::NonzeroExit { code: 2 },
+            ValidationOutcome::ValidatorFailed,
+            "exit_code",
+        ),
     ] {
         assert_eq!(
             decide(&upto(Validator, class), None, Some(outcome), false, None),
@@ -1415,4 +1438,84 @@ fn batch_classification_rows_s1_to_s8_decide_class_role_and_reason() {
         decide(&reversed, Some(CheckKind::Passed), valid, false, None),
         orphan
     );
+}
+
+#[test]
+fn saved_failure_id_canonical_parse_print_vectors() {
+    let epoch = "0123456789abcdef0123456789abcdef";
+    for (sequence, iteration) in [(0, 0), (42, 17), (u64::MAX, u64::MAX)] {
+        let text = format!("f-{epoch}-{sequence}-{iteration}");
+        let id = FailureId::parse(&text).unwrap();
+        assert_eq!(id.to_string(), text);
+        assert_eq!((id.sequence, id.iteration), (sequence, iteration));
+        assert!(text.len() <= 76);
+    }
+    for text in [
+        format!("f-{}-0-0", epoch.to_uppercase()),
+        format!("f-{}-0-0", &epoch[1..]),
+        format!("f-{epoch}a-0-0"),
+        format!("f-{epoch}-01-0"),
+        format!("f-{epoch}-0-01"),
+        format!("f-{epoch}-+1-0"),
+        format!("f-{epoch}-0--0"),
+        format!("f-{epoch}-18446744073709551616-0"),
+        format!("f-{epoch}-0-18446744073709551616"),
+        format!("f-{epoch}-0-0-extra"),
+        format!("f-{epoch}-0-0-"),
+    ] {
+        assert!(FailureId::parse(&text).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn stress_verdict_precedence_and_exit_rows() {
+    use crate::report::{JobKind, JobVerdict as V};
+    let mut report = StressReport::new(Schedule::Search {
+        start_seed: 0,
+        budget: SearchBudget {
+            iterations: 1,
+            time: Duration::from_secs(1),
+        },
+        keep_going: true,
+    });
+    report.stop.reason = StopReason::CounterLimit;
+    for (class, expected, code) in [
+        (None, V::NoIterations, 4),
+        (
+            Some(IterationClass::GeneratorFailure),
+            V::GeneratorFailure,
+            5,
+        ),
+        (
+            Some(IterationClass::ValidatorFailure),
+            V::ValidatorFailure,
+            5,
+        ),
+        (Some(IterationClass::OracleFailure), V::OracleFailure, 5),
+        (Some(IterationClass::JudgeFailure), V::JudgeFailure, 5),
+        (
+            Some(IterationClass::CandidateFailure),
+            V::CandidateFailure,
+            1,
+        ),
+    ] {
+        if let Some(class) = class {
+            report.counters.classes[class.index()] = 1;
+            report.counters.retired += 1;
+        }
+        let verdict = report.verdict(V::Succeeded, false);
+        assert_eq!(verdict, expected);
+        assert_eq!(
+            crate::jobs::engine::pre_delivery_exit(JobKind::Stress, verdict, None, None).code,
+            code
+        );
+    }
+    report.stop.reason = StopReason::CleanupFailed;
+    assert_eq!(report.verdict(V::Succeeded, false), V::StressCleanupFailed);
+    assert_eq!(report.verdict(V::BuildFailed, false), V::BuildFailed);
+    report.counters.classes[IterationClass::Cancelled.index()] = 1;
+    assert_eq!(report.verdict(V::Succeeded, false), V::Cancelled);
+    report.counters.classes[IterationClass::Infrastructure.index()] = 1;
+    assert_eq!(report.verdict(V::Succeeded, false), V::Infrastructure);
+    assert_eq!(report.verdict(V::Succeeded, true), V::InternalError);
 }

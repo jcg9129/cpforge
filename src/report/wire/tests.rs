@@ -136,6 +136,7 @@ pub(super) fn passing() -> e::ReportData {
     };
     e::ReportData {
         details: e::ReportDetails {
+            stress: None,
             shape: None,
             roles: Vec::new(),
             problem: Some(Problem {
@@ -494,7 +495,7 @@ fn every_event_envelope_golden_bytes() {
             digest: Some([0; 32]),
         },
         e::EventPayload::OutputChunk {
-            run: run.clone(),
+            run: e::RunIdentity::Report(run.clone()),
             stream: p::Stream::Stdout,
             bytes: vec![b'a', 0xff],
         },
@@ -525,6 +526,88 @@ fn every_event_envelope_golden_bytes() {
     assert_eq!(
         job_finished(5, &id.id, r::JobVerdict::Passed, None, 0).unwrap(),
         include_bytes!("fixtures/job_finished.json")
+    );
+}
+/// Report §7.3: iteration events carry `irid`s and `u64` iterations, never a
+/// report run id; R-S09's `output_chunk` names the iteration run.
+#[test]
+fn iteration_event_envelopes_golden_bytes() {
+    use e::stress::{BatchDecision, BatchRole, FailureId, IterationClass, IterationRunId};
+    let id = identity();
+    let run = IterationRunId {
+        iteration: 10_004,
+        role: BatchRole::Candidate,
+    };
+    let events = [
+        e::EventPayload::IterationStarted {
+            iteration: u64::MAX,
+            seed: 19,
+        },
+        e::EventPayload::IterationRunStarted {
+            run,
+            stage: e::Stage::Run,
+            digest: Some([0; 32]),
+        },
+        e::EventPayload::OutputChunk {
+            run: e::RunIdentity::Iteration(run),
+            stream: p::Stream::Stdout,
+            bytes: vec![b'a', 0xff],
+        },
+        e::EventPayload::IterationRunFinished {
+            run,
+            summary: Arc::new(small_summary()),
+        },
+        e::EventPayload::IterationFinished {
+            iteration: 10_004,
+            decision: BatchDecision {
+                class: IterationClass::CandidateFailure,
+                role: Some(BatchRole::Checker),
+                reason: "wrong_answer",
+                invariant: false,
+            },
+            saved: Some(FailureId {
+                epoch: id.sequence.0.clone(),
+                sequence: id.sequence.1,
+                iteration: 10_004,
+            }),
+        },
+        e::EventPayload::IterationFinished {
+            iteration: 0,
+            decision: BatchDecision {
+                class: IterationClass::Passed,
+                role: None,
+                reason: "passed",
+                invariant: false,
+            },
+            saved: None,
+        },
+    ];
+    let mut values = Vec::new();
+    for (seq, payload) in events.into_iter().enumerate() {
+        let bytes = encode_event(&e::Event {
+            seq: seq as u64,
+            payload,
+        })
+        .unwrap();
+        assert!(bytes.len() <= EVENT_BOUND);
+        assert!(!bytes.windows(4).any(|w| w == b"\"r00"));
+        values.push(Value::Verbatim(bytes));
+    }
+    assert_eq!(
+        encode(&Value::Array(values)),
+        include_bytes!("fixtures/iteration_events.json")
+    );
+    // An iteration run without a digest is not a started run.
+    assert!(
+        encode_event(&e::Event {
+            seq: 0,
+            payload: e::EventPayload::IterationRunStarted {
+                run,
+                stage: e::Stage::Generator,
+                digest: None,
+            },
+        })
+        .is_err()
     );
 }
 #[test]
@@ -673,7 +756,7 @@ fn diagnostics_are_embedded_verbatim_and_event_chunks_preserve_bytes() {
         let event = e::Event {
             seq: seq as u64,
             payload: e::EventPayload::OutputChunk {
-                run: e::wire_fixture_run(0),
+                run: e::RunIdentity::Report(e::wire_fixture_run(0)),
                 stream: p::Stream::Stdout,
                 bytes,
             },
@@ -704,7 +787,7 @@ fn missing_evidence_and_out_of_domain_values_fail_encoding() {
     let event = e::Event {
         seq: 0,
         payload: e::EventPayload::OutputChunk {
-            run: e::wire_fixture_run(0),
+            run: e::RunIdentity::Report(e::wire_fixture_run(0)),
             stream: p::Stream::Stdout,
             bytes: vec![0; 4097],
         },

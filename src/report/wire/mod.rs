@@ -23,6 +23,7 @@ mod run;
 mod schema;
 mod search;
 mod status;
+mod stress;
 mod value;
 pub(crate) use ls::encode_ls;
 pub(crate) use search::encode_search;
@@ -122,6 +123,17 @@ pub fn report_reservation(
     Ok(bytes)
 }
 pub(crate) fn report_data_bound(v: &e::ReportData) -> Result<usize> {
+    if v.command == crate::report::JobKind::Stress {
+        if v.executions.len() > 6
+            || v.executions.iter().any(|e| e.plan.stage != e::Stage::Build)
+            || !v.tests.is_empty()
+            || !v.aggregates.is_empty()
+            || v.details.stress.is_none()
+        {
+            return Err(Error("invalid stress report populations"));
+        }
+        return Ok(e::stress::STRESS_REPORT_BOUND);
+    }
     let io = v.details.target.as_ref().and_then(|v| v.io.as_ref());
     for test in &v.tests {
         if let Some(shape) = v.details.shape {
@@ -327,7 +339,14 @@ fn report_value(v: &e::ReportData, persist: Option<&ReportPersistence>) -> Resul
         ("events", obj([("dropped", u(v.events.dropped))])),
         ("timing", timing(&v.timing)?),
         ("refusal", Value::Null),
-        ("stress", Value::Null),
+        (
+            "stress",
+            meta.stress
+                .as_ref()
+                .map(|s| stress::stress(s, v))
+                .transpose()?
+                .unwrap_or(Value::Null),
+        ),
     ];
     if let Some(persist) = persist {
         fields.push(("persistence", persistence(persist)?));

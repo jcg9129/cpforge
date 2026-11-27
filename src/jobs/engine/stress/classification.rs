@@ -152,8 +152,13 @@ pub fn classify_batch(evidence: &BatchEvidence<'_>, cancelled: Option<BatchRole>
             }
             Some(report::ValidationOutcome::Invalid) => Some("invalid_input"),
             Some(report::ValidationOutcome::ValidationFailed) => Some("validation_failed"),
+            // B7's `<class reason>`: the class token, `exit_code` for a
+            // nonzero exit (report contract §2.11).
             Some(report::ValidationOutcome::ValidatorFailed) if validator.class.diagnostic() => {
-                Some(validator.class.wire_token())
+                Some(match validator.class {
+                    RunClass::NonzeroExit { .. } => "exit_code",
+                    _ => validator.class.wire_token(),
+                })
             }
             _ => return orphan(),
         };

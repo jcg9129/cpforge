@@ -172,7 +172,9 @@ impl Executor for Fake {
     ) -> JobFuture<'_, ExecutionRecord> {
         Box::pin(async move {
             let _resources = resources;
-            self.runs.push(spec.run.clone());
+            if let RunIdentity::Report(run) = &spec.run {
+                self.runs.push(run.clone());
+            }
             assert_eq!(spec.resolved.cwd, spec.directory.join("cwd"));
             if let Some(entered) = self.entered.take() {
                 let _ = entered.send(());
@@ -516,6 +518,7 @@ fn late_cancellation_phase_is_total_for_every_job_kind() {
                 JobKind::Cmd => command_engine(&f, CommandKind::Cmd, 1, true),
                 JobKind::Run => command_engine(&f, CommandKind::Run, 1, true),
                 JobKind::Hook => command_engine(&f, CommandKind::Hook, 1, true),
+                JobKind::Stress => unreachable!("ordinary-job fixture"),
             };
             let cancel = engine.cancellation();
             let engine = engine.observe(move |observed| {
@@ -3536,3 +3539,6 @@ mod file_io_tests;
 
 #[path = "stress/retirement_tests.rs"]
 mod stress_retirement;
+
+#[path = "stress/engine_tests.rs"]
+mod stress_engine;

@@ -148,6 +148,14 @@ impl RunPreparation {
             let mut scratch = super::judge_files::Scratch::new(owner.clone());
             if let Err(error) = scratch.stage(&self.staged, &self.budget, cancel) {
                 result.failure = Some(StartFailure {
+                    reason: if error
+                        .get_ref()
+                        .is_some_and(|e| e.is::<crate::storage::budget::BudgetExceeded>())
+                    {
+                        NotStartedReason::RetentionBudget
+                    } else {
+                        NotStartedReason::Setup
+                    },
                     os_error: error.raw_os_error(),
                     ..setup_failure()
                 });

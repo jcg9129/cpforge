@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-use super::{FinalizedReport, Role, RunId, RunSummary, Stage};
+use super::{FinalizedReport, Role, RunId, RunIdentity, RunSummary, Stage};
 use crate::report::{JobKind, JobVerdict};
 use crate::storage::job::JobId;
 use crate::supervisor::Stream;
@@ -14,6 +14,24 @@ pub const EVENT_BOUND: usize = 7 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum EventPayload {
+    IterationStarted {
+        iteration: u64,
+        seed: u64,
+    },
+    IterationRunStarted {
+        run: super::stress::IterationRunId,
+        stage: Stage,
+        digest: Option<[u8; 32]>,
+    },
+    IterationRunFinished {
+        run: super::stress::IterationRunId,
+        summary: Arc<RunSummary>,
+    },
+    IterationFinished {
+        iteration: u64,
+        decision: super::stress::BatchDecision,
+        saved: Option<super::stress::FailureId>,
+    },
     JobStarted {
         job: JobId,
         sequence: (crate::storage::job::Epoch, u64),
@@ -27,7 +45,7 @@ pub enum EventPayload {
         digest: Option<[u8; 32]>,
     },
     OutputChunk {
-        run: RunId,
+        run: RunIdentity,
         stream: Stream,
         bytes: Vec<u8>,
     },
@@ -218,7 +236,7 @@ impl EventReceiver {
 #[derive(Clone, Debug)]
 pub struct RunEvents {
     pub(super) events: Events,
-    pub(super) run: RunId,
+    pub(super) run: RunIdentity,
     pub(super) output: bool,
 }
 impl RunEvents {

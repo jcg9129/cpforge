@@ -952,3 +952,153 @@ fn actual_engine_values_fill_every_available_cap() {
         assert!(encode(&value).len() <= 13311);
     }
 }
+
+/// R-S04 through the real encoder: every capped list full, every `u64` at
+/// its maximum, `"`-heavy diagnostics and cleanup paths. A batch failure ref
+/// has five runs, so the eight-run table row is an upper bound here.
+#[test]
+fn actual_stress_member_at_its_caps_fits_its_row_and_rejects_more() {
+    use e::stress::{
+        BatchDecision, BatchRole, ClassAggregate, CleanupFailure, FailureId, FailureRef,
+        IterationClass, IterationRunId, RoleTiming, SaveOutcome, Schedule, SearchBudget,
+        SettledRun, Stop, StopReason, StressCounters, StressDiagnostic, StressReport,
+    };
+    let class = r::RunClass::Infrastructure {
+        causes: r::InfrastructureCauses::new([
+            r::InfrastructureCause::NotStarted {
+                reason: r::NotStartedReason::ContainmentUnavailable,
+            },
+            r::InfrastructureCause::StatusUnknown,
+            r::InfrastructureCause::CleanupIncomplete {
+                survivors: u32::MAX,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::Register,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::Wait,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::PipeRead,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::Kill,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::Reap,
+            },
+            r::InfrastructureCause::SupervisorError {
+                error: r::SupervisorErrorKind::Worker,
+            },
+        ]),
+    };
+    let decision = BatchDecision {
+        class: IterationClass::CandidateFailure,
+        role: Some(BatchRole::Candidate),
+        reason: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        invariant: false,
+    };
+    let diagnostic = StressDiagnostic {
+        iteration: u64::MAX,
+        seed: u64::MAX,
+        decision,
+        source: "compare_diag",
+        text: r::JudgeText::new(&[b'"'; 4096], 1024),
+    };
+    let records = BatchRole::ALL
+        .into_iter()
+        .map(|role| {
+            let mut settled = SettledRun::unavailable(
+                IterationRunId {
+                    iteration: u64::MAX,
+                    role,
+                },
+                Some([0xff; 32]),
+            );
+            settled.record.digest = Some([0xff; 32]);
+            settled.record.error = Some(e::PersistError::Io {
+                os_error: Some(i32::MIN),
+            });
+            settled
+        })
+        .collect::<Vec<_>>();
+    let failure = FailureRef {
+        id: FailureId {
+            epoch: crate::storage::job::Epoch::parse(&"f".repeat(32)).unwrap(),
+            sequence: u64::MAX,
+            iteration: u64::MAX,
+        },
+        seed: u64::MAX,
+        decision,
+        saved: SaveOutcome::Staged,
+        runs: BatchRole::ALL
+            .into_iter()
+            .map(|role| (role, class.clone()))
+            .collect(),
+        records,
+    };
+    let aggregate = ClassAggregate {
+        first: (u64::MAX, u64::MAX),
+        diagnostics: vec![diagnostic.clone(); 16],
+        diagnostics_dropped: u32::MAX,
+    };
+    let mut report = StressReport {
+        schedule: Schedule::Search {
+            start_seed: 1,
+            budget: SearchBudget {
+                iterations: u64::MAX,
+                time: Duration::from_micros(u64::MAX),
+            },
+            keep_going: true,
+        },
+        stop: Stop {
+            reason: StopReason::AdmissionClosed,
+            iteration: Some(u64::MAX),
+        },
+        counters: StressCounters {
+            admitted: u64::MAX,
+            retired: u64::MAX,
+            runs_admitted: u64::MAX,
+            runs_started: u64::MAX,
+            captured_bytes: u64::MAX,
+            classes: [u64::MAX; 8],
+            failing: u64::MAX,
+            saved: u64::from(u32::MAX),
+            promoted: u64::from(u32::MAX),
+            not_saved: u64::MAX,
+            failures_dropped: u64::MAX,
+        },
+        classes: std::array::from_fn(|_| Some(aggregate.clone())),
+        timing: [RoleTiming {
+            runs: u64::MAX,
+            wall: Some([u64::MAX; 3]),
+        }; 5],
+        failures: vec![failure.clone(); 20],
+        cleanup_failed: CleanupFailure {
+            paths: vec![PathBuf::from("\"".repeat(256)); 16],
+            paths_dropped: u32::MAX,
+        },
+    };
+    let data = tests::passing();
+    let encoded = encode(&super::stress::stress(&report, &data).unwrap());
+    assert!(encoded.len() <= 606_208, "{}", encoded.len());
+    let parsed = read::read_json(&encoded).unwrap();
+    assert_eq!(parsed["classes"].as_array().unwrap().len(), 8);
+    assert_eq!(parsed["failures"].as_array().unwrap().len(), 20);
+    assert_eq!(parsed["iterations"]["retired"], u64::MAX.to_string());
+    assert_eq!(parsed["seeds"]["last"], u64::MAX.to_string());
+    // Over-cap input is refused, never truncated.
+    report.failures.push(failure);
+    assert!(super::stress::stress(&report, &data).is_err());
+    report.failures.pop();
+    report.cleanup_failed.paths.push(PathBuf::from("x"));
+    assert!(super::stress::stress(&report, &data).is_err());
+    report.cleanup_failed.paths.pop();
+    if let Some(aggregate) = &mut report.classes[0] {
+        aggregate.diagnostics.push(diagnostic);
+    }
+    assert!(super::stress::stress(&report, &data).is_err());
+    report.classes[0] = Some(aggregate);
+    report.counters.saved = u64::from(u32::MAX) + 1;
+    assert!(super::stress::stress(&report, &data).is_err());
+}

@@ -380,6 +380,8 @@ pub fn read_stage(v: &serde_json::Value) -> Result<crate::jobs::engine::Stage> {
     use crate::jobs::engine::Stage as S;
     match string(v)? {
         "build" => Ok(S::Build),
+        "generator" => Ok(S::Generator),
+        "brute" => Ok(S::Brute),
         "run" => Ok(S::Run),
         "command" => Ok(S::Command),
         "hook" => Ok(S::Hook),

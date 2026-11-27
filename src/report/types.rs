@@ -31,7 +31,7 @@ macro_rules! tokens {
 
 tokens! {
     /// Job populations follow report §§1 and 2.10.
-    pub enum JobKind { Build => "build", Test => "test", Run => "run", Cmd => "cmd", Hook => "hook" }
+    pub enum JobKind { Build => "build", Test => "test", Run => "run", Cmd => "cmd", Hook => "hook", Stress => "stress" }
 }
 tokens! {
     /// Contract reasons, including reasons not yet provided by the supervisor.
@@ -654,6 +654,10 @@ tokens! {
     pub enum JobVerdict {
         InternalError => "internal_error", Infrastructure => "infrastructure", Cancelled => "cancelled",
         SubmitVersionMismatch => "submit_version_mismatch", SubmitFailed => "submit_failed",
+        StressCleanupFailed => "stress_cleanup_failed", CandidateFailure => "candidate_failure",
+        JudgeFailure => "judge_failure", OracleFailure => "oracle_failure",
+        ValidatorFailure => "validator_failure", GeneratorFailure => "generator_failure",
+        NoIterations => "no_iterations",
         BuildFailed => "build_failed", WallDeadline => "wall_deadline", OutputBudget => "output_budget", Signal => "signal",
         NonzeroExit => "nonzero_exit", CheckerFailed => "checker_failed", WrongAnswer => "wrong_answer",
         PresentationError => "presentation_error", Scored => "scored",

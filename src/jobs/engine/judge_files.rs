@@ -53,13 +53,33 @@ impl Drop for StagedCopy {
 pub(super) struct Scratch {
     copies: Vec<StagedCopy>,
     _owner: JobOwner,
+    release: super::stress::RunRelease,
+    extracted: Arc<std::sync::atomic::AtomicU64>,
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let bytes = self.bytes() + self.extracted.load(std::sync::atomic::Ordering::Acquire);
+        // Commit each surviving copy before publishing its release milestone.
+        self.copies.clear();
+        self.release.released(bytes);
+    }
 }
 impl Scratch {
     pub(super) fn new(owner: JobOwner) -> Self {
         Self {
             copies: Vec::new(),
             _owner: owner,
+            release: super::stress::RunRelease::default(),
+            extracted: Arc::default(),
         }
+    }
+
+    pub(super) fn extracted_counter(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.extracted.clone()
+    }
+
+    pub(super) fn release(&self) -> super::stress::RunRelease {
+        self.release.clone()
     }
 
     pub(super) fn stage(
@@ -95,9 +115,7 @@ impl Scratch {
                     .transpose()
                     .map(|n| n.unwrap_or(0))
             })?;
-            let reservation = budget
-                .reserve(bytes)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+            let reservation = budget.reserve(bytes).map_err(io::Error::other)?;
             let parent = staged.destination.parent().expect("staged parent");
             fs::create_dir_all(parent)?;
             #[cfg(unix)]
@@ -190,7 +208,8 @@ fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn diagnostic(record: Option<&ExecutionRecord>) -> io::Result<Option<JudgeText>> {
+/// The frozen stderr head as `nsum(1024)`: a bounded read of the capture.
+pub(super) fn diagnostic(record: Option<&ExecutionRecord>) -> io::Result<Option<JudgeText>> {
     use sha2::{Digest, Sha256};
     let Some(ExecutionRecord::Started(root)) = record else {
         return Ok(None);
@@ -250,6 +269,7 @@ pub(super) struct ReportRequest {
     pub(super) budget: Arc<JobBudget>,
     pub(super) scoring: crate::report::Scoring,
     pub(super) policies: [crate::supervisor::Exceed; 2],
+    pub(super) retained: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 impl ReportRequest {
     fn eligible(&self, record: Option<&ExecutionRecord>) -> bool {
@@ -311,6 +331,7 @@ impl ReportRequest {
         let mut retained = RetainedReport {
             reservation,
             bytes: 0,
+            retained: self.retained.clone(),
         };
         let extracted = retain_report(&self.directory.join("judge"), &bytes, &mut retained.bytes);
         match extracted {
@@ -362,10 +383,15 @@ fn retain_report(judge: &Path, bytes: &[u8], written: &mut u64) -> io::Result<Ve
 struct RetainedReport {
     reservation: Reservation,
     bytes: u64,
+    retained: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 impl Drop for RetainedReport {
     fn drop(&mut self) {
-        let _ = self.reservation.commit(self.bytes);
+        if self.reservation.commit(self.bytes).is_ok() {
+            if let Some(retained) = &self.retained {
+                retained.fetch_add(self.bytes, std::sync::atomic::Ordering::Release);
+            }
+        }
     }
 }
 

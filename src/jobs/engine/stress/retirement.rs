@@ -64,6 +64,21 @@ impl RunRelease {
         self.0.changed.notify_waiters();
     }
 
+    /// R7 moved these bytes out of the run directory. They stay charged to
+    /// staging until promotion; R11 must not release them a second time.
+    pub fn moved(&self, bytes: u64) -> Result<(), AdmissionError> {
+        if !self.0.dropped.load(Ordering::Acquire) {
+            return Err(AdmissionError::State);
+        }
+        self.0
+            .committed
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |committed| {
+                committed.checked_sub(bytes)
+            })
+            .map(|_| ())
+            .map_err(|_| AdmissionError::State)
+    }
+
     fn committed(&self) -> u64 {
         self.0.committed.load(Ordering::Acquire)
     }
@@ -110,6 +125,8 @@ pub struct RetirementRun {
     /// finish updating it before `release` becomes ready; R11 releases at most
     /// what the run's reservation committed.
     pub retained_bytes: Arc<AtomicU64>,
+    /// Staging uses independent reservations; the stream counter excludes it.
+    pub staging_release: RunRelease,
 }
 
 /// Ownership handed to the job's one persistence worker in R5.
@@ -185,7 +202,8 @@ pub enum NotSavedReason {
 }
 
 /// Saved-failure staging/promotion plugs into this hook. A hook must release accounting
-/// for promoted files and subtract moved scratch from each run's byte counter.
+/// for promoted files and subtract moved streams from each run's byte counter;
+/// moved judge files must also be deducted with `staging_release.moved`.
 /// Cancellation never interrupts a promotion already in progress.
 pub trait RetirementHooks {
     fn promote<'a>(&'a mut self, _runs: &'a [RetirementRun]) -> JobFuture<'a, SaveOutcome> {
@@ -395,9 +413,12 @@ impl RetirementBatch {
         let mut cleanup_failed = CleanupFailure::default();
         // R6: one absolute deadline for every holder, not five seconds each.
         for run in &self.runs {
-            if tokio::time::timeout_at(deadline, run.release.wait())
-                .await
-                .is_err()
+            if tokio::time::timeout_at(deadline, async {
+                run.release.wait().await;
+                run.staging_release.wait().await;
+            })
+            .await
+            .is_err()
             {
                 cleanup_failed.push(PathBuf::from("iterations").join(run.id.to_string()));
             }
@@ -437,7 +458,14 @@ impl RetirementBatch {
             .runs
             .iter()
             .filter(|r| r.writable)
-            .map(|r| (r.id, r.retained_bytes.clone(), r.release.clone()))
+            .map(|r| {
+                (
+                    r.id,
+                    r.retained_bytes.clone(),
+                    r.release.clone(),
+                    r.staging_release.clone(),
+                )
+            })
             .collect();
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.point(k, RetirementStep::Evict);
@@ -457,7 +485,7 @@ impl RetirementBatch {
         self.point(k, RetirementStep::Remove);
         let mut confirmed_bytes = 0u64;
         if !resources_held && disposition != Disposition::Keep {
-            for (id, retained, release) in scratch {
+            for (id, retained, release, staging) in scratch {
                 let directory = id.directory(owner.directory());
                 #[cfg(any(test, feature = "storage-test-hooks"))]
                 if let Some(observer) = &self.observer {
@@ -522,7 +550,11 @@ impl RetirementBatch {
                     // R11: child-created files are outside the budget, so the
                     // walker's byte total is deliberately not the release size,
                     // and nothing beyond the reservation's commit is released.
-                    let bytes = retained.load(Ordering::Acquire).min(release.committed());
+                    let bytes = retained
+                        .load(Ordering::Acquire)
+                        .min(release.committed())
+                        .checked_add(staging.committed())
+                        .ok_or(AdmissionError::State)?;
                     confirmed_bytes = confirmed_bytes
                         .checked_add(bytes)
                         .ok_or(AdmissionError::State)?;
