@@ -15,6 +15,7 @@ pub struct ComposedUniverse {
     pub hooks: BTreeMap<String, ComposedStage>,
     pub selected: Option<ComposedTarget>,
     pub check: Option<Box<super::CheckConfig>>,
+    pub stress: Option<Box<super::StressConfig>>,
 }
 
 /// Inspection is always available. The executable capability is issued only
@@ -633,6 +634,7 @@ pub fn check(merged: &MergedConfig, selection: &Selection) -> CheckReport {
         check: super::judging::validate(&mut validator, selection),
         ..ComposedUniverse::default()
     };
+    universe.stress = super::stress::validate(&mut validator, selection, universe.check.as_deref());
     if let Some(languages) = merged.languages() {
         for name in languages.keys() {
             let language = merged.language(name).expect("language map member");

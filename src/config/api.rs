@@ -694,6 +694,11 @@ impl LoadedConfig {
         Ok(self.report.universe().check.as_deref())
     }
 
+    pub fn stress(&self) -> Result<Option<&super::StressConfig>, ConfigErrors> {
+        self.clean()?;
+        Ok(self.report.universe().stress.as_deref())
+    }
+
     /// Validated literal file names, with the problem-layer declaration's
     /// provenance. Execution consumers apply these only to test solutions.
     pub fn file_io(&self) -> Result<Option<Sourced<crate::report::FileIo>>, ConfigErrors> {
@@ -912,6 +917,7 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
                 file: origin.file.clone(),
                 state: LayerState::Invalid(origin.clone()),
                 problem_check: None,
+                problem_stress: None,
                 problem_kind: None,
                 diagnostics: vec![Diagnostic {
                     severity: Severity::Error,
@@ -955,6 +961,17 @@ pub fn load_config(request: &ConfigRequest) -> LoadedConfig {
             &request.environment,
             request.platform,
         ));
+    }
+    if !matches!(
+        request.operation,
+        Operation::Stress | Operation::Check | Operation::Inspect
+    ) {
+        for layer in &mut layers {
+            layer.problem_stress = None;
+            layer.diagnostics.retain(|d| {
+                d.origin.key_path != "stress" && !d.origin.key_path.starts_with("stress.")
+            });
+        }
     }
     let hook_settings = raw_hook_settings(&layers, request.config_path.is_some());
     let merged = compose(&layers, request.platform);

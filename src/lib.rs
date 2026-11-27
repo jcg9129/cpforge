@@ -59,19 +59,9 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
     if let Some(command) = cli.command.as_ref() {
         let unavailable = match command {
             Command::Fetch(_) => Some("fetch"),
-            Command::Stress(args) => {
-                if args.command.is_none() {
-                    config_commands::stress_preflight(
-                        cli.problem.as_deref(),
-                        cli.config.clone(),
-                        args.profile.clone(),
-                    )?;
-                }
-                Some(if args.command.is_some() {
-                    "stress ls"
-                } else {
-                    "stress"
-                })
+            Command::Stress(args) if args.command.is_some() => Some("stress ls"),
+            Command::Stress(args) if args.replay.is_some() || args.replay_binaries.is_some() => {
+                Some("stress")
             }
             Command::InteractorTest { .. } => Some("interactor-test"),
             Command::SubmitPrep(_) => Some("submit-prep"),
@@ -148,6 +138,16 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
                 cli.problem.as_deref(),
                 profile,
                 transport::MachineArgs::default(),
+                cli.config,
+            );
+        }
+        Some(Command::Stress(args)) => {
+            let command = job_command::StressSearch::new(&args);
+            return job_command::run_with_config(
+                &command,
+                cli.problem.as_deref(),
+                args.profile,
+                args.machine,
                 cli.config,
             );
         }
@@ -240,7 +240,7 @@ pub fn run(cli: Cli) -> Result<exit::ExitCode, Error> {
             .map(|()| exit::ExitCode::Success);
         }
         None => {}
-        // Unfinished surfaces returned above; stress first checks its I/O declaration.
+        // Unfinished surfaces returned above.
         Some(_) => unreachable!("unfinished command dispatched above"),
     }
     let help = Cli::command().render_help().to_string();

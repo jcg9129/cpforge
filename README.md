@@ -12,8 +12,10 @@ Early development. The process supervisor, connected runs, the job engine
 and the workspace commands (`init`, `add`, `build`, `test`, `run`, `cmd`,
 `status`, `clean` and others) are implemented and tested in CI on Linux and
 macOS. On Windows the CLI builds, but commands that start processes refuse
-until a Windows supervisor exists. Checkers, validators, interactive judging,
-fetching and stress testing are not available yet.
+until a Windows supervisor exists. Batch stress searches reuse checkers and
+validators, build each role once, and keep failures in the job's iteration
+directories. Saved failures, stress replay, interactive judging and fetching
+are not available yet.
 
 CI runs on Linux, macOS and Windows. The supervisor runs the user's own
 programs; it is not a security sandbox. See the [roadmap](ROADMAP.md) for

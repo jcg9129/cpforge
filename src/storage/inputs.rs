@@ -15,7 +15,7 @@ use crate::config::ProblemPath;
 use crate::tests_store::{FreezeError, FrozenManifest, TestId, TestStore};
 
 pub(crate) mod roles;
-mod sources;
+pub(crate) mod sources;
 pub use roles::{CapturedRole, FrozenJudging};
 pub(crate) use sources::current_source_files;
 pub use sources::{

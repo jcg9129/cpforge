@@ -198,6 +198,13 @@ fn help_lists_all_commands_and_each_command_has_help() {
 #[test]
 fn unfinished_forms_refuse_and_invalid_flags_are_clap_usage_errors() {
     for mut args in forms() {
+        if args[0] == "stress"
+            && !args.contains(&"--replay")
+            && !args.contains(&"--replay-binaries")
+            && !args.contains(&"ls")
+        {
+            continue;
+        }
         let output = cpf(&args);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty());

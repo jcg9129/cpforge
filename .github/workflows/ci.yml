@@ -149,3 +149,9 @@ jobs:
       - name: Record stalled stress delivery and warnings
         timeout-minutes: 25
         run: cargo test --workspace --lib --all-features --locked r_s0 -- --ignored --test-threads=1 --nocapture
+      - name: Record the real batch stress plateau
+        timeout-minutes: 15
+        run: cargo test --workspace --lib --all-features --locked st_r16_real_batch -- --ignored --test-threads=1 --nocapture
+      - name: Record real stress results with blocked stderr
+        timeout-minutes: 15
+        run: cargo test --workspace --lib --all-features --locked st_r17_real_stress -- --ignored --test-threads=1 --nocapture

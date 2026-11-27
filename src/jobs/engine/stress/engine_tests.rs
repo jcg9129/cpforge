@@ -1568,19 +1568,19 @@ fn r_s07_stress_results_survive_stalled_stderr_in_contract_order() {
         return;
     }
     run_test(move || async move {
-        human_delivery(false).await;
+        human_delivery(false, 10_000).await;
     });
 }
 
-async fn human_delivery(real: bool) {
+async fn human_delivery(real: bool, iterations: u64) {
     let f = Fixture::new();
     let ready = ready(&f, "python", 0, &Tools);
     let budget = ready.budget.clone();
-    let req = request(&ready, 10_000, true);
+    let req = request(&ready, iterations, true);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let req = if real {
         StressRequest {
-            templates: shell_templates(&ready),
+            templates: shell_templates(&ready).map(Recipe::Resolved),
             ..req
         }
     } else {
@@ -1595,9 +1595,9 @@ async fn human_delivery(real: bool) {
     let report = engine
         .run(executor.as_mut(), &mut persistence, &mut NoHooks)
         .await;
-    assert_eq!(stress(&report).counters.retired, 10_000);
+    assert_eq!(stress(&report).counters.retired, iterations);
     assert_eq!(stress(&report).counters.classes[5], 3);
-    assert_eq!(stress(&report).counters.runs_started, 50_000);
+    assert_eq!(stress(&report).counters.runs_started, iterations * 5);
     assert_eq!(report.data().details.pre_delivery_exit.code, 1);
     assert_eq!(stress(&report).failures.len(), 3);
     let dropped = report
@@ -1619,7 +1619,7 @@ async fn human_delivery(real: bool) {
     assert!(lines[7].starts_with("candidate_failure:"));
     for (role, line) in BatchRole::ALL.into_iter().zip(&lines[8..13]) {
         assert!(line.starts_with(&format!(
-            "{}: 10000 runs, wall min/max/total ",
+            "{}: {iterations} runs, wall min/max/total ",
             role.token()
         )));
     }
@@ -1638,14 +1638,17 @@ async fn human_delivery(real: bool) {
     let output = writer.finish(&final_lines);
     let actual: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
     let mut expected = vec!["startup diagnostic".to_owned()];
-    assert!(actual[1].starts_with("10000 iterations from seed 19 in "));
+    assert!(actual[1].starts_with(&format!("{iterations} iterations from seed 19 in ")));
     let mut expected_lines = lines.clone();
     expected_lines[0] = actual[1].to_owned(); // elapsed is rendered before F
     expected.extend(expected_lines);
     expected.extend(final_lines);
     assert_eq!(actual, expected);
-    assert_eq!(lines[1], "stress stop: iterations at 10000");
-    assert!(lines[2].starts_with("passed: 9997, first iteration 0 seed 19"));
+    assert_eq!(lines[1], format!("stress stop: iterations at {iterations}"));
+    assert!(lines[2].starts_with(&format!(
+        "passed: {}, first iteration 0 seed 19",
+        iterations - 3
+    )));
     assert!(lines[3].starts_with("candidate_failure: 3, first iteration 3 seed 22"));
     for line in &lines[4..7] {
         assert!(line.starts_with("not saved: candidate_failure checker wrong_answer"));
@@ -1712,7 +1715,7 @@ fn r_s07_real_stress_results_survive_stalled_stderr() {
         return;
     }
     run_test(move || async move {
-        human_delivery(true).await;
+        human_delivery(true, 10_000).await;
     });
 }
 
@@ -1738,5 +1741,140 @@ fn candidate_cleanup_unverified_is_folded_once_across_iterations() {
         assert_eq!(value["warnings"][0]["kind"], "cleanup_unverified");
         assert_eq!(value["warnings"][0]["runs"], 100);
         assert_eq!(value["warnings_dropped"], 0);
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "two thousand real iterations and blocked stderr; dedicated stress CI step"]
+fn st_r17_real_stress_results_survive_stalled_stderr() {
+    if !isolated("st_r17_real_stress_results_survive_stalled_stderr", true) {
+        return;
+    }
+    run_test(move || async move {
+        human_delivery(true, 2_000).await;
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "six thousand native processes and exact OS samples; dedicated stress CI step"]
+fn st_r16_real_batch_plateau_two_thousand_iterations() {
+    if !isolated("st_r16_real_batch_plateau_two_thousand_iterations", true) {
+        return;
+    }
+    run_test(move || async move {
+        supervisor::init_process().unwrap();
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let PlannedTarget::BuildFree(free) = &ready.planned_target else {
+            panic!("build-free fixture")
+        };
+        let mut stage = free.run(ready.dir.join("template").join("cwd")).unwrap();
+        let crate::exec::ResolvedCommand::Argv { program, args } = &mut stage.command else {
+            panic!("argv fixture")
+        };
+        program.path = PathBuf::from("/bin/sh");
+        program.record.chosen_path = program.path.clone();
+        program.record.request = crate::exec::ProgramRequest::Path(program.path.clone());
+        *args = vec!["-c".into(), ":".into(), "cpf".into()];
+        stage.stdout.bytes.value = 4096;
+        stage.stderr.bytes.value = 1024;
+        let template = || RunTemplate::new(Box::new(stage.clone()), 4096, 1024).unwrap();
+        let req = StressRequest::new(
+            BatchTemplates::new(template(), None, Some(template()), template(), None).unwrap(),
+            Schedule::Search {
+                start_seed: 0,
+                budget: SearchBudget {
+                    iterations: 2_000,
+                    time: Duration::from_secs(24 * 60 * 60),
+                },
+                keep_going: false,
+            },
+            Comparator::Exact,
+        );
+        let budget = ready.budget.clone();
+        let directory = ready.dir.clone();
+        let samples = Arc::new(Mutex::new(Vec::<PlateauSample>::new()));
+        let observed = samples.clone();
+        let accounting = budget.clone();
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let mut executor = SupervisorExecutor::start().unwrap();
+        let engine = Engine::stress(ready, req).unwrap().observe(move |point| {
+            if let Point::StressRetired { iteration, debug } = point {
+                assert_eq!(debug, RetirementDebug::default());
+                let resources = supervisor::debug_counters();
+                assert_eq!(resources.slots_in_use, 0);
+                assert_eq!(resources.credits_in_use, 3);
+                assert_eq!(resources.service_pending, 0);
+                assert_eq!(resources.transferred_workers, 0);
+                if (iteration + 1) % 500 == 0 {
+                    let files = tree_size(&directory);
+                    let usage = accounting.usage();
+                    assert_eq!(usage.reserved, 2 * STRESS_REPORT_BOUND as u64);
+                    let process = supervisor::process_sample();
+                    let mut samples = observed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(first) = samples.first() {
+                        assert_eq!(files, first.files);
+                        assert_eq!(usage.retained, first.retained);
+                        assert_eq!(process.threads, first.process.threads);
+                        assert_eq!(process.descriptors, first.process.descriptors);
+                        assert!(process.resident <= first.process.resident + (32 << 20));
+                    }
+                    samples.push(PlateauSample {
+                        files,
+                        retained: usage.retained,
+                        process,
+                        threads: String::new(),
+                    });
+                }
+            }
+        });
+        let report = engine
+            .run(&mut executor, &mut persistence, &mut NoHooks)
+            .await;
+        assert_eq!(samples.lock().unwrap().len(), 4);
+        assert_eq!(stress(&report).counters.retired, 2_000);
+        assert_eq!(stress(&report).counters.runs_started, 6_000);
+        assert_eq!(report.data().details.pre_delivery_exit.code, 0);
+        wire(&report);
+        drop((report, persistence, executor));
+        released_budget(&budget).await;
+    });
+}
+
+#[test]
+fn unavailable_saving_keeps_complete_failure_directories() {
+    run_test(move || async move {
+        let f = Fixture::new();
+        let ready = ready(&f, "python", 0, &Tools);
+        let budget = ready.budget.clone();
+        let directory = ready.dir.clone();
+        let req = request(&ready, 1, false);
+        let mut persistence = JobPersistence::new(&ready).unwrap();
+        let mut executor = Script {
+            fail: Some(id(0, BatchRole::Candidate)),
+            ..Default::default()
+        };
+        let report = Engine::stress(ready, req)
+            .unwrap()
+            .run_stress(&mut executor, &mut persistence, &mut KeepFailures)
+            .await;
+        assert_eq!(stress(&report).counters.saved, 0);
+        assert_eq!(stress(&report).counters.not_saved, 1);
+        assert!(stress(&report).failures.is_empty());
+        assert_eq!(report.data().details.pre_delivery_exit.code, 1);
+        for role in [BatchRole::Generator, BatchRole::Brute, BatchRole::Candidate] {
+            let run = id(0, role).directory(&directory);
+            for file in ["spec.json", "record.json", "cleanup.log"] {
+                assert!(run.join(file).is_file());
+            }
+            assert!(run.join("out").join("stdout").is_file());
+        }
+        wire(&report);
+        drop((report, persistence, executor));
+        released_budget(&budget).await;
     });
 }

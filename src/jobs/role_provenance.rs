@@ -55,7 +55,11 @@ pub(super) fn snapshot(role: &CapturedRole, check: &CaptureCheck) -> io::Result<
     };
     Ok(RoleReport {
         role: role.role,
-        profile: Some(role.spec.profile.value),
+        profile: (!matches!(
+            role.role,
+            crate::report::RoleName::Generator | crate::report::RoleName::Brute
+        ))
+        .then_some(role.spec.profile.value),
         origin,
         build: None,
         capture: RoleCapture {

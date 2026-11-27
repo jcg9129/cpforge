@@ -388,7 +388,7 @@ pub struct StressArgs {
     pub replay_binaries: Option<String>,
     #[arg(long, value_parser = seed, conflicts_with_all = ["replay", "replay_binaries"])]
     pub seed: Option<u64>,
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..), conflicts_with_all = ["replay", "replay_binaries"])]
+    #[arg(long, value_parser = iteration_budget, conflicts_with_all = ["replay", "replay_binaries"])]
     pub iterations: Option<u64>,
     #[arg(long, value_parser = duration, conflicts_with_all = ["replay", "replay_binaries"])]
     pub time: Option<String>,
@@ -523,6 +523,16 @@ fn seed(value: &str) -> Result<u64, String> {
         return Err("expected a decimal u64 without a sign or leading zeroes".into());
     }
     value.parse().map_err(|_| "seed exceeds u64::MAX".into())
+}
+fn iteration_budget(value: &str) -> Result<u64, String> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("expected a positive decimal u64".into());
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n != 0)
+        .ok_or_else(|| "iteration budget must be in 1..=u64::MAX".into())
 }
 fn failure_id(value: &str) -> Result<String, String> {
     let parts: Vec<_> = value.split('-').collect();

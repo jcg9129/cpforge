@@ -215,6 +215,12 @@ pub enum NotSavedReason {
 /// moved judge files must also be deducted with `staging_release.moved`.
 /// Cancellation never interrupts a promotion already in progress.
 pub trait RetirementHooks {
+    /// A command without failure promotion keeps the first twenty failures as
+    /// evidence. No wire reason is invented for an unavailable saver.
+    fn saving_available(&self) -> bool {
+        true
+    }
+
     fn promote<'a>(&'a mut self, _runs: &'a [RetirementRun]) -> JobFuture<'a, SaveOutcome> {
         Box::pin(async { SaveOutcome::NotSaved(NotSavedReason::Io) })
     }
@@ -232,6 +238,14 @@ pub trait RetirementHooks {
 #[derive(Debug, Default)]
 pub struct NoRetirementHooks;
 impl RetirementHooks for NoRetirementHooks {}
+
+#[derive(Debug, Default)]
+pub struct KeepFailures;
+impl RetirementHooks for KeepFailures {
+    fn saving_available(&self) -> bool {
+        false
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SaveOutcome {
@@ -435,7 +449,8 @@ impl RetirementBatch {
         let resources_held = cleanup_failed.failed();
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.point(k, RetirementStep::Promote);
-        let saved = if disposition == Disposition::Save {
+        let keep_unsaved = disposition == Disposition::Save && !hooks.saving_available();
+        let saved = if disposition == Disposition::Save && !keep_unsaved {
             Some(if resources_held {
                 SaveOutcome::NotSaved(NotSavedReason::ResourcesHeld)
             } else {
@@ -489,7 +504,7 @@ impl RetirementBatch {
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.point(k, RetirementStep::Remove);
         let mut confirmed_bytes = 0u64;
-        if !resources_held && disposition != Disposition::Keep {
+        if !resources_held && disposition != Disposition::Keep && !keep_unsaved {
             for (id, retained, release, staging) in scratch {
                 let directory = id.directory(owner.directory());
                 #[cfg(any(test, feature = "storage-test-hooks"))]
@@ -571,7 +586,14 @@ impl RetirementBatch {
         budget
             .release_retained(confirmed_bytes)
             .map_err(|_| AdmissionError::State)?;
-        lease.complete(saved.map(SaveOutcome::result), cleanup_failed.failed())?;
+        lease.complete(
+            if keep_unsaved {
+                Some(SaveResult::NotSaved)
+            } else {
+                saved.map(SaveOutcome::result)
+            },
+            cleanup_failed.failed(),
+        )?;
         #[cfg(any(test, feature = "storage-test-hooks"))]
         {
             self.probe

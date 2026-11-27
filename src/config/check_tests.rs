@@ -1184,6 +1184,7 @@ fn unreadable_input_suppresses_references_but_independent_errors_continue() {
         file: "user.toml".into(),
         state: LayerState::Invalid(origin.clone()),
         problem_check: None,
+        problem_stress: None,
         problem_kind: None,
         diagnostics: vec![Diagnostic {
             severity: Severity::Error,
@@ -1491,6 +1492,7 @@ fn unreadable_problem_file_leaves_the_target_unresolved() {
         file: "problem.toml".into(),
         state: LayerState::Invalid(origin.clone()),
         problem_check: None,
+        problem_stress: None,
         problem_kind: None,
         diagnostics: vec![Diagnostic {
             severity: Severity::Error,

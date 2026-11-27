@@ -150,7 +150,7 @@ impl CheckConfig {
     }
 }
 
-fn sourced<T>(n: &EffectiveNode, value: T) -> Sourced<T> {
+pub(super) fn sourced<T>(n: &EffectiveNode, value: T) -> Sourced<T> {
     Sourced {
         value,
         origin: n.origin.clone(),
@@ -172,7 +172,7 @@ fn paths(n: &EffectiveNode, key: &str) -> Vec<Sourced<String>> {
         .map(text)
         .collect()
 }
-fn millis(n: &EffectiveNode) -> Sourced<u64> {
+pub(super) fn millis(n: &EffectiveNode) -> Sourced<u64> {
     let Some(TypedValue::Milliseconds(value)) = n.typed else {
         unreachable!("validated duration")
     };
@@ -200,10 +200,10 @@ fn seed(n: &EffectiveNode) -> Sourced<SeedMode> {
         },
     )
 }
-fn clean(n: &EffectiveNode) -> bool {
+pub(super) fn clean(n: &EffectiveNode) -> bool {
     n.markers.is_empty()
 }
-fn error(
+pub(super) fn error(
     v: &mut Validator<'_>,
     n: &EffectiveNode,
     message: impl Into<String>,
@@ -211,7 +211,7 @@ fn error(
 ) {
     v.error(n.origin.clone(), message, other.map(|n| n.origin.clone()));
 }
-fn required(v: &mut Validator<'_>, n: &EffectiveNode, key: &str) {
+pub(super) fn required(v: &mut Validator<'_>, n: &EffectiveNode, key: &str) {
     if n.get(key).is_none()
         && !n.markers.iter().any(|m| {
             m.origin.key_path == format!("{}.{key}", n.origin.key_path)
@@ -234,7 +234,12 @@ fn default_node(key: &str, value: RawValue, typed: Option<TypedValue>) -> Effect
         stages::origin(key, "<built-in>"),
     )
 }
-fn insert_default(n: &mut EffectiveNode, key: &str, value: RawValue, typed: Option<TypedValue>) {
+pub(super) fn insert_default(
+    n: &mut EffectiveNode,
+    key: &str,
+    value: RawValue,
+    typed: Option<TypedValue>,
+) {
     if let EffectiveValue::Table(table) = &mut n.value {
         table
             .entry(key.into())
@@ -255,7 +260,7 @@ fn strings_default(n: &mut EffectiveNode, key: &str) {
         });
     }
 }
-fn role_defaults(n: &mut EffectiveNode, interactor: bool) {
+pub(super) fn role_defaults(n: &mut EffectiveNode, interactor: bool) {
     if n.get("program").is_none() {
         strings_default(n, "support_files");
     }
@@ -264,7 +269,7 @@ fn role_defaults(n: &mut EffectiveNode, interactor: bool) {
         insert_default(n, "seed", RawValue::String("none".into()), None);
     }
 }
-fn entry_default(n: &mut EffectiveNode, entries: &BTreeMap<String, EffectiveNode>) {
+pub(super) fn entry_default(n: &mut EffectiveNode, entries: &BTreeMap<String, EffectiveNode>) {
     if let Some(entry) = n
         .get("language")
         .and_then(EffectiveNode::string)
@@ -565,7 +570,7 @@ fn built_role(v: &mut Validator<'_>, n: &EffectiveNode) -> Option<BuiltRole> {
         run: target.run,
     })
 }
-fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<RoleSpec> {
+pub(super) fn role(v: &mut Validator<'_>, n: &EffectiveNode, interactor: bool) -> Option<RoleSpec> {
     let before = v.diagnostics.len();
     required(v, n, "profile");
     overlaps(v, n);

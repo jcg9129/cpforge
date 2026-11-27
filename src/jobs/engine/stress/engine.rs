@@ -14,7 +14,8 @@ use crate::report::{self as r, Coverage, RunClass};
 /// argument (stress §§3.1-3.2), so a generator template carries no seed.
 #[derive(Debug)]
 pub struct StressRequest {
-    pub templates: BatchTemplates<Box<ResolvedStage>>,
+    pub templates: BatchTemplates<Recipe>,
+    pub assets: [Vec<crate::jobs::roles::StagedFile>; 5],
     pub schedule: Schedule,
     pub clock: Box<dyn StressClock>,
     pub comparator: Comparator,
@@ -27,13 +28,47 @@ pub struct StressRequest {
 }
 
 impl StressRequest {
+    pub(crate) fn generated(
+        &self,
+    ) -> impl Iterator<Item = (Role, crate::exec::DeferredStage)> + '_ {
+        BatchRole::ALL.into_iter().filter_map(move |role| {
+            let template = self.templates.roles[role.index()].as_ref()?;
+            let Recipe::Deferred(stage) = &template.value else {
+                return None;
+            };
+            let producer = if role == BatchRole::Candidate {
+                Role::Build
+            } else {
+                Role::RoleBuild {
+                    role: match role {
+                        BatchRole::Generator => r::RoleName::Generator,
+                        BatchRole::Brute => r::RoleName::Brute,
+                        BatchRole::Validator => r::RoleName::Validator,
+                        BatchRole::Checker => r::RoleName::Checker,
+                        BatchRole::Candidate => unreachable!(),
+                    },
+                }
+            };
+            Some((producer, stage.as_ref().clone()))
+        })
+    }
+
     pub fn new(
         templates: BatchTemplates<Box<ResolvedStage>>,
         schedule: Schedule,
         comparator: Comparator,
     ) -> Self {
+        Self::planned(templates.map(Recipe::Resolved), schedule, comparator)
+    }
+
+    pub(crate) fn planned(
+        templates: BatchTemplates<Recipe>,
+        schedule: Schedule,
+        comparator: Comparator,
+    ) -> Self {
         Self {
             templates,
+            assets: Default::default(),
             schedule,
             comparator,
             clock: Box::<MonotonicClock>::default(),
@@ -51,6 +86,9 @@ impl StressRequest {
 #[derive(Debug)]
 pub(crate) struct IterationExecution {
     pub id: IterationRunId,
+    pub seed: u64,
+    pub validator_profile: r::JudgeProfile,
+    pub checker_profile: r::JudgeProfile,
     pub staged: Vec<crate::jobs::roles::StagedFile>,
     pub retirement: Option<RetirementRun>,
     pub finalized_at: tokio::time::Instant,
@@ -62,30 +100,38 @@ impl<'probe> Engine<'probe> {
         ready: impl Into<crate::jobs::ReadyExecutionJob<'probe>>,
         request: StressRequest,
     ) -> Result<Self, PlanError> {
+        Self::stress_with_cancellation(ready, request, CancelState::new())
+    }
+
+    pub fn stress_with_cancellation(
+        ready: impl Into<crate::jobs::ReadyExecutionJob<'probe>>,
+        request: StressRequest,
+        cancel: CancelState,
+    ) -> Result<Self, PlanError> {
         request
             .schedule
             .validate()
             .map_err(|_| PlanError::InvalidIteration)?;
         for template in request.templates.roles.iter().flatten() {
-            let stage = &template.value;
-            if stage
-                .stdout
-                .bytes
-                .value
-                .checked_add(stage.stderr.bytes.value)
-                != Some(template.capture_bound)
-            {
+            let bound = match &template.value {
+                Recipe::Resolved(stage) => stage
+                    .stdout
+                    .bytes
+                    .value
+                    .checked_add(stage.stderr.bytes.value),
+                Recipe::Deferred(stage) => stage.capture_bound(),
+                Recipe::TargetRun => None,
+            };
+            if bound != Some(template.capture_bound) {
                 return Err(PlanError::InvalidIteration);
             }
         }
-        let mut engine = Self::new(
+        let mut engine = Self::with_cancellation(
             ready,
-            JobRequest::Iterations {
-                kind: CommandKind::Cmd,
-                iterations: Vec::new(),
-                needs_build: true,
-                keep_going: true,
+            JobRequest::Test {
+                comparator: request.comparator.clone(),
             },
+            cancel,
         )?;
         engine.kind = r::JobKind::Stress;
         engine.comparator = Some(request.comparator.clone());
@@ -119,6 +165,7 @@ impl e::Context<'_> {
     ) -> Result<StressReport, AdmissionError> {
         let StressRequest {
             templates,
+            assets,
             schedule,
             clock,
             comparator,
@@ -212,7 +259,17 @@ impl e::Context<'_> {
                     ),
                 };
                 let directory = run.id.directory(self.dir);
-                let mut staged = Vec::new();
+                let mut staged: Vec<_> = assets[role.index()]
+                    .iter()
+                    .cloned()
+                    .map(|mut file| {
+                        file.destination = file
+                            .destination
+                            .components()
+                            .fold(directory.join("cwd"), |p, c| p.join(c));
+                        file
+                    })
+                    .collect();
                 let mut copy = |name: &str, source: Option<&(PathBuf, u64)>| {
                     staged.push(crate::jobs::roles::StagedFile {
                         source: source.map(|s| s.0.clone()),
@@ -234,28 +291,20 @@ impl e::Context<'_> {
                 } else {
                     None
                 };
-                let mut template = run.template;
-                if role == BatchRole::Generator {
-                    // Stress §3.2: `gen <seed>`, the decimal g_k appended as
-                    // the last argument after expansion, never expanded.
-                    match &mut template.command {
-                        crate::exec::ResolvedCommand::Argv { args, .. }
-                        | crate::exec::ResolvedCommand::Shell { args, .. } => {
-                            args.push(run.seed.to_string().into());
-                        }
-                    }
-                }
                 let plan = PlannedExecution {
                     index: role.index() as u32,
                     stage,
                     role: execution_role,
                     depends_on_build: false,
-                    recipe: Recipe::Resolved(template),
+                    recipe: run.template,
                     stdin,
                     test: None,
                 };
                 let mut iteration = Some(IterationExecution {
                     id: run.id,
+                    seed: run.seed,
+                    validator_profile,
+                    checker_profile,
                     staged,
                     retirement: None,
                     finalized_at,
@@ -332,12 +381,23 @@ impl e::Context<'_> {
                     };
                 }
                 if role == BatchRole::Brute && gate == RunGate::Continue && !has_checker {
-                    invalid_answer = read_output(&retirement.record).is_ok_and(|answer| {
-                        matches!(
-                            crate::compare::check(&comparator, &answer, Some(&answer), true),
-                            crate::compare::CheckOutcome::CheckerFailed(_)
-                        )
-                    });
+                    match read_output(&retirement.record) {
+                        Ok(answer) => {
+                            invalid_answer = matches!(
+                                crate::compare::check(&comparator, &answer, Some(&answer), true),
+                                crate::compare::CheckOutcome::CheckerFailed(_)
+                            )
+                        }
+                        Err(error) => {
+                            check = Some(r::CheckOutcome {
+                                kind: r::CheckKind::CheckError {
+                                    os_error: error.raw_os_error(),
+                                },
+                                diagnostic: false,
+                            });
+                            gate = RunGate::Decided;
+                        }
+                    }
                     if invalid_answer {
                         gate = RunGate::Decided;
                     }

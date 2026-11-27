@@ -1319,19 +1319,25 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
                 .problem_kind
                 .as_ref()
                 .map(|raw| Box::new(node_from_raw(raw, NodeKind::Other, ctx, "kind", 0)));
-            if let Some(raw) = &layer.problem_check {
-                let path = vec!["check".into()];
-                collect_markers(raw, NodeKind::Other, ctx, &path, true, &mut markers);
-                if let Some(tree) =
-                    compose_node(raw, NodeKind::Other, ctx, &path, "check", &mut order)
-                {
-                    if let EffectiveValue::Table(root) = &mut merged.root.value {
-                        root.insert("check".into(), tree.root);
+            for (name, raw) in [
+                ("check", &layer.problem_check),
+                ("stress", &layer.problem_stress),
+            ] {
+                if let Some(raw) = raw {
+                    let path = vec![name.into()];
+                    collect_markers(raw, NodeKind::Other, ctx, &path, true, &mut markers);
+                    if let Some(tree) =
+                        compose_node(raw, NodeKind::Other, ctx, &path, name, &mut order)
+                    {
+                        if let EffectiveValue::Table(root) = &mut merged.root.value {
+                            root.insert(name.into(), tree.root);
+                        }
+                        append_history(&mut merged.history, tree.history);
                     }
-                    append_history(&mut merged.history, tree.history);
                 }
             }
             super::judging::defaults(&mut merged.root);
+            super::stress::defaults(&mut merged.root);
         }
         match &layer.state {
             LayerState::Empty => {}
@@ -1376,6 +1382,7 @@ pub fn compose(layers: &[RawLayer], platform: Platform) -> MergedConfig {
     }
     annotate(&mut merged.root, &[], &merged.history, &markers);
     super::judging::inherit_entries(&mut merged.root);
+    super::stress::inherit_entries(&mut merged.root);
     MergedConfig {
         platform,
         root: merged.root,

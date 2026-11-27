@@ -121,6 +121,19 @@ pub struct BatchTemplates<T> {
 }
 
 impl<T> BatchTemplates<T> {
+    pub(crate) fn map<U>(self, mut f: impl FnMut(T) -> U) -> BatchTemplates<U> {
+        BatchTemplates {
+            roles: self.roles.map(|r| {
+                r.map(|r| RunTemplate {
+                    value: f(r.value),
+                    capture_bound: r.capture_bound,
+                })
+            }),
+            runs: self.runs,
+            captured_bytes: self.captured_bytes,
+        }
+    }
+
     pub fn new(
         generator: RunTemplate<T>,
         validator: Option<RunTemplate<T>>,

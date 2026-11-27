@@ -41,6 +41,8 @@ pub struct ReadyRole<'probe> {
     pub report: crate::report::RoleReport,
     pub build_stage: Option<Box<ResolvedStage>>,
     pub runs: Vec<JudgeRun>,
+    /// Stress jobs only: the role's frozen run recipe for iteration runs.
+    pub template: Option<Box<Resolution>>,
 }
 
 #[derive(Debug)]
@@ -51,6 +53,7 @@ pub struct ReadyJudging<'probe> {
     /// Held until eventual report publication; independent of run allowances.
     pub report_reservation: Reservation,
     pub judge_fingerprint: Option<[u8; 32]>,
+    pub fingerprints: Option<([u8; 32], [u8; 32])>,
 }
 
 pub(super) fn prepare_roles<'probe>(
@@ -60,7 +63,8 @@ pub(super) fn prepare_roles<'probe>(
     registered: &crate::storage::admission::RegisteredJob,
     inputs: &PrepareJobInputs<'probe>,
 ) -> Result<ReadyJudging<'probe>, ReadyError> {
-    let plan = plan::plan_test_job(
+    let stress = frozen.roles.iter().any(|r| r.role == RoleName::Generator);
+    let mut plan = plan::plan_test_job(
         target,
         Some(&frozen.check),
         manifest.entries().len(),
@@ -69,6 +73,25 @@ pub(super) fn prepare_roles<'probe>(
         &registered.dir,
     )
     .map_err(ReadyError::JudgingPlan)?;
+    for role in frozen
+        .roles
+        .iter()
+        .filter(|r| matches!(r.role, RoleName::Generator | RoleName::Brute))
+    {
+        if TargetPlan::for_role(&role.spec).build.is_some() {
+            let index = plan.executions.len();
+            plan.executions.push(plan::Execution {
+                index: index as u32,
+                stage: super::engine::Stage::Build,
+                role: ExecutionRole::RoleBuild(role.role),
+                test: None,
+                layout: plan::RunLayout::new(&registered.dir, index),
+            });
+        }
+    }
+    if stress {
+        plan.report_bytes = 2 * super::engine::stress::STRESS_REPORT_BOUND as u64;
+    }
     plan::validate_answer_presence(
         &frozen.check,
         manifest.entries().iter().map(|test| {
@@ -121,7 +144,17 @@ pub(super) fn prepare_roles<'probe>(
                     .find(|e| e.role == ExecutionRole::Judge(captured.role))
             })
             .map_or_else(
-                || registered.dir.join("role").join("cwd"),
+                || {
+                    if stress {
+                        registered
+                            .dir
+                            .join("iterations")
+                            .join(format!("0.{}", captured.role.wire_token()))
+                            .join("cwd")
+                    } else {
+                        registered.dir.join("role").join("cwd")
+                    }
+                },
                 |e| e.layout.cwd.clone(),
             );
         let dirs = |cwd| InvocationDirs {
@@ -252,6 +285,21 @@ pub(super) fn prepare_roles<'probe>(
                 staged,
             });
         }
+        // Test jobs plan only per-test judge runs; never resolve an extra stage.
+        let template = if stress {
+            Some(Box::new(resolve_template(
+                &role_target,
+                &preflight.command_bindings(),
+                registered
+                    .dir
+                    .join("iterations")
+                    .join(format!("0.{}", captured.role.wire_token()))
+                    .join("cwd"),
+                inputs,
+            )?))
+        } else {
+            None
+        };
         let report = super::role_provenance::snapshot(&captured, &capture_check)
             .map_err(|e| ReadyError::Judging(e.to_string()))?;
         let pending_build = match preflight.into_planned(outputs, inputs.build_bytes, inputs.probe)
@@ -267,6 +315,7 @@ pub(super) fn prepare_roles<'probe>(
             report,
             build_stage,
             runs,
+            template,
         });
     }
     let judge_fingerprint =
@@ -277,6 +326,7 @@ pub(super) fn prepare_roles<'probe>(
         roles,
         report_reservation,
         judge_fingerprint,
+        fingerprints: None,
     })
 }
 
@@ -292,10 +342,33 @@ fn fingerprint(
             RoleName::Checker => 0,
             RoleName::Validator => 1,
             RoleName::Interactor => 2,
-            _ => unreachable!("judging role"),
+            _ => continue,
         };
         copies[index] = role.captured.files.files().iter().collect();
         slots[index] = Some(JudgeFingerprintRole::from_spec(&role.captured.spec));
     }
     judge_fingerprint_from_copies(&check.report_config(), &slots, &copies)
+}
+
+/// Frozen run recipe; generated programs remain deferred until their producer succeeds.
+pub(super) fn resolve_template(
+    target: &TargetPlan,
+    bindings: &crate::exec::TargetBindings,
+    cwd: PathBuf,
+    inputs: &PrepareJobInputs<'_>,
+) -> Result<Resolution, ReadyError> {
+    let ctx = Context::target_run(
+        target,
+        InvocationDirs {
+            run_cwd: cwd,
+            problem: Some(inputs.problem.clone()),
+            workspace: Some(inputs.workspace_root.clone()),
+        },
+        bindings.clone(),
+    )
+    .map_err(|e| ReadyError::Judging(e.to_string()))?;
+    let prepared = exec::prepare(&target.run, &ctx, &inputs.baseline, inputs.platform, &[])
+        .map_err(|e| ReadyError::Judging(e.to_string()))?;
+    exec::resolve(prepared, inputs.probe, inputs.platform)
+        .map_err(|e| ReadyError::Judging(e.to_string()))
 }

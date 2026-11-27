@@ -306,6 +306,22 @@ pub fn prepare_job<'probe>(
     };
     create(stage_dir)?;
     let cwd = create(&format!("{stage_dir}/cwd"))?;
+    // Stress run templates have one extra directory component. Check source
+    // operands at that depth without creating any iteration before admission.
+    let cwd = if target.build.is_none()
+        && frozen.judging().is_some_and(|j| {
+            j.roles
+                .iter()
+                .any(|r| r.role == crate::report::RoleName::Generator)
+        }) {
+        registered
+            .dir
+            .join("iterations")
+            .join("0.candidate")
+            .join("cwd")
+    } else {
+        cwd
+    };
     let area = BuildArea::new(create("builds")?).map_err(ReadyError::Storage)?;
     let outputs = if target.build.is_some() {
         let id = BuildId::new("r00000").expect("first build admission id");
@@ -358,10 +374,25 @@ pub fn prepare_job<'probe>(
     )
     .map_err(ReadyError::Guard)?;
     let (manifest, sources, frozen_judging) = frozen.into_parts();
-    let judging = frozen_judging
+    let mut judging = frozen_judging
         .map(|frozen| roles::prepare_roles(*frozen, &manifest, target, &registered, &inputs))
         .transpose()?
         .map(Box::new);
+    if let Some(judging) = judging.as_mut().filter(|j| {
+        j.roles
+            .iter()
+            .any(|r| r.captured.role == crate::report::RoleName::Generator)
+    }) {
+        use crate::storage::facts::fingerprint::{
+            SourceFile, source_fingerprint, tests_fingerprint,
+        };
+        let files: Vec<_> = sources.files().iter().map(SourceFile::from).collect();
+        judging.fingerprints = Some((
+            source_fingerprint(&files, target).map_err(|e| ReadyError::Judging(e.to_string()))?,
+            tests_fingerprint(manifest.entries())
+                .map_err(|e| ReadyError::Judging(e.to_string()))?,
+        ));
+    }
     let capture_roles = judging.as_ref().map_or_else(Vec::new, |judging| {
         judging
             .roles

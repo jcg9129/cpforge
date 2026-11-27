@@ -303,13 +303,11 @@ fn interactive_and_stress_file_io_refuse_before_admission() {
         "config.io",
         "stress with file-based I/O is unsupported in this version",
     );
-    // Without `io`, and with only an unrelated configuration error, stress
-    // keeps its ordinary unfinished-surface refusal.
     for config in ["", "[config.run]\ncwd = 1\n"] {
         fixture.problem(config);
-        let output = fixture.run(&["stress"], 2);
+        let output = fixture.run(&["stress"], 7);
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("cpf stress: not available yet"),
+            String::from_utf8_lossy(&output.stderr).contains("stress.generator"),
             "{output:?}"
         );
     }

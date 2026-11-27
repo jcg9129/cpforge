@@ -44,13 +44,21 @@ use crate::storage::prune::PrunePolicy;
 use crate::tests_store::TestStore;
 use crate::transport::{self, Delivery, MachineArgs, MachineMode};
 
+mod stress;
 mod warnings;
+pub(crate) use stress::StressSearch;
 
 /// Command-specific policy, evaluated before job registration. Test selection
 /// must return stable catalog ids; the shared pipeline freezes that exact list.
 pub trait JobCommand {
     fn kind(&self) -> JobKind;
     fn operation(&self) -> Operation;
+    fn stress_schedule(
+        &self,
+        _config: &LoadedConfig,
+    ) -> Result<Option<crate::jobs::engine::stress::Schedule>, Error> {
+        Ok(None)
+    }
     fn named(&self) -> Option<(&str, &[OsString])> {
         None
     }
@@ -591,6 +599,13 @@ pub fn run_with_config(
                 diagnostics.len() - 63
             ));
         }
+        if let Some(crate::jobs::engine::stress::Schedule::Search { start_seed, .. }) =
+            command.stress_schedule(&config)?
+        {
+            writer
+                .queue()
+                .result(&format!("stress start seed: {start_seed}"));
+        }
         progress = Some(writer);
         check_cancel(&cancel)?;
         let lock = WorkspaceLock::new(&root)?;
@@ -641,7 +656,21 @@ pub fn run_with_config(
                     .judging()
                     .map_err(|e| Error::Config(e.to_string()))?
                     .filter(|c| kind == JobKind::Test && c.has_roles());
-                let frozen = if let Some(check) = check {
+                let frozen = if kind == JobKind::Stress {
+                    registered.inputs().freeze_stress(
+                        &store,
+                        target,
+                        config
+                            .judging()
+                            .map_err(|e| Error::Config(e.to_string()))?
+                            .expect("stress judging defaults"),
+                        config
+                            .stress()
+                            .map_err(|e| Error::Config(e.to_string()))?
+                            .expect("validated stress"),
+                        &inputs.problem.dir,
+                    )
+                } else if let Some(check) = check {
                     registered.inputs().freeze_judged(
                         &store,
                         &tests,
@@ -678,6 +707,10 @@ pub fn run_with_config(
         // Judged jobs remove staged scratch before measuring each private cwd.
         ready.cwd_bytes = (kind == JobKind::Cmd || ready.judging.is_some() || file_io.is_some())
             .then_some(retention.cwd_bytes.value);
+        let stress_request = command
+            .stress_schedule(&config)?
+            .map(|schedule| stress::prepare_request(&ready, &config, schedule, &baseline))
+            .transpose()?;
         let request = if let Some(named) = &named {
             let bindings = ready.planned_target.as_ref().map(|p| p.command_bindings());
             let frozen: Vec<_> = ready
@@ -736,12 +769,16 @@ pub fn run_with_config(
         } else {
             Vec::new()
         };
-        let mut engine = Engine::with_cancellation(ready, request, cancel.clone())
-            .map_err(|e| Error::Config(e.to_string()))?
-            .file_io(file_io)
-            .map_err(|e| Error::Config(e.to_string()))?
-            .progress(progress.as_ref().expect("stderr writer").queue())
-            .output_events(mode.output_chunks());
+        let mut engine = if let Some(request) = stress_request {
+            Engine::stress_with_cancellation(ready, request, cancel.clone())
+        } else {
+            Engine::with_cancellation(ready, request, cancel.clone())
+        }
+        .map_err(|e| Error::Config(e.to_string()))?
+        .file_io(file_io)
+        .map_err(|e| Error::Config(e.to_string()))?
+        .progress(progress.as_ref().expect("stderr writer").queue())
+        .output_events(mode.output_chunks());
         if kind == JobKind::Test {
             if let Some(reason) = hook_reason {
                 engine = engine.disabled_hooks(
@@ -1045,6 +1082,14 @@ fn plan_invocation(
             "unsupported platform: build/test/run/cmd execution requires Linux or macOS".into(),
         ));
     }
+    command.stress_schedule(&config)?;
+    if command.kind() == JobKind::Stress {
+        stress::preflight_roles(
+            &config,
+            selected.as_ref().expect("stress selection"),
+            target.as_ref().expect("stress target"),
+        )?;
+    }
     let (tests, command_tests) = if let Some(named) = &named {
         let entries = if named.for_each_test.value {
             let selected = selected.as_ref().expect("test context");
@@ -1138,6 +1183,7 @@ fn plan_invocation(
             &baseline,
             &problem_binding(selected),
             retention.build_bytes.value,
+            (command.kind() == JobKind::Stress).then_some("candidate"),
         )?)
     } else {
         None
@@ -1433,18 +1479,21 @@ fn preflight(
     baseline: &Baseline,
     problem: &ProblemBinding,
     build_bytes: u64,
+    iteration_role: Option<&str>,
 ) -> Result<TargetBindings, Error> {
     // Same depth and spelling as a real job, without creating any storage.
     // The actual plan is checked again after capture; this is not a capability.
     let job = selected
         .root
         .join(".cpforge/runs/00000000000000000-0000000000000000");
-    let cwd = job.join(if target.build.is_some() {
-        "build/cwd"
+    let cwd = if target.build.is_some() {
+        job.join("build").join("cwd")
+    } else if let Some(role) = iteration_role {
+        job.join("iterations").join(format!("0.{role}")).join("cwd")
     } else {
-        "run/cwd"
-    });
-    let outputs = job.join("builds/r00000");
+        job.join("run").join("cwd")
+    };
+    let outputs = job.join("builds").join("r00000");
     let plan = build::preflight_target(
         target,
         PlanInputs {
@@ -1492,9 +1541,18 @@ fn execute(
     executor: &mut crate::jobs::engine::SupervisorExecutor,
     hooks: &mut dyn PhaseHooks,
 ) -> Result<Arc<FinalizedReport>, Error> {
+    let mut retirement = crate::jobs::engine::stress::KeepFailures;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let report = runtime.block_on(Box::pin(engine.run(executor, persistence, hooks)));
+        let report = if engine.kind() == JobKind::Stress {
+            runtime.block_on(Box::pin(engine.run_stress(
+                executor,
+                persistence,
+                &mut retirement,
+            )))
+        } else {
+            runtime.block_on(Box::pin(engine.run(executor, persistence, hooks)))
+        };
         #[cfg(feature = "storage-test-hooks")]
         if let Some(path) = std::env::var_os("CPF_STORAGE_PERSISTENCE_STATS") {
             let stats = persistence.stats();
@@ -1516,7 +1574,7 @@ fn execute(
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (engine, runtime, persistence, hooks);
+        let _ = (engine, runtime, persistence, hooks, &mut retirement);
         Err(Error::Infrastructure(
             "unsupported execution platform".into(),
         ))

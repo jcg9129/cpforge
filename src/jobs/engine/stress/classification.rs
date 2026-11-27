@@ -74,8 +74,10 @@ pub fn classify_batch(evidence: &BatchEvidence<'_>, cancelled: Option<BatchRole>
     let find = |role: BatchRole| evidence.runs.iter().find(|run| run.role == role);
     let check_role = if find(R::Checker).is_some() {
         R::Checker
-    } else {
+    } else if find(R::Candidate).is_some() {
         R::Candidate
+    } else {
+        R::Brute
     };
     // S1 precedes cancellation, even when a later run was never admitted.
     for run in evidence.runs {

@@ -509,6 +509,10 @@ impl<'probe> Engine<'probe> {
     pub fn plan(&self) -> &[PlannedExecution] {
         &self.plan
     }
+    pub fn kind(&self) -> JobKind {
+        self.kind
+    }
+
     pub fn cancellation(&self) -> CancelState {
         self.cancel.clone()
     }
@@ -695,13 +699,13 @@ impl<'probe> Engine<'probe> {
         // Reserve report + replacement temporary before admitting any run.
         let (planned_tests, planned_aggregates) =
             report_populations(kind, &plan, ready.manifest.entries().len());
-        let report_reservation = if kind == JobKind::Stress {
+        let report_reservation = if let Some(judging) = judging.take() {
+            Some(judging.report_reservation)
+        } else if kind == JobKind::Stress {
             ready
                 .budget
                 .reserve(2 * stress::STRESS_REPORT_BOUND as u64)
                 .ok()
-        } else if let Some(judging) = judging.take() {
-            Some(judging.report_reservation)
         } else {
             report::wire::report_reservation(
                 plan.len() + after_test.len(),
@@ -722,13 +726,16 @@ impl<'probe> Engine<'probe> {
             },
             cancel.token(),
         );
-        let generated: Vec<_> = plan
+        let mut generated: Vec<_> = plan
             .iter()
             .filter_map(|p| match &p.recipe {
                 Recipe::Deferred(stage) => Some((p.role.clone(), stage.as_ref().clone())),
                 _ => None,
             })
             .collect();
+        if let Some(request) = &stress {
+            generated.extend(request.generated());
+        }
         let judged = !details.roles.is_empty();
         let mut plan = plan.into_iter().peekable();
         while let Some(planned) = plan.next() {
@@ -841,17 +848,21 @@ impl<'probe> Engine<'probe> {
                     let consumers = generated
                         .iter()
                         .filter(|(role, _)| match (producer, role) {
+                            (Role::RoleBuild { role: a }, Role::RoleBuild { role: b }) => a == b,
                             (Role::RoleBuild { role: name }, Role::Checker { .. }) => {
                                 *name == report::RoleName::Checker
                             }
                             (Role::RoleBuild { role: name }, Role::Validator { .. }) => {
                                 *name == report::RoleName::Validator
                             }
+                            // A stress role's run template waits for its own
+                            // role build, never for the candidate's build.
                             (
                                 Role::Build,
                                 Role::Checker { .. }
                                 | Role::Validator { .. }
-                                | Role::Interactor { .. },
+                                | Role::Interactor { .. }
+                                | Role::RoleBuild { .. },
                             )
                             | (Role::RoleBuild { .. }, _) => false,
                             (Role::Build, _) => true,
@@ -1822,6 +1833,33 @@ impl Context<'_> {
             interrupted: false,
             scratch: None,
         });
+        if let (Some(iteration), Some(stage)) = (iteration.as_ref(), stage.as_mut()) {
+            use stress::BatchRole;
+            let args = match &mut stage.command {
+                crate::exec::ResolvedCommand::Argv { args, .. }
+                | crate::exec::ResolvedCommand::Shell { args, .. } => args,
+            };
+            let cwd = directory.join("cwd");
+            match iteration.id.role {
+                BatchRole::Generator => args.push(iteration.seed.to_string().into()),
+                BatchRole::Validator
+                    if iteration.validator_profile == report::JudgeProfile::Simple =>
+                {
+                    args.push(cwd.join("input").into())
+                }
+                BatchRole::Checker => {
+                    args.extend([
+                        cwd.join("input").into(),
+                        cwd.join("output").into(),
+                        cwd.join("answer").into(),
+                    ]);
+                    if iteration.checker_profile == report::JudgeProfile::Testlib {
+                        args.extend([cwd.join("report").into(), "-appes".into()]);
+                    }
+                }
+                _ => {}
+            }
+        }
         if plan.stage == Stage::Hook {
             if let Some(stage) = &mut stage {
                 let mut injected = vec![
@@ -2139,7 +2177,9 @@ impl Context<'_> {
         };
         let mut summary = None;
         // Extract judge evidence before removing staged scratch and measuring cwd.
-        let judge = if matches!(plan.role, Role::Checker { .. } | Role::Validator { .. }) {
+        let judge = if matches!(plan.role, Role::Checker { .. } | Role::Validator { .. })
+            || scratch.is_some()
+        {
             judge_files::finish(
                 self.owner.clone(),
                 record.clone(),
@@ -2671,7 +2711,7 @@ fn report_details(
         }),
         score: None,
         judge_fingerprint: ready.judging.as_ref().and_then(|j| j.judge_fingerprint),
-        fingerprints: None,
+        fingerprints: ready.judging.as_ref().and_then(|j| j.fingerprints),
         fact: (kind == JobKind::Test).then_some(Fact {
             outcome: FactOutcome::NotAttempted {
                 reason: "not_completed",

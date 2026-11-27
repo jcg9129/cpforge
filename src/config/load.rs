@@ -271,6 +271,7 @@ fn finish(
         file: source.file.clone(),
         state: LayerState::Empty,
         problem_check: None,
+        problem_stress: None,
         problem_kind: None,
         diagnostics: vec![],
     };
@@ -312,6 +313,12 @@ fn finish(
                     .and_then(|p| p.get("kind"))
                     .cloned()
                     .map(Box::new);
+                result.problem_stress = entries.remove("stress").map(Box::new);
+                if let Some(stress) = &mut result.problem_stress {
+                    let mut validator = super::validate::Validator::new(env, platform, source.kind);
+                    validator.record_table(stress, true);
+                    result.diagnostics.extend(validator.diagnostics);
+                }
                 result.problem_check = entries.remove("check").map(Box::new);
                 if let Some(check) = &mut result.problem_check {
                     let mut validator = super::validate::Validator::new(env, platform, source.kind);

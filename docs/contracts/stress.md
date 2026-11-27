@@ -882,7 +882,7 @@ report contract §9.
 | ST-R01 | generator printing its argv; `--seed 5 --iterations 4` | generator argv ends with `5`, `6`, `7`, `8` exactly, in order; report `seeds.start` `"5"` |
 | ST-R02 | `--seed 18446744073709551614 --iterations 2`; `--iterations 3` | the first admitted (seeds …614, …615); the second exit 7 before admission, no job directory |
 | ST-R03 | no `--seed` | a start seed in [0, 2⁶³ − 1] reported and printed; rerun with `--seed` of that value gives the same generator argv sequence |
-| ST-R04 | every role built from C++ sources | builds in §3.1 order, each exactly once per job (6 `executions[]`), none per iteration |
+| ST-R04 | every role built from C++ sources | builds in §3.1 order, each exactly once per job (one `executions[]` entry per built role: 5 for a batch problem with generator, validator, brute, candidate and checker), none per iteration |
 | ST-R05 | a generator syntax error | `build_failed`, status 3, no iteration admitted, stop `build_failed` |
 | ST-R06 | generator exits 1; dies by a signal; exceeds its stdout cap; times out | `generator_failure` with reason `nonzero_exit`, `signal`, `output_budget`, `wall_deadline`; the brute and candidate never started |
 | ST-R07 | `simple` validator exiting 1; `testlib` validator exiting 3 | `validator_failure`, `invalid_input` / `validation_failed`; status 5 |

@@ -172,6 +172,14 @@ pub struct DeferredStage {
 }
 
 impl DeferredStage {
+    pub(crate) fn capture_bound(&self) -> Option<u64> {
+        self.prepared
+            .stdout
+            .bytes
+            .value
+            .checked_add(self.prepared.stderr.bytes.value)
+    }
+
     /// Apply explicit-path resolution after successful production. Consumes
     /// the pending state and never reads the process environment.
     pub fn complete(self, probe: &dyn Probe) -> Result<ResolvedStage, ResolveErrors> {

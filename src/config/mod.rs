@@ -88,6 +88,7 @@ mod env;
 mod judging;
 mod load;
 mod stages;
+mod stress;
 pub(crate) mod syntax;
 mod validate;
 
@@ -120,6 +121,7 @@ pub use stages::{
     CapPolicy, ComposedStage, ComposedTarget, ContextRequirements, DeferredValue, Operation,
     PublishedLimit, Selection, StageHistory, StageKind, TargetSettings,
 };
+pub use stress::StressConfig;
 pub use syntax::{Placeholder, Token, tokenize};
 pub use validate::parse_deadline;
 pub use validate::surfaces::{
@@ -233,6 +235,7 @@ pub struct RawLayer {
     pub state: LayerState,
     /// Record-owned judging declarations, read only from local problem.toml.
     pub problem_check: Option<Box<RawNode>>,
+    pub problem_stress: Option<Box<RawNode>>,
     pub problem_kind: Option<Box<RawNode>>,
     pub diagnostics: Vec<Diagnostic>,
 }

@@ -131,39 +131,6 @@ fn request(
     })
 }
 
-/// Stress execution is unavailable, but a problem that declares `io` is
-/// refused with its configuration error (exit 7) before that surface refusal
-/// and before any admission. Every other outcome, including a missing
-/// workspace or an unrelated configuration error, falls through to the
-/// ordinary "not available yet" refusal.
-pub(crate) fn stress_preflight(
-    problem: Option<&str>,
-    config_path: Option<PathBuf>,
-    profile: Option<String>,
-) -> Result<(), Error> {
-    let Ok(Inputs { mut request, .. }) = request(problem, config_path, profile, false) else {
-        return Ok(());
-    };
-    if request.problem_file.is_none() {
-        return Ok(());
-    }
-    request.operation = config::Operation::Stress;
-    let loaded = config::load_config(&request);
-    let io_diagnostic = loaded.diagnostics().iter().any(|d| {
-        d.severity == config::Severity::Error
-            && (d.origin.key_path == "config.io" || d.origin.key_path.starts_with("config.io."))
-    });
-    if io_diagnostic {
-        return Err(Error::Config(
-            config::ConfigErrors {
-                diagnostics: loaded.diagnostics().to_vec(),
-            }
-            .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn run(
     command: ConfigCommand,
     problem: Option<&str>,
@@ -222,7 +189,7 @@ fn run_command(
     // Show inspects the selected target. Check (and doctor) additionally
     // validate every profile's run stage for the selected problem.
     if matches!(command, ConfigCommand::Show { .. }) {
-        request.operation = config::Operation::Other;
+        request.operation = config::Operation::Inspect;
     }
     let loaded = config::load_config(&request);
     let diagnostics = report_diagnostics(&loaded, &request, selection_diagnostic);

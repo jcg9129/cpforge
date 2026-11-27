@@ -169,6 +169,13 @@ fn capture_checked(
     Ok(CapturedSources { files })
 }
 
+pub(crate) fn validate_declarations(
+    files: &[CapturedSource],
+    problem_dir: &Path,
+) -> Result<(), CaptureError> {
+    open_sources(files, problem_dir).map(|_| ())
+}
+
 // Capture and status share declaration validation, including aliases and reserved
 // paths. Keeping every opened handle alive through preflight detects aliases.
 fn open_sources(

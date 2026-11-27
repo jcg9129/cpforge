@@ -30,7 +30,7 @@ pub(crate) fn declarations(check: &CheckConfig) -> impl Iterator<Item = (RoleNam
     .filter_map(|(name, spec)| spec.map(|spec| (name, spec)))
 }
 
-fn files(spec: &RoleSpec) -> Vec<CapturedSource> {
+pub(crate) fn files(spec: &RoleSpec) -> Vec<CapturedSource> {
     let mut files: Vec<_> = match &spec.input {
         RoleInput::Built(built) => built
             .sources
@@ -60,18 +60,51 @@ impl JobInputs<'_> {
         check: &CheckConfig,
         problem_dir: &Path,
     ) -> Result<FrozenInputs, FreezeInputsError> {
+        self.freeze_roles(store, ids, target, check, None, problem_dir)
+    }
+
+    pub(crate) fn freeze_stress(
+        &self,
+        store: &TestStore,
+        target: &crate::config::TargetPlan,
+        check: &CheckConfig,
+        stress: &crate::config::StressConfig,
+        problem_dir: &Path,
+    ) -> Result<FrozenInputs, FreezeInputsError> {
+        self.freeze_roles(store, &[], target, check, Some(stress), problem_dir)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Shared frozen declarations for test and stress jobs.
+    fn freeze_roles(
+        &self,
+        store: &TestStore,
+        ids: &[TestId],
+        target: &crate::config::TargetPlan,
+        check: &CheckConfig,
+        stress: Option<&crate::config::StressConfig>,
+        problem_dir: &Path,
+    ) -> Result<FrozenInputs, FreezeInputsError> {
         let mut frozen = self.freeze(
             store,
             ids,
             &CapturedSource::from_target(target),
             problem_dir,
         )?;
-        if !check.has_roles() {
+        if !check.has_roles() && stress.is_none() {
             return Ok(frozen);
         }
         let result = (|| {
             let mut roles = Vec::new();
-            for (role, spec) in declarations(check) {
+            let extra = stress
+                .into_iter()
+                .flat_map(|s| {
+                    [
+                        (RoleName::Generator, Some(s.generator.as_ref())),
+                        (RoleName::Brute, s.brute.as_deref()),
+                    ]
+                })
+                .filter_map(|(name, spec)| spec.map(|s| (name, s)));
+            for (role, spec) in declarations(check).chain(extra) {
                 let prefix = Path::new("roles").join(role.wire_token());
                 let captured = sources::capture_at(&files(spec), problem_dir, self, &prefix)?;
                 #[cfg(unix)]

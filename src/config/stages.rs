@@ -16,6 +16,7 @@ pub enum Operation {
     Check,
     Test,
     Stress,
+    Inspect,
     Run,
     Other,
 }
@@ -595,7 +596,12 @@ pub(super) fn target(
             .collect();
         if kind == StageKind::Run {
             if let Some(ms) = selection
-                .filter(|s| matches!(s.operation, Operation::Test | Operation::Run))
+                .filter(|s| {
+                    matches!(
+                        s.operation,
+                        Operation::Test | Operation::Run | Operation::Stress
+                    )
+                })
                 .and_then(|s| s.deadline_ms)
                 .filter(|ms| (1..=86_400_000).contains(ms))
             {
