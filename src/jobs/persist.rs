@@ -301,6 +301,33 @@ impl JobPersistence {
         (service, Box::pin(driver), writer)
     }
 
+    #[cfg(test)]
+    pub(crate) fn controlled_writer(
+        ready: &super::ReadyJob<'_>,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<scripted::WriteReturn>,
+    ) {
+        let service = Self::start_clock(
+            ready.owner.clone(),
+            DEADLINE,
+            None,
+            None,
+            Clock::controlled(),
+        )
+        .unwrap();
+        let (writer, events) = scripted::ScriptedWriter::new(false);
+        *service.script.lock().unwrap() = Some(writer);
+        (service, events)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn join_finished_writer(&mut self) -> bool {
+        self.worker
+            .as_mut()
+            .is_none_or(PersistenceWorker::resources_released)
+    }
+
     /// Reserves the worker's thread credit and creates the worker. Failure
     /// returns the credit; the job must not start (execution contract §3.3).
     pub fn new(ready: &super::ReadyJob<'_>) -> std::io::Result<Self> {

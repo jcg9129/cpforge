@@ -126,3 +126,26 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --no-fail-fast --locked
       - run: cargo test --workspace --doc --locked
+
+  # Long injected stress fixtures, each re-run in its own process so the
+  # whole-process samples are exact. ST-L22 runs weekly (plateau.yml).
+  stress-lifecycle:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --lib --all-features --locked --no-run
+      - name: Record the full batch stress plateau
+        timeout-minutes: 10
+        run: cargo test --workspace --lib --all-features --locked st_l06_batch_plateau -- --ignored --test-threads=1 --nocapture
+      - name: Record the full stress event lifecycle
+        timeout-minutes: 10
+        run: cargo test --workspace --lib --all-features --locked st_l16_engine_events -- --ignored --test-threads=1 --nocapture
+      - name: Record stalled stress delivery and warnings
+        timeout-minutes: 25
+        run: cargo test --workspace --lib --all-features --locked r_s0 -- --ignored --test-threads=1 --nocapture

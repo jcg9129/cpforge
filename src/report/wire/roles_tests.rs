@@ -577,3 +577,62 @@ fn judging_run_events_use_existing_envelopes_and_bounds() {
     assert_ne!(valid, mismatched);
     assert!(read::validate_run_started(mismatched.as_bytes()).is_err());
 }
+
+#[test]
+fn iteration_warning_vectors_and_maximal_identity_fit_the_warning_bound() {
+    let mut values = vec![
+        Warning {
+            kind: WarningKind::Retention {
+                detail: "cwd_overflow",
+                run: Some("10003.candidate".into()),
+                bytes: 4097,
+            },
+            message: "CwdOverflow: working directory exceeded its byte limit (4097 bytes)".into(),
+        },
+        Warning {
+            kind: WarningKind::JudgeScratch {
+                run: "10003.checker".into(),
+                detail: r::JudgeScratchDetail::StagedCopyKept,
+            },
+            message: "judge staged copies could not be removed".into(),
+        },
+        Warning {
+            kind: WarningKind::Persist {
+                artefact: "spec",
+                run: "10003.generator".into(),
+                error: crate::jobs::engine::PersistError::WorkerUnavailable,
+            },
+            message: "artefact publication failed".into(),
+        },
+        Warning {
+            kind: WarningKind::Persist {
+                artefact: "cleanup_log",
+                run: "18446744073709551615.candidate_interactor".into(),
+                error: crate::jobs::engine::PersistError::Io {
+                    os_error: Some(i32::MIN),
+                },
+            },
+            message: "\"".repeat(129),
+        },
+    ];
+    for warning in &values {
+        assert!(encode(&schema::warning(warning).unwrap()).len() <= 756);
+    }
+    assert_eq!(
+        encode(&array(&values, |w| schema::warning(w).unwrap())),
+        include_bytes!("fixtures/iteration_warnings.json")
+    );
+    for bad in [
+        "01.candidate",
+        "18446744073709551616.candidate",
+        "1.unknown",
+        "1.candidate.extra",
+        "r100000",
+    ] {
+        values[1].kind = WarningKind::JudgeScratch {
+            run: bad.into(),
+            detail: r::JudgeScratchDetail::StagedCopyKept,
+        };
+        assert!(schema::warning(&values[1]).is_err());
+    }
+}

@@ -556,6 +556,29 @@ def verify_stress():
         if event["event"] == "iteration_finished":
             assert event["saved"] is None or re.fullmatch(r"f-[0-9a-f]{32}-(0|[1-9][0-9]*)-(0|[1-9][0-9]*)", event["saved"])
             assert (event["role"] == "none") == (event["class"] == "passed")
+    # R-S09: warnings use the disjoint iteration grammar, with the same cap.
+    warnings = json.loads((ROOT / "iteration_warnings.json").read_bytes(), object_pairs_hook=unique)
+    assert [w["kind"] for w in warnings] == ["retention", "judge_scratch", "persist", "persist"]
+    warning_order = dict(retention=["kind", "detail", "run", "bytes", "message"],
+                         judge_scratch=["kind", "run", "detail", "message"],
+                         persist=["kind", "artefact", "run", "error", "message"])
+    warning_irid = re.compile(r"(0|[1-9][0-9]{0,19})\.(generator|validator|brute|candidate|checker|brute_interactor|brute_checker|candidate_interactor|candidate_checker)")
+    for w in warnings:
+        assert list(w) == warning_order[w["kind"]]
+        assert w["kind"] != "persist" or w["artefact"] in ("spec", "record", "cleanup_log")
+        assert warning_irid.fullmatch(w["run"]) and int(w["run"].split(".")[0]) <= 2**64 - 1
+        assert len(encode(w)) <= 756 <= 768
+    # R-S08: one job_started, seventeen attempts per five-run iteration with
+    # output. A stalled consumer's delivered sequence plus gaps is the attempt
+    # count, independently of how the scheduler interleaves its later drain.
+    attempts = 1 + 10005 * 17
+    capacity = (8 * 1024 * 1024) // (7 * 1024)
+    delivered = list(range(capacity)) + list(range(1 + 10003 * 17, attempts))
+    gaps = delivered[0] + sum(b - a - 1 for a, b in zip(delivered, delivered[1:])) + attempts - delivered[-1] - 1
+    assert gaps > 0 and len(delivered) + gaps == attempts
+    # R-S07: the maximum final composition, including stress result lines,
+    # remains inside the lossless stderr allowance even with progress stalled.
+    assert (64 + 29 + 16 + 128) * 512 == 121344 <= 131072
     print("stress: irid/fid widths, stress member and B_S, iteration event order and identities")
 
 

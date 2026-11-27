@@ -284,6 +284,18 @@ fn complete_build(
 /// resources to cleanup before returning when physical work remains. Futures
 /// need not be Send: a ready job's planning probe is thread-bound.
 pub trait Executor {
+    /// Process-free fixtures may finish judge scratch on their calling task.
+    #[cfg(test)]
+    fn inline_judge(&self) -> bool {
+        false
+    }
+
+    /// Controlled post-run measurement on platforms without a process backend.
+    #[cfg(test)]
+    fn cwd_overflow(&self, _run: &super::RunIdentity) -> Option<u64> {
+        None
+    }
+
     /// Fakes may prepare inline; the supervisor uses the job's creation thread.
     fn prepare_run(
         &mut self,

@@ -254,7 +254,7 @@ impl SaveOutcome {
 pub struct RetirementResult {
     pub saved: Option<SaveOutcome>,
     pub cleanup_failed: CleanupFailure,
-    /// Only save attempts return record refs. Other evidence has been evicted.
+    /// R8 results for warning folding; only save attempts keep these in the report.
     pub records: Vec<SettledRun>,
 }
 
@@ -455,7 +455,7 @@ impl RetirementBatch {
         } else {
             Vec::new()
         };
-        if disposition == Disposition::Save {
+        if matches!(disposition, Disposition::Save | Disposition::Keep) {
             for run in &self.runs {
                 if !settled.iter().any(|result| result.id == run.id) {
                     settled.push(SettledRun::unavailable(run.id, run.digest));
@@ -485,11 +485,7 @@ impl RetirementBatch {
             debug.records = 0;
             debug.specs = 0;
         }
-        let records = if disposition == Disposition::Save {
-            settled
-        } else {
-            Vec::new()
-        };
+        let records = settled;
         #[cfg(any(test, feature = "storage-test-hooks"))]
         self.point(k, RetirementStep::Remove);
         let mut confirmed_bytes = 0u64;

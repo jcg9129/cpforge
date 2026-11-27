@@ -70,3 +70,8 @@ pub(crate) mod file_io;
 #[cfg(all(test, feature = "storage-test-hooks", windows))]
 #[path = "file_io_stub.rs"]
 pub(crate) mod file_io;
+
+#[cfg(test)]
+mod process_sample;
+#[cfg(test)]
+pub(crate) use process_sample::{ProcessSample, process_sample};

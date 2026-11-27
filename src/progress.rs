@@ -421,6 +421,86 @@ impl Drop for ProgressWriter {
     }
 }
 
+/// Controlled stderr writer shared by portable full-engine fixtures.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct StalledWriter {
+    writer: ProgressWriter,
+    pub(crate) queue: ProgressQueue,
+    clock: Arc<TestClock>,
+    release: std::sync::mpsc::Sender<()>,
+    pub(crate) output: Arc<Mutex<Vec<u8>>>,
+}
+#[cfg(test)]
+#[derive(Debug)]
+struct TestClock(Mutex<Instant>);
+#[cfg(test)]
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        *self.0.lock().unwrap()
+    }
+}
+#[cfg(test)]
+impl StalledWriter {
+    pub(crate) fn new() -> Self {
+        #[derive(Debug)]
+        struct Sink {
+            entered: Option<std::sync::mpsc::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            output: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release
+                        .recv_timeout(Duration::from_secs(7200))
+                        .unwrap();
+                }
+                self.output.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let clock = Arc::new(TestClock(Mutex::new(Instant::now())));
+        let queue = ProgressQueue::with_clock(clock.clone(), 0);
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = ProgressWriter::with_queue(
+            Sink {
+                entered: Some(entered),
+                release: gate,
+                output: output.clone(),
+            },
+            queue.clone(),
+        )
+        .unwrap();
+        queue.result("startup diagnostic");
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        Self {
+            writer,
+            queue,
+            clock,
+            release,
+            output,
+        }
+    }
+    pub(crate) fn finish(mut self, lines: &[String]) -> Vec<u8> {
+        let tq = self.queue.enqueue_final(lines, Duration::from_secs(5));
+        // No results can drain while the first write is blocked: this is the
+        // peak, with the whole final batch queued inside the fixed allowance.
+        assert!(self.queue.0.state.lock().unwrap().result_bytes <= FINAL_BYTES);
+        *self.clock.0.lock().unwrap() += Duration::from_secs(1);
+        assert_eq!(self.clock.now().duration_since(tq), Duration::from_secs(1));
+        self.release.send(()).unwrap();
+        self.writer.wait().unwrap();
+        self.output.lock().unwrap().clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

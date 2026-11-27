@@ -437,6 +437,21 @@ pub(super) async fn finish(
         .is_some_and(|r| r.eligible(record.as_deref()));
     let bytes = scratch.as_ref().map_or(0, Scratch::bytes);
     let staged = scratch.as_ref().is_some_and(|s| !s.copies.is_empty());
+    #[cfg(test)]
+    if executor.inline_judge() {
+        let evidence = request.filter(|_| eligible).map(|r| r.extract());
+        let stderr = diagnostic(record.as_deref()).ok().flatten();
+        let mut scratch = scratch;
+        let kept_bytes = scratch.as_mut().map_or(0, Scratch::clear);
+        let kept = scratch.is_some_and(|s| s.copies.iter().any(|c| !c.removed));
+        return Finished {
+            evidence,
+            stderr,
+            kept_bytes,
+            kept,
+            cwd: Ok(()),
+        };
+    }
     let unfinished = |note| Finished {
         evidence: eligible.then(|| {
             Box::new(super::JudgeEvidence {

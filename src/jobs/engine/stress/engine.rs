@@ -115,6 +115,7 @@ impl e::Context<'_> {
         executor: &mut dyn Executor,
         persistence: &mut dyn Persistence,
         hooks: &mut dyn RetirementHooks,
+        details: &mut ReportDetails,
     ) -> Result<StressReport, AdmissionError> {
         let StressRequest {
             templates,
@@ -147,6 +148,7 @@ impl e::Context<'_> {
         }
         let mut report = StressReport::new(schedule);
         let mut progress_at = Instant::now();
+        let mut unverified = 0u32;
         // No directory or run of a later iteration is instantiated in advance.
         // mkdir of this fixed parent is safe even if admission stops at zero.
         let _ = std::fs::create_dir(self.dir.join("iterations"));
@@ -407,6 +409,12 @@ impl e::Context<'_> {
                     retention_refused: refused,
                 })?;
                 report.fold_run(role, &execution)?;
+                super::report::run_warnings(details, run.id, &execution);
+                if matches!(retirement.record.as_ref(), ExecutionRecord::Started(root)
+                    if matches!(root.termination.cleanup, crate::supervisor::Cleanup::Unverified { .. }))
+                {
+                    unverified = unverified.saturating_add(1);
+                }
                 // Judges already read their message and frozen stderr head.
                 let diagnostic = execution
                     .judge_evidence
@@ -494,6 +502,7 @@ impl e::Context<'_> {
                 .saved
                 .filter(|s| !matches!(s, SaveOutcome::NotSaved(_)))
                 .map(|_| id.clone());
+            super::report::persistence_warnings(details, &result.records);
             report.finish_iteration(id, seed, decision, result, &evidence);
             self.events.offer(EventPayload::IterationFinished {
                 iteration: k,
@@ -506,6 +515,15 @@ impl e::Context<'_> {
             // An injected executor may return only ready futures. Let event
             // consumers and cancellation producers run between retirements.
             tokio::task::yield_now().await;
+        }
+        if unverified != 0 {
+            e::warnings::push(
+                details,
+                WireWarning {
+                    kind: WarningKind::CleanupUnverified { runs: unverified },
+                    message: "cleanup not verified".into(),
+                },
+            );
         }
         report.counters = admission.counters();
         Ok(report)

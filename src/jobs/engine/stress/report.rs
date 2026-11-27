@@ -1,5 +1,6 @@
 //! Fixed-size aggregates; no history of passing iterations survives retirement.
 use super::*;
+use crate::jobs::engine::warnings::push as push_warning;
 use crate::jobs::engine::{ExecutionRecord, ExecutionReport};
 use crate::report::{self as r, JobVerdict};
 use crate::storage::job::Epoch;
@@ -331,6 +332,86 @@ impl StressReport {
                 JobVerdict::NoIterations
             } else {
                 JobVerdict::Passed
+            }
+        }
+    }
+}
+
+pub(super) fn run_warnings(
+    details: &mut crate::jobs::engine::ReportDetails,
+    id: IterationRunId,
+    run: &ExecutionReport,
+) {
+    use crate::jobs::engine::{WarningKind, WireWarning};
+    if let Some(bytes) = run.summary.as_ref().and_then(|s| s.cwd_overflow_bytes) {
+        push_warning(
+            details,
+            WireWarning {
+                kind: WarningKind::Retention {
+                    detail: "cwd_overflow",
+                    run: Some(id.to_string()),
+                    bytes,
+                },
+                message: format!(
+                    "CwdOverflow: working directory exceeded its byte limit ({bytes} bytes)"
+                ),
+            },
+        );
+    }
+    if run.judge_scratch_kept {
+        push_warning(
+            details,
+            WireWarning {
+                kind: WarningKind::JudgeScratch {
+                    run: id.to_string(),
+                    detail: r::JudgeScratchDetail::StagedCopyKept,
+                },
+                message: "judge staged copies could not be removed".into(),
+            },
+        );
+    }
+}
+
+pub(super) fn persistence_warnings(
+    details: &mut crate::jobs::engine::ReportDetails,
+    runs: &[SettledRun],
+) {
+    use crate::jobs::engine::{WarningKind, WireWarning};
+    for run in runs {
+        for (index, (artefact, reference)) in [
+            ("spec", &run.spec),
+            ("record", &run.record),
+            ("cleanup_log", &run.cleanup),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(error) = &reference.error {
+                push_warning(
+                    details,
+                    WireWarning {
+                        kind: WarningKind::Persist {
+                            artefact,
+                            run: run.id.to_string(),
+                            error: error.clone(),
+                        },
+                        message: "artefact publication failed".into(),
+                    },
+                );
+            }
+            for (present, detail) in [
+                (run.uncertain[index], "uncertain"),
+                (run.cleanup_pending[index], "cleanup_pending"),
+            ] {
+                if present {
+                    push_warning(
+                        details,
+                        WireWarning {
+                            kind: WarningKind::Durability { artefact, detail },
+                            message: "publication durability uncertain".into(),
+                        },
+                    );
+                }
             }
         }
     }

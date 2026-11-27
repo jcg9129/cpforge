@@ -99,3 +99,25 @@ pub(super) fn cleanup(executions: &[ExecutionReport]) -> Option<Warning> {
         .count();
     (runs != 0).then_some(Warning::CleanupUnverified { runs: runs as u32 })
 }
+
+/// Stress folds each occurrence before evicting its evidence. Never keep an
+/// unbounded warning history; F reserves the late-cancellation slot separately.
+pub(super) fn push(details: &mut super::ReportDetails, warning: super::WireWarning) {
+    if details.warnings.len() < 24 {
+        details.warnings.push(warning);
+    } else {
+        details.warnings_dropped = details.warnings_dropped.saturating_add(1);
+    }
+}
+
+/// Bring ordinary warnings into the same occurrence-ordered list for stress.
+/// Late cancellation is created only at F, after these nonterminal folds.
+pub(super) fn fold(details: &mut super::ReportDetails, warnings: &mut Vec<Warning>) {
+    for warning in warnings.drain(..) {
+        push(
+            details,
+            crate::report::wire::engine_warning(&warning, None)
+                .expect("ordinary warning without late cancellation"),
+        );
+    }
+}

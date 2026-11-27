@@ -700,7 +700,7 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
         WarningKind::JudgeScratch { run, detail } => (
             "judge_scratch",
             vec![
-                ("run", run_id(run)?),
+                ("run", warning_run_id(run)?),
                 ("detail", super::judging::serialized(detail)?),
             ],
         ),
@@ -740,7 +740,7 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
             "persist",
             vec![
                 ("artefact", token(artefact)?),
-                ("run", run_id(run)?),
+                ("run", warning_run_id(run)?),
                 ("error", persist(error, &v.message)),
             ],
         ),
@@ -755,7 +755,7 @@ pub(super) fn warning(v: &Warning) -> Result<Value> {
                 (
                     "run",
                     run.as_deref()
-                        .map(run_id)
+                        .map(warning_run_id)
                         .transpose()?
                         .unwrap_or(Value::Null),
                 ),
@@ -788,6 +788,34 @@ pub(super) fn run_id(v: &str) -> Result<Value> {
     }
     Ok(s(v))
 }
+// Iteration identities are permitted only in warnings, never in ordinary runs.
+fn warning_run_id(v: &str) -> Result<Value> {
+    if let Some((iteration, role)) = v.split_once('.') {
+        let valid_number = !iteration.is_empty()
+            && (iteration == "0" || !iteration.starts_with('0'))
+            && iteration.bytes().all(|b| b.is_ascii_digit())
+            && iteration.parse::<u64>().is_ok();
+        if valid_number
+            && matches!(
+                role,
+                "generator"
+                    | "validator"
+                    | "brute"
+                    | "candidate"
+                    | "checker"
+                    | "brute_interactor"
+                    | "brute_checker"
+                    | "candidate_interactor"
+                    | "candidate_checker"
+            )
+        {
+            return Ok(s(v));
+        }
+        return Err(Error("invalid iteration run id"));
+    }
+    run_id(v)
+}
+
 pub(crate) fn engine_warning(
     v: &e::Warning,
     cancellation: Option<e::Cancellation>,

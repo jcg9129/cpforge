@@ -603,6 +603,13 @@ impl<'probe> Engine<'probe> {
             });
         }
         details.hooks = disabled_hooks;
+        if kind == JobKind::Stress {
+            let early = std::mem::take(&mut details.warnings);
+            warnings::fold(&mut details, &mut warnings);
+            for warning in early {
+                warnings::push(&mut details, warning);
+            }
+        }
         let mut target = TargetState {
             pending: None,
             free: None,
@@ -1109,6 +1116,7 @@ impl<'probe> Engine<'probe> {
                 executor,
                 persistence,
                 retirement,
+                &mut details,
             ))
             .await
             {
@@ -1311,6 +1319,9 @@ impl<'probe> Engine<'probe> {
         if let Some(warning) = warnings::cleanup(&executions) {
             warnings.push(warning);
         }
+        if kind == JobKind::Stress {
+            warnings::fold(&mut details, &mut warnings);
+        }
         for execution in &executions {
             if let Some(bytes) = execution
                 .summary
@@ -1401,6 +1412,9 @@ impl<'probe> Engine<'probe> {
                 }
             };
         warnings.extend(settlement_warnings);
+        if kind == JobKind::Stress {
+            warnings::fold(&mut details, &mut warnings);
+        }
         cancel.lock().phase = CancelPhase::Closure;
         #[cfg(any(test, feature = "storage-test-hooks"))]
         context.phase_point(Point::Closure);
@@ -1429,7 +1443,9 @@ impl<'probe> Engine<'probe> {
         let counts = report::coverage_counts(&primary, &hook_results, &test_verdicts);
         details.hooks_dropped = details.hooks.len().saturating_sub(32) as u32;
         details.hooks.truncate(32);
-        details.warnings_dropped += details.warnings.len().saturating_sub(24) as u32;
+        details.warnings_dropped = details
+            .warnings_dropped
+            .saturating_add(details.warnings.len().saturating_sub(24) as u32);
         details.warnings.truncate(24);
 
         if let Some(target) = &mut details.target {
@@ -1455,10 +1471,14 @@ impl<'probe> Engine<'probe> {
             // Keep the earliest ordinary warnings in serialization order, reserving
             // the final slot only when late cancellation was actually recorded.
             let warning_slots = 24 - usize::from(late_cancellation);
-            details.warnings_dropped += warnings.len().saturating_sub(warning_slots) as u32;
+            details.warnings_dropped = details
+                .warnings_dropped
+                .saturating_add(warnings.len().saturating_sub(warning_slots) as u32);
             warnings.truncate(warning_slots);
             let detail_slots = warning_slots - warnings.len();
-            details.warnings_dropped += details.warnings.len().saturating_sub(detail_slots) as u32;
+            details.warnings_dropped = details
+                .warnings_dropped
+                .saturating_add(details.warnings.len().saturating_sub(detail_slots) as u32);
             details.warnings.truncate(detail_slots);
             if late_cancellation {
                 warnings.push(Warning::LateCancellation);
@@ -2206,6 +2226,11 @@ impl Context<'_> {
                     policies,
                 );
                 input.cwd_overflow_bytes = cwd_result.ok().flatten();
+                #[cfg(test)]
+                {
+                    input.cwd_overflow_bytes =
+                        executor.cwd_overflow(&run).or(input.cwd_overflow_bytes);
+                }
                 let mut notes = report::run_notes(&input);
                 if let Err(note) = cwd_result {
                     notes.push(note);

@@ -1,0 +1,31 @@
+name: Plateau
+
+# The million-iteration stress plateau (stress contract ST-L22) takes hours on
+# some runners, so it never gates a push or pull request.
+on:
+  schedule:
+    - cron: '23 4 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  million-iterations:
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --lib --all-features --locked --no-run
+      - name: Record the million iteration stress plateau
+        timeout-minutes: 330
+        run: cargo test --release --lib --all-features --locked st_l22_batch_plateau -- --ignored --test-threads=1 --nocapture

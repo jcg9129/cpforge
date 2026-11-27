@@ -183,3 +183,6 @@ mod file_io_copy;
     any(test, target_os = "linux", target_os = "macos")
 ))]
 pub(crate) mod file_io_hooks;
+
+#[cfg(test)]
+pub(crate) use sys::{ProcessSample, process_sample};

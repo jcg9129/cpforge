@@ -2831,9 +2831,18 @@ pub(crate) fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send
             .stack_size(8 << 20)
             .spawn_scoped(scope, move || {
                 runtime(async {
-                    tokio::time::timeout(Duration::from_secs(120), future())
-                        .await
-                        .expect("engine fixture timed out");
+                    tokio::time::timeout(
+                        Duration::from_secs(
+                            if std::env::var_os("CPF_STRESS_LONG_TEST").is_some() {
+                                21600
+                            } else {
+                                120
+                            },
+                        ),
+                        future(),
+                    )
+                    .await
+                    .expect("engine fixture timed out");
                 });
             })
             .unwrap()
