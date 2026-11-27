@@ -70,13 +70,22 @@ impl RunRelease {
         if !self.0.dropped.load(Ordering::Acquire) {
             return Err(AdmissionError::State);
         }
-        self.0
-            .committed
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |committed| {
-                committed.checked_sub(bytes)
-            })
-            .map(|_| ())
-            .map_err(|_| AdmissionError::State)
+        // A compare-exchange loop: `fetch_update` is deprecated on current
+        // toolchains, and its replacement does not exist at the MSRV.
+        let committed = &self.0.committed;
+        let mut current = committed.load(Ordering::Acquire);
+        loop {
+            let next = current.checked_sub(bytes).ok_or(AdmissionError::State)?;
+            match committed.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     fn committed(&self) -> u64 {
