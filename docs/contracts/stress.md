@@ -827,8 +827,13 @@ P, V, W, E, F, S, D; report contract §2.9).
 Every row is one named test. **Injected** rows run the job engine with an
 injected executor (each run's outcome scripted: class, exit, captured
 bytes written through the engine's own file sinks, durations from a
-controlled clock), on Linux, macOS and Windows, so files, bytes and
-reservations are real while no process starts. **Real** rows run real
+controlled clock), on Linux and macOS, so files, bytes and
+reservations are real while no process starts. Windows refuses every job
+command before admission (report contract §5.2), so these rows are
+required there only once job execution is supported on Windows; until
+then they may run on Windows where they are part of the ordinary test
+suite, and the long ones (the plateaus and other dedicated fixtures) do
+not. **Real** rows run real
 fixture programs on Linux and macOS; on Windows the same command lines
 assert the refusal (status 10, no job directory). Each row asserts exact
 counts (iterations admitted and retired, runs started, saved and counted
@@ -841,7 +846,7 @@ chosen entry), `stress.promote` (before step 2 of §7.5), `stress.clock`
 (initial cumulative counter values, debug builds only), plus those of
 report contract §9.
 
-### 10.1 Lifecycle and plateau (injected, all OSes)
+### 10.1 Lifecycle and plateau (injected, Linux and macOS)
 
 | Id | Fixture | Expected |
 |---|---|---|
@@ -850,7 +855,7 @@ report contract §9.
 | ST-L03 | intent at `stress.run_admit` of `7.candidate` (batch) and of the candidate pair (interactive) | the candidate `skipped{cancelled}`; class `cancelled` (S2/T2); disposition `keep`: `iterations/7.*` kept with persisted spec, record and `cleanup.log` of each admitted run; retired 8; no further admission |
 | ST-L04 | intent while `7.candidate` runs (scripted long run) | the run stopped (class `cancelled`), iteration `cancelled`, as ST-L03 |
 | ST-L05 | intent at `stress.retire` R7 of a saved failure | the promotion completes (`promoted`), settlement completes, no further iteration |
-| ST-L06 | **plateau**: batch, every iteration passes, each run writing 4 KiB stdout and 1 KiB stderr, 10 000 iterations; samples at quiescence after R11 of k = 999, 1 999, …, 9 999 (10 samples) | retired exactly 10 000, runs started exactly 50 000; at all 10 samples: the file count and the logical bytes under the job directory equal the first sample's exactly; retained bytes equal the first sample's and reserved bytes equal 2 × B_S exactly; in-memory records, encoded specs, pending persistence cells and queued artefacts 0; cleanup slots held 0, thread credits held equal to the job's own 2 (E §3.3), cleanup-service occupancy 0; thread count (Linux `/proc/self/task`, macOS `task_threads`, Windows Toolhelp thread snapshot restricted to threads whose start address lies in the cpf executable image) and open descriptors (Linux `/proc/self/fd`, macOS `/dev/fd`, Windows `GetProcessHandleCount`) equal the first sample's; on Windows, threads whose start address lies in `ntdll.dll` (the system thread pool, which Windows starts and retires on its own schedule) are counted separately and never exceed the first sample's count; resident memory (Linux `VmRSS`, macOS `task_info` resident size after the E §10.2 validation, Windows working set) ≤ first sample + 16 MiB; the report has `iterations.retired = "10000"`, one class `passed` with count `"10000"`, no failure refs, size ≤ B_S |
+| ST-L06 | **plateau**: batch, every iteration passes, each run writing 4 KiB stdout and 1 KiB stderr, 10 000 iterations; samples at quiescence after R11 of k = 999, 1 999, …, 9 999 (10 samples) | retired exactly 10 000, runs started exactly 50 000; at all 10 samples: the file count and the logical bytes under the job directory equal the first sample's exactly; retained bytes equal the first sample's and reserved bytes equal 2 × B_S exactly; in-memory records, encoded specs, pending persistence cells and queued artefacts 0; cleanup slots held 0, thread credits held equal to the job's own 2 (E §3.3), cleanup-service occupancy 0; thread count (Linux `/proc/self/task`, macOS `task_threads`, Windows Toolhelp thread snapshot) and open descriptors (Linux `/proc/self/fd`, macOS `/dev/fd`, Windows `GetProcessHandleCount`) equal the first sample's; resident memory (Linux `VmRSS`, macOS `task_info` resident size after the E §10.2 validation, Windows working set) ≤ first sample + 16 MiB; the report has `iterations.retired = "10000"`, one class `passed` with count `"10000"`, no failure refs, size ≤ B_S |
 | ST-L07 | plateau, interactive shape (8 runs, transcripts reserved per session), 10 000 iterations | as ST-L06 with 80 000 runs |
 | ST-L08 | plateau with failures: `--keep-going`, every iteration `candidate_failure`, 10 000 iterations | saved exactly 20 (k = 0…19, all `promoted`), `not_saved` 9 980; from the first sample on, files and bytes in the job directory equal (the base plus 20 × the persisted metadata of 5 runs); failure refs 20, `failures_dropped` 9 980; exactly 20 directories under `stress/failures/` |
 | ST-L09 | removal failure injected at R10 of k = 5 (one entry of `iterations/5.candidate/cwd/`) | no iteration 6 admitted (admitted 6, retired 6), stop `cleanup_failed`, verdict `stress_cleanup_failed`, status 10, `cleanup_failed.paths` names exactly that entry, its bytes still retained; a later `cpf clean --apply` prunes the job |

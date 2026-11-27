@@ -1159,26 +1159,13 @@ async fn plateau(iterations: u64, stdout: usize, stderr: usize) {
                 let mut samples = observed
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // ST-L06: on Windows `threads` counts only threads starting
-                // in the cpf image (equal to the first sample's); ntdll pool
-                // threads never exceed the first sample's count, and a thread
-                // starting anywhere else fails. Elsewhere `threads` is every
-                // thread and the other two counts are 0.
-                let first_threads = samples.first().map_or("", |first| first.threads.as_str());
-                assert_eq!(
-                    process.foreign_threads,
-                    0,
-                    "threads after iteration {iteration}:\n{}\nfirst sample:\n{first_threads}",
-                    supervisor::thread_report()
-                );
                 if let Some(first) = samples.first() {
                     assert_eq!(files, first.files);
                     assert_eq!(usage.retained, first.retained);
-                    assert!(
-                        process.threads == first.process.threads
-                            && process.system_threads <= first.process.system_threads,
-                        "threads after iteration {iteration} ({process:?}, first {:?}):\n{}\nfirst sample:\n{}",
-                        first.process,
+                    assert_eq!(
+                        process.threads,
+                        first.process.threads,
+                        "threads after iteration {iteration}:\n{}\nfirst sample:\n{}",
                         supervisor::thread_report(),
                         first.threads
                     );
