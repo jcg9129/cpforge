@@ -2617,8 +2617,35 @@ fn search_exit_statuses_and_missing_inventory() {
     }
 }
 
+/// Runs the scenario in a fresh, single-threaded copy of this test binary.
+/// Without `pipe2`, std creates the child's stdout pipe and marks it
+/// close-on-exec in two steps (Darwin), so a cpf spawned meanwhile by another
+/// test thread can inherit the read end. That copy keeps the pipe readable
+/// after the drop below: the document is then delivered, and re-raising
+/// SIGINT is the correct exit (report contract §5.3), not exit 11.
 #[test]
 fn cancelled_search_with_broken_delivery_exits_eleven() {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "isolated_cancelled_search_with_broken_delivery",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    // A filter that matched nothing would also succeed.
+    assert!(stdout.contains("1 passed"), "{output:?}");
+}
+
+/// Only meaningful single-threaded; see the test above.
+#[test]
+#[ignore = "run in isolation by cancelled_search_with_broken_delivery_exits_eleven"]
+fn isolated_cancelled_search_with_broken_delivery() {
     let w = search_ten();
     let mut child = signal_command(&w, &["search", "p", "--json"])
         .env("CPF_STORAGE_PAUSE_AT", "search.before_action#20")
