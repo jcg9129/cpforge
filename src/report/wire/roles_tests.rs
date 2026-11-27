@@ -252,6 +252,30 @@ fn invalid_role_evidence_is_rejected() {
         crate::report::DocumentKind::JobReport
     );
 }
+/// D1: only a stress report lists generator or brute roles. A test report
+/// that encodes with a checker role is refused once either is added.
+#[test]
+fn non_stress_reports_refuse_generator_and_brute_roles() {
+    let mut report = tests::passing();
+    report.details.roles = vec![built(r::Header::NotApplicable)];
+    report.details.roles[0].profile = Some(r::JudgeProfile::Simple);
+    report.details.roles[0].build = None;
+    encode_report_data(&report).unwrap();
+    for role in [r::RoleName::Generator, r::RoleName::Brute] {
+        let mut extra = built(r::Header::NotApplicable);
+        extra.role = role;
+        extra.profile = None;
+        extra.build = None;
+        let mut refused = report.clone();
+        refused.details.roles.push(extra);
+        let error = encode_report_data(&refused).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "generator and brute roles belong to stress jobs",
+            "{role:?}"
+        );
+    }
+}
 #[test]
 fn judge_warning_vectors_round_trip_and_fit() {
     let mut values = Vec::new();

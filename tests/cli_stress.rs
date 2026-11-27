@@ -339,7 +339,8 @@ fn st_r08_brute_exit_and_invalid_float_answer_skip_candidate() {
     for (source, config, reason) in [
         ("raise SystemExit(1)\n", "", "nonzero_exit"),
         (
-            "print('not-a-number')\n",
+            // Compare spec §5.5: a `special` token is an invalid float answer.
+            "print('nan')\n",
             "compare = { float = { abs = 0.0001, rel = 0.0001 } }",
             "invalid_answer",
         ),

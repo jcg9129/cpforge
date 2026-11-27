@@ -1880,7 +1880,7 @@ fn unavailable_saving_keeps_complete_failure_directories() {
 }
 
 /// D1 through the real encoder: a stress report may list all five roles,
-/// generator and brute included; any other job kind refuses them.
+/// generator and brute included.
 #[test]
 fn stress_report_encodes_every_role_and_other_kinds_refuse_stress_roles() {
     run_test(move || async move {
@@ -1943,13 +1943,7 @@ fn stress_report_encodes_every_role_and_other_kinds_refuse_stress_roles() {
         );
         report::wire::read::read_roles(&value["roles"], true).unwrap();
         assert!(report::wire::read::read_roles(&value["roles"], false).is_err());
-        let mut other = data.clone();
-        other.command = report::JobKind::Test;
-        other.details.stress = None;
-        assert!(
-            report::wire::encode_report_data(&other)
-                .is_err_and(|e| e.to_string().contains("stress jobs"))
-        );
+        // Other job kinds: report::wire::roles_tests (a passing test report).
         drop((report, persistence, executor));
         released_budget(&budget).await;
     });
