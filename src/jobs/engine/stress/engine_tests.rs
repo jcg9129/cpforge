@@ -679,7 +679,10 @@ async fn deadline_case(transfer: bool) {
     );
     let leftover =
         PathBuf::from("iterations").join(if transfer { "0.checker" } else { "5.candidate" });
-    assert_eq!(stress(&report).cleanup_failed.paths, [leftover.clone()]);
+    assert_eq!(
+        stress(&report).cleanup_failed.paths,
+        std::slice::from_ref(&leftover)
+    );
     assert!(report.data().job.dir.join(&leftover).is_dir());
     assert!(!fake.writer.as_ref().unwrap().is_finished());
     tokio::time::advance(Duration::from_secs(3)).await;
@@ -1057,11 +1060,13 @@ fn tree_size(path: &Path) -> (u64, u64) {
     (files, bytes)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PlateauSample {
     files: (u64, u64),
     retained: u64,
     process: supervisor::ProcessSample,
+    /// Every thread of the first sample, printed if a later count differs.
+    threads: String,
 }
 
 async fn plateau(iterations: u64, stdout: usize, stderr: usize) {
@@ -1108,18 +1113,33 @@ async fn plateau(iterations: u64, stdout: usize, stderr: usize) {
                 let usage = accounting.usage();
                 assert_eq!(usage.reserved, 2 * STRESS_REPORT_BOUND as u64);
                 let process = supervisor::process_sample();
-                let mut samples = observed.lock().unwrap();
+                // A failed sample must not poison the later ones' report.
+                let mut samples = observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(first) = samples.first() {
                     assert_eq!(files, first.files);
                     assert_eq!(usage.retained, first.retained);
-                    assert_eq!(process.threads, first.process.threads);
+                    assert_eq!(
+                        process.threads,
+                        first.process.threads,
+                        "threads after iteration {iteration}:\n{}\nfirst sample:\n{}",
+                        supervisor::thread_report(),
+                        first.threads
+                    );
                     assert_eq!(process.descriptors, first.process.descriptors);
                     assert!(process.resident <= first.process.resident + (16 << 20));
                 }
+                let threads = if samples.is_empty() {
+                    supervisor::thread_report()
+                } else {
+                    String::new()
+                };
                 samples.push(PlateauSample {
                     files,
                     retained: usage.retained,
                     process,
+                    threads,
                 });
             }
         }
@@ -1132,7 +1152,13 @@ async fn plateau(iterations: u64, stdout: usize, stderr: usize) {
     let started = Instant::now();
     let report = engine.run(&mut fake, &mut persistence, &mut NoHooks).await;
     eprintln!("{iterations} iterations: {:?}", started.elapsed());
-    assert_eq!(samples.lock().unwrap().len(), 10);
+    assert_eq!(
+        samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        10
+    );
     let summary = stress(&report);
     assert_eq!(summary.counters.admitted, iterations);
     assert_eq!(summary.counters.retired, iterations);
@@ -1449,12 +1475,10 @@ fn st_l23_engine_saved_iterations_preserve_one_persistence_tail() {
                 for reference in [&run.spec, &run.record, &run.cleanup] {
                     assert_eq!(
                         reference.error,
-                        if k < 2 {
-                            None
-                        } else if k == 2 {
-                            Some(PersistError::Timeout)
-                        } else {
-                            Some(PersistError::WorkerUnavailable)
+                        match k.cmp(&2) {
+                            std::cmp::Ordering::Less => None,
+                            std::cmp::Ordering::Equal => Some(PersistError::Timeout),
+                            std::cmp::Ordering::Greater => Some(PersistError::WorkerUnavailable),
                         }
                     );
                     if k < 2 {

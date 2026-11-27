@@ -120,3 +120,124 @@ pub(crate) fn process_sample() -> ProcessSample {
         }
     }
 }
+
+/// One line per thread of this process, for a failed thread-count equality.
+#[cfg(target_os = "linux")]
+pub(crate) fn thread_report() -> String {
+    let mut report = String::new();
+    for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+        let name = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+        report.push_str(&format!(
+            "thread {} name {:?}\n",
+            task.file_name().to_string_lossy(),
+            name.trim_end()
+        ));
+    }
+    report
+}
+
+/// One line per thread of this process, for a failed thread-count equality.
+#[cfg(target_os = "macos")]
+pub(crate) fn thread_report() -> String {
+    String::from("(per-thread details are not collected on macOS)\n")
+}
+
+/// One line per thread of this process: Toolhelp id, the Win32 start address
+/// (`NtQueryInformationThread`, ThreadQuerySetWin32StartAddress), the module
+/// containing it, and the thread description, for a failed thread-count
+/// equality.
+#[cfg(windows)]
+pub(crate) fn thread_report() -> String {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, HMODULE, INVALID_HANDLE_VALUE, LocalFree,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetThreadDescription, OpenThread, THREAD_QUERY_INFORMATION,
+        THREAD_QUERY_LIMITED_INFORMATION,
+    };
+    type QueryThread =
+        unsafe extern "system" fn(HANDLE, i32, *mut core::ffi::c_void, u32, *mut u32) -> i32;
+    const THREAD_QUERY_SET_WIN32_START_ADDRESS: i32 = 9;
+    let mut report = String::new();
+    let ntdll: Vec<u16> = "ntdll.dll\0".encode_utf16().collect();
+    // SAFETY: ntdll is mapped into every process; the transmuted pointer has
+    // NtQueryInformationThread's documented signature. Every buffer below is
+    // writable for the size passed; opened handles are closed, the described
+    // string is freed with LocalFree, and module lookups take no reference.
+    unsafe {
+        let query = GetProcAddress(
+            GetModuleHandleW(ntdll.as_ptr()),
+            c"NtQueryInformationThread".as_ptr().cast(),
+        )
+        .map(|f| std::mem::transmute::<unsafe extern "system" fn() -> isize, QueryThread>(f));
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return String::from("(no thread snapshot)\n");
+        }
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut next = Thread32First(snapshot, &mut entry);
+        while next != 0 {
+            if entry.th32OwnerProcessID == std::process::id() {
+                let mut start = 0usize;
+                let mut name = String::new();
+                let mut module = String::new();
+                let thread = OpenThread(
+                    THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION,
+                    0,
+                    entry.th32ThreadID,
+                );
+                if !thread.is_null() {
+                    if let Some(query) = query {
+                        query(
+                            thread,
+                            THREAD_QUERY_SET_WIN32_START_ADDRESS,
+                            (&mut start as *mut usize).cast(),
+                            std::mem::size_of::<usize>() as u32,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    let mut description = std::ptr::null_mut();
+                    if GetThreadDescription(thread, &mut description) >= 0 && !description.is_null()
+                    {
+                        let mut len = 0;
+                        while *description.add(len) != 0 {
+                            len += 1;
+                        }
+                        name =
+                            String::from_utf16_lossy(std::slice::from_raw_parts(description, len));
+                        LocalFree(description.cast());
+                    }
+                    CloseHandle(thread);
+                }
+                let mut handle: HMODULE = std::ptr::null_mut();
+                if start != 0
+                    && GetModuleHandleExW(
+                        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        start as *const u16,
+                        &mut handle,
+                    ) != 0
+                {
+                    let mut path = [0u16; 512];
+                    let n = GetModuleFileNameW(handle, path.as_mut_ptr(), path.len() as u32);
+                    module = String::from_utf16_lossy(&path[..(n as usize).min(path.len())]);
+                }
+                report.push_str(&format!(
+                    "thread {} start {start:#x} module {module:?} name {name:?}\n",
+                    entry.th32ThreadID
+                ));
+            }
+            next = Thread32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+    }
+    report
+}

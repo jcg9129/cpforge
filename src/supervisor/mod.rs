@@ -185,4 +185,4 @@ mod file_io_copy;
 pub(crate) mod file_io_hooks;
 
 #[cfg(test)]
-pub(crate) use sys::{ProcessSample, process_sample};
+pub(crate) use sys::{ProcessSample, process_sample, thread_report};

@@ -46,7 +46,7 @@ cpf-fixture = { path = "crates/cpf-fixture" }
 
 # Test helpers only: crash-dialog suppression and ordinal environment conformance.
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_Debug", "Win32_Globalization", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_Debug", "Win32_Globalization", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

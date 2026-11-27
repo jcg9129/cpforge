@@ -74,4 +74,4 @@ pub(crate) mod file_io;
 #[cfg(test)]
 mod process_sample;
 #[cfg(test)]
-pub(crate) use process_sample::{ProcessSample, process_sample};
+pub(crate) use process_sample::{ProcessSample, process_sample, thread_report};
