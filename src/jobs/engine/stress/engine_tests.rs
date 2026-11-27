@@ -557,6 +557,21 @@ fn st_l10_engine_stalled_sink_reaches_terminal_and_retains_leftovers() {
     });
 }
 
+/// Real-time bound of every busy wait in these fixtures: a paused Tokio clock
+/// never advances while a task stays runnable, so its timeouts cannot fire.
+const REAL_TIME_LIMIT: Duration = Duration::from_secs(60);
+
+async fn yield_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let limit = std::time::Instant::now() + REAL_TIME_LIMIT;
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < limit,
+            "timed out waiting for {what}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 // The injected writer/creation owns resources independently of its immutable
 // snapshot. Both gates stay closed through R1 and R6, and open at t = 8 s.
 async fn deadline_case(transfer: bool) {
@@ -594,12 +609,13 @@ async fn deadline_case(transfer: bool) {
         report
     };
     let driver = async {
-        let begin = loop {
-            if let Some(at) = *r6.lock().unwrap() {
-                break at;
-            }
-            tokio::task::yield_now().await;
-        };
+        // Yielding keeps the paused clock still: R6's deadline cannot pass
+        // before the explicit advances below.
+        yield_until("the R6 step of the stalled iteration", || {
+            r6.lock().unwrap().is_some()
+        })
+        .await;
+        let begin = r6.lock().unwrap().unwrap();
         // R1 accepted the snapshot while the physical operation is blocked.
         assert_eq!(supervisor::debug_counters().slots_in_use, 1);
         assert!(!*finished.lock().unwrap());
@@ -607,8 +623,17 @@ async fn deadline_case(transfer: bool) {
         tokio::task::yield_now().await;
         assert!(!*finished.lock().unwrap());
         tokio::time::advance(Duration::from_millis(1)).await;
+        // Tokio rounds a timer up to its next millisecond tick, and the clock
+        // was paused at a fractional offset: exactly 5 s may still be short of
+        // R6's tick. Sleeping lets the idle runtime auto-advance to it, which
+        // busy yielding would prevent forever.
+        let limit = std::time::Instant::now() + REAL_TIME_LIMIT;
         while !*finished.lock().unwrap() {
-            tokio::task::yield_now().await;
+            assert!(
+                std::time::Instant::now() < limit,
+                "the job did not finish after R6's deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let waited = begin.elapsed();
         assert!(waited >= Duration::from_secs(5));
@@ -685,7 +710,8 @@ async fn deadline_case(transfer: bool) {
     );
     assert!(report.data().job.dir.join(&leftover).is_dir());
     assert!(!fake.writer.as_ref().unwrap().is_finished());
-    tokio::time::advance(Duration::from_secs(3)).await;
+    let release_at = r6.lock().unwrap().unwrap() + Duration::from_secs(8);
+    tokio::time::advance(release_at.saturating_duration_since(tokio::time::Instant::now())).await;
     assert_eq!(
         r6.lock().unwrap().unwrap().elapsed(),
         Duration::from_secs(8)
@@ -959,10 +985,26 @@ fn isolated(name: &str, slow: bool) -> bool {
     if slow {
         command.env("CPF_STRESS_LONG_TEST", "1");
     }
-    assert!(
-        command.status().unwrap().success(),
-        "isolated fixture {name}"
-    );
+    // Bounded by real time beyond the child's own watchdog (run_test).
+    let limit = std::time::Instant::now()
+        + if slow {
+            Duration::from_secs(21600 + 120)
+        } else {
+            Duration::from_secs(300)
+        };
+    let mut child = command.spawn().unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("isolated fixture {name} did not finish in real time");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "isolated fixture {name}");
     false
 }
 

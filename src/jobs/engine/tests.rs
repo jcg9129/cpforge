@@ -2826,29 +2826,50 @@ impl Drop for ReleasePersistenceGate {
 // Match the CLI's stack for fixtures that drive the complete engine. The
 // injected executor keeps these persistence fixtures portable to Windows.
 pub(crate) fn run_test<F: Future<Output = ()>>(future: impl FnOnce() -> F + Send) {
+    let limit = Duration::from_secs(if std::env::var_os("CPF_STRESS_LONG_TEST").is_some() {
+        21600
+    } else {
+        120
+    });
+    // A fixture may pause Tokio's clock, and a blocked or busy runtime never
+    // fires a Tokio timeout. This watchdog measures real time: a fixture that
+    // outlives it cannot be unwound, so it reports and ends the process rather
+    // than hang the run.
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let caller = std::thread::current()
+        .name()
+        .unwrap_or("engine fixture")
+        .to_owned();
+    std::thread::Builder::new()
+        .name("cpf-test-watchdog".into())
+        .spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                finished.recv_timeout(limit + Duration::from_secs(30))
+            {
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!("{caller}: engine fixture exceeded {limit:?} of real time\n")
+                        .as_bytes(),
+                );
+                std::process::exit(101);
+            }
+        })
+        .unwrap();
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(8 << 20)
             .spawn_scoped(scope, move || {
                 runtime(async {
-                    tokio::time::timeout(
-                        Duration::from_secs(
-                            if std::env::var_os("CPF_STRESS_LONG_TEST").is_some() {
-                                21600
-                            } else {
-                                120
-                            },
-                        ),
-                        future(),
-                    )
-                    .await
-                    .expect("engine fixture timed out");
+                    tokio::time::timeout(limit, future())
+                        .await
+                        .expect("engine fixture timed out");
                 });
             })
             .unwrap()
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     });
+    drop(done);
 }
 
 #[test]
@@ -3526,13 +3547,17 @@ fn stub_listing_boundary_reconciles_every_test_execution_on_all_platforms() {
 // Worker credits can return before the last JobLease destructor clears the
 // retained bytes. Observe the guaranteed release itself, with a deadline.
 async fn released_budget(budget: &crate::storage::budget::JobBudget) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while budget.usage() != crate::storage::budget::BudgetUsage::default() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("cleanup did not release job accounting");
+    // Real time: under a paused Tokio clock a busy loop never lets a Tokio
+    // timeout expire.
+    let limit = Instant::now() + Duration::from_secs(5);
+    while budget.usage() != crate::storage::budget::BudgetUsage::default() {
+        assert!(
+            Instant::now() < limit,
+            "cleanup did not release job accounting: {:?}",
+            budget.usage()
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 #[cfg(all(
